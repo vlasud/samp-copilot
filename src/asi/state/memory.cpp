@@ -28,6 +28,27 @@ bool IsWritableProtection(DWORD protect) {
                      PAGE_EXECUTE_WRITECOPY)) != 0;
 }
 
+// Scans one region for a byte sequence, tolerating the region going away
+// mid-scan. VirtualQuery only says a page was mapped a moment ago; another
+// thread is free to unmap it while we read, and a diagnostic must not be able
+// to fault for that. No C++ objects here, which is what __try requires.
+std::size_t ScanRegionGuarded(const char* begin, std::size_t bytes,
+                              const char* needle, std::size_t needle_length,
+                              std::uintptr_t* hits, std::size_t max_hits) {
+  std::size_t found = 0;
+  __try {
+    if (bytes < needle_length) return 0;
+    const char* end = begin + bytes - needle_length + 1;
+    for (const char* p = begin; p < end && found < max_hits; ++p) {
+      if (std::memcmp(p, needle, needle_length) != 0) continue;
+      hits[found++] = reinterpret_cast<std::uintptr_t>(p);
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    // Whatever was found before the page disappeared is still valid.
+  }
+  return found;
+}
+
 }  // namespace
 
 Module FindModule(const wchar_t* name) {
@@ -150,16 +171,18 @@ std::vector<Hit> Scan(const std::vector<Region>& regions,
     if (hits.size() >= max_hits || scanned >= budget_bytes) break;
     if (region.size < needle.size()) continue;
 
-    const auto* begin = reinterpret_cast<const char*>(region.base);
-    const auto* end   = begin + region.size - needle.size() + 1;
-    for (const char* p = begin; p < end; ++p) {
-      if (std::memcmp(p, needle.data(), needle.size()) != 0) continue;
+    std::uintptr_t addresses[64];
+    constexpr std::size_t kSlots = sizeof(addresses) / sizeof(addresses[0]);
+    const std::size_t room = max_hits - hits.size();
+    const std::size_t found = ScanRegionGuarded(
+        reinterpret_cast<const char*>(region.base), region.size, needle.data(),
+        needle.size(), addresses, room < kSlots ? room : kSlots);
+    for (std::size_t i = 0; i < found; ++i) {
       Hit hit;
-      hit.address = reinterpret_cast<std::uintptr_t>(p);
+      hit.address = addresses[i];
       hit.rva = rva_origin ? static_cast<std::uint32_t>(hit.address - rva_origin)
                            : 0;
       hits.push_back(hit);
-      if (hits.size() >= max_hits) break;
     }
     scanned += region.size;
   }

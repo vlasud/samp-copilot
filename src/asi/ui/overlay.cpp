@@ -9,6 +9,7 @@
 
 #include <spdlog/common.h>
 
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -56,6 +57,29 @@ const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
 const ImVec4 kAmber{0.95f, 0.75f, 0.30f, 1.0f};
 const ImVec4 kRed  {0.95f, 0.40f, 0.40f, 1.0f};
 const ImVec4 kGrey {0.60f, 0.60f, 0.60f, 1.0f};
+
+// Results of the posted diagnostics: written by a task on the game thread,
+// read by the panel on a later frame.
+std::mutex  g_summary_mutex;
+std::string g_probe_summary;
+std::string g_report_summary;
+
+void SetProbeSummary(std::string text) {
+  std::lock_guard<std::mutex> lock(g_summary_mutex);
+  g_probe_summary = std::move(text);
+}
+std::string ProbeSummary() {
+  std::lock_guard<std::mutex> lock(g_summary_mutex);
+  return g_probe_summary;
+}
+void SetReportSummary(std::string text) {
+  std::lock_guard<std::mutex> lock(g_summary_mutex);
+  g_report_summary = std::move(text);
+}
+std::string ReportSummary() {
+  std::lock_guard<std::mutex> lock(g_summary_mutex);
+  return g_report_summary;
+}
 
 void Label(const char* name, const std::string& value,
            const ImVec4& colour = ImVec4{1, 1, 1, 1}) {
@@ -275,19 +299,26 @@ void DrawPanel() {
   // no round trip, and no need to be alt-tabbed away to ask for one.
   static std::string probe_summary;
   if (g_mode == Mode::kInteractive) {
+    // Posted rather than run here. A scan of the whole process inside the
+    // draw call charges any fault in it to the panel, and the panel is what
+    // gets switched off for it.
     if (ImGui::Button("Run memory probe")) {
-      try {
-        const json result = ProbeMemory(json::object());
-        LogProbeSummary(result);
-        const json search = result.value("search", json::object());
-        probe_summary = "'" + search.value("needle", std::string{"<none>"}) +
-                        "' found " +
-                        std::to_string(search.value("found", std::size_t{0})) +
-                        " time(s)";
-      } catch (const std::exception& e) {
-        probe_summary = std::string("failed: ") + e.what();
-      }
+      SetProbeSummary("running...");
+      Bridge::PostToGameThread([]() {
+        try {
+          const json result = ProbeMemory(json::object());
+          LogProbeSummary(result);
+          const json search = result.value("search", json::object());
+          SetProbeSummary(search.value("needle", std::string{"<none>"}) +
+                          " found " +
+                          std::to_string(search.value("found", std::size_t{0})) +
+                          " time(s)");
+        } catch (const std::exception& e) {
+          SetProbeSummary(std::string("failed: ") + e.what());
+        }
+      });
     }
+    probe_summary = ProbeSummary();
     if (!probe_summary.empty()) {
       ImGui::SameLine();
       ImGui::TextColored(kGrey, "%s", probe_summary.c_str());
@@ -303,17 +334,21 @@ void DrawPanel() {
                              needle, sizeof(needle));
     ImGui::SameLine();
     if (ImGui::Button("Dump SA-MP structures")) {
-      samp::DumpPlayerRecords();
-      const samp::ReportOutcome outcome = samp::WriteStructureReport(needle);
-      report_summary =
-          outcome.written
-              ? "wrote " + outcome.path + " - " +
-                    std::to_string(outcome.structure_hits) +
-                    " worth looking at, " +
-                    std::to_string(outcome.command_line_hits) +
-                    " command-line copies skipped"
-              : outcome.error;
+      SetReportSummary("running...");
+      const std::string wanted = needle;
+      Bridge::PostToGameThread([wanted]() {
+        samp::DumpPlayerRecords();
+        const samp::ReportOutcome outcome = samp::WriteStructureReport(wanted);
+        SetReportSummary(outcome.written
+                             ? "wrote " + outcome.path + " - " +
+                                   std::to_string(outcome.structure_hits) +
+                                   " worth looking at, " +
+                                   std::to_string(outcome.command_line_hits) +
+                                   " command-line copies skipped"
+                             : outcome.error);
+      });
     }
+    report_summary = ReportSummary();
     if (!report_summary.empty())
       ImGui::TextWrapped("%s", report_summary.c_str());
   }
@@ -333,7 +368,18 @@ void DrawPanel() {
 }  // namespace
 
 void Overlay::Render(IDirect3DDevice9* device) {
-  if (!device || g_disabled) return;
+  if (!device) return;
+  if (g_disabled) {
+    // The key is still polled, so a way back exists.
+    const bool down = (GetAsyncKeyState(kToggleKey) & 0x8000) != 0;
+    if (down && !g_toggle_down) {
+      g_disabled = false;
+      g_mode     = Mode::kPassive;
+      LOG_INFO("overlay re-enabled");
+    }
+    g_toggle_down = down;
+    return;
+  }
 
   // Focus is the earliest warning that a reset is coming, and unlike the
   // device state it is readable before anything has gone wrong yet.
@@ -399,10 +445,14 @@ void Overlay::Shutdown() { Teardown(); }
 void Overlay::DisableAfterFault() {
   // Deliberately does not tear ImGui down: whatever faulted may be mid-way
   // through its own state, and unwinding it now is another chance to crash.
+  //
+  // Nor is this permanent any more. A heavy diagnostic that faulted once cost
+  // the panel for the rest of the session with no way back - but the fault was
+  // in the work, not in the panel, and killing the interface over it was the
+  // wrong trade. F11 brings it back.
   g_disabled = true;
   g_mode     = Mode::kHidden;
-  LOG_ERROR("overlay faulted while drawing - switched off for this session, "
-            "the rest of the module keeps running");
+  LOG_ERROR("overlay faulted while drawing - hidden; press F11 to bring it back");
 }
 
 bool Overlay::disabled() { return g_disabled; }
