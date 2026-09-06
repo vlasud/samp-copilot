@@ -19,6 +19,11 @@ namespace {
 constexpr std::uint32_t kNetGamePointer = 0x21A0F8;
 // CNetGame begins with 32 bytes of padding, then the host address as text.
 constexpr std::uint32_t kHostAddress = 0x20;
+// The client's structures are packed: on this build the port sits at +0x225
+// and the pools pointer at +0x3CD, neither of them on a four-byte boundary.
+// Every search below therefore steps a byte at a time - stepping by four
+// silently finds nothing at all.
+constexpr std::uint32_t kSearchStep = 1;
 
 constexpr int kMaxPlayers = 1004;
 // CNetGame::Pools is nine pointers: actor, object, gang zone, label, textdraw,
@@ -164,8 +169,8 @@ void DumpNetGame(std::uintptr_t net_game, const std::string& host) {
     file << line;
   }
 
-  file << "\n\nblocks pointed to from +0x200 onwards\n";
-  for (std::uint32_t offset = 0x200; offset < 0x600; offset += 4) {
+  file << "\n\nblocks pointed to from +0x200 onwards, at any alignment\n";
+  for (std::uint32_t offset = 0x200; offset < 0x600; offset += 1) {
     std::uint32_t value = 0;
     if (!asi::mem::Read<std::uint32_t>(net_game + offset, &value)) break;
     if (!IsHeapPointer(value)) continue;
@@ -253,7 +258,7 @@ const Layout& ResolveLayout() {
   // Pools: a block of mostly-heap pointers at the tail of CNetGame.
   int pool_candidates = 0;
   for (std::uint32_t offset = kPoolsSearchFrom; offset < kPoolsSearchTo;
-       offset += 4) {
+       offset += kSearchStep) {
     std::uint32_t candidate = 0;
     if (!asi::mem::Read<std::uint32_t>(net_game + offset, &candidate)) continue;
     if (!IsHeapPointer(candidate)) continue;
@@ -273,7 +278,8 @@ const Layout& ResolveLayout() {
     for (int slot = 0; slot < kPoolSlotsToTry && !layout.player_pool; ++slot) {
       const std::uintptr_t player_pool = entries[slot];
       if (player_pool == 0 || !IsHeapPointer(player_pool)) continue;
-      for (std::uint32_t inner = 0; inner < kArraySearchTo; inner += 4) {
+      for (std::uint32_t inner = 0; inner < kArraySearchTo;
+           inner += kSearchStep) {
         if (!LooksLikeSlotArrays(player_pool, inner)) continue;
         layout.pools           = candidate;
         layout.player_pool     = player_pool;

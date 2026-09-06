@@ -139,6 +139,7 @@ the data:
 | What | How it is established |
 |---|---|
 | `CNetGame` | `*(samp.dll + 0x21A0F8)`, and only accepted if the host address at +0x20 matches the `-h` the launcher was given |
+| alignment | the client's structures are packed: the port sits at +0x225 and the pools pointer at +0x3CD, neither on a four-byte boundary, so every search steps one byte at a time |
 | `CNetGame::Pools` | nine consecutive heap pointers near the tail of CNetGame, found by that shape |
 | `CPlayerPool` slots | 1004 `CPlayerInfo*` followed by 1004 flags that are only ever 0 or 1 - a signature nothing else matches |
 | `std::string` | two plausible MSVC layouts; the one that yields a readable local player name is the one this client was built with |
