@@ -72,4 +72,8 @@ void ForgetLayout();
 // The local player and everyone in the pool. Game thread only.
 json ReadWorld();
 
+// Writes bot.playerinfo-dump.txt: the first occupied records, each word
+// classified, and the CRemotePlayer each one points at. Game thread only.
+bool DumpPlayerRecords();
+
 }  // namespace gtabot::samp

@@ -303,6 +303,7 @@ void DrawPanel() {
                              needle, sizeof(needle));
     ImGui::SameLine();
     if (ImGui::Button("Dump SA-MP structures")) {
+      samp::DumpPlayerRecords();
       const samp::ReportOutcome outcome = samp::WriteStructureReport(needle);
       report_summary =
           outcome.written

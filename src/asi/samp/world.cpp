@@ -269,6 +269,41 @@ void DumpPlayerInfo(const Layout& layout) {
                     value, note.c_str(), text);
       file << line;
     }
+
+    // CPlayerInfo is only the front door. Whatever the scoreboard is drawing
+    // may well live in the CRemotePlayer it points at, which nothing here has
+    // looked inside yet.
+    std::uint32_t remote = 0;
+    if (!asi::mem::Read<std::uint32_t>(info, &remote) || !IsHeapPointer(remote))
+      continue;
+    std::snprintf(line, sizeof(line), "  CRemotePlayer at 0x%08X\n",
+                  static_cast<unsigned>(remote));
+    file << line;
+
+    for (std::uint32_t offset = 0; offset < 0x80; offset += 4) {
+      std::uint32_t value = 0;
+      if (!asi::mem::Read<std::uint32_t>(remote + offset, &value)) break;
+
+      std::string note;
+      if (value == 0) {
+        note = "0";
+      } else if (IsHeapPointer(value)) {
+        note = "-> heap";
+      } else if (value < 100000) {
+        note = "int " + std::to_string(value);
+      } else {
+        const float as_float = *reinterpret_cast<const float*>(&value);
+        if (as_float > -20000.0f && as_float < 20000.0f &&
+            (as_float > 0.01f || as_float < -0.01f)) {
+          char buffer[32];
+          std::snprintf(buffer, sizeof(buffer), "float %.2f", as_float);
+          note = buffer;
+        }
+      }
+      std::snprintf(line, sizeof(line), "    r+0x%02X  %08X  %s\n", offset,
+                    value, note.c_str());
+      file << line;
+    }
   }
 
   LOG_INFO("wrote {} - pool resolved but no player has a ping", path);
@@ -534,6 +569,13 @@ const Layout& ResolveLayout() {
            layout.net_game, layout.host, layout.pools, layout.player_pool,
            layout.object_array, layout.local_name, layout.string_variant);
   return g_layout;
+}
+
+bool DumpPlayerRecords() {
+  const Layout& layout = ResolveLayout();
+  if (!layout.valid) return false;
+  DumpPlayerInfo(layout);
+  return true;
 }
 
 json ReadWorld() {
