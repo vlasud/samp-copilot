@@ -52,9 +52,15 @@ struct Layout {
   // CPlayerInfo is { player*, isNPC, align, name, score, ping }.
   std::uint32_t  score_at = 0;
   std::uint32_t  ping_at  = 0;
-  // True when the local player's own ping read back as a plausible number,
-  // which is the end-to-end check that the offsets above are right.
+  // True when CPlayerInfo's own shape checks out: a heap pointer where the
+  // remote player belongs and a 0/1 flag where the NPC bit belongs. That says
+  // the offsets are right; whether the server fills them in is separate.
   bool           confirmed = false;
+  // Whether anyone at all has a non-zero ping. Some servers never send them,
+  // and that is a different thing from reading the wrong place.
+  bool           ping_populated = false;
+  // Whether the local id names a slot that is also in the remote pool.
+  bool           local_id_occupied = false;
   // The host address read out of CNetGame - the proof the root pointer is real.
   std::string    host;
   std::string    note;

@@ -373,14 +373,37 @@ const Layout& ResolveLayout() {
     layout.score_at = 0x0C + layout.string_width;
     layout.ping_at  = layout.score_at + 4;
 
-    // m_localInfo orders them the other way round: pointer, ping, score. Our
-    // own ping is the one value on a live server that cannot legitimately be
-    // absent, so it is what confirms the whole chain.
-    std::uint32_t local_ping = 0;
-    if (asi::mem::Read<std::uint32_t>(
-            layout.player_pool + layout.local_name + layout.string_width + 4,
-            &local_ping))
-      layout.confirmed = local_ping > 0 && local_ping < 1500;
+    // Confirmation has to come from the shape of CPlayerInfo, not from any
+    // value being non-zero: plenty of servers never send scores or pings at
+    // all, and treating that as a failure would condemn a correct read.
+    const auto* objects = reinterpret_cast<const std::uint32_t*>(
+        layout.player_pool + layout.object_array);
+    const auto* present = reinterpret_cast<const std::uint32_t*>(
+        layout.player_pool + layout.not_empty_array);
+
+    int checked = 0;
+    int well_formed = 0;
+    int with_ping = 0;
+    for (int i = 0; i < kMaxPlayers && checked < 16; ++i) {
+      if (present[i] == 0) continue;
+      ++checked;
+
+      std::uint32_t remote = 0;
+      std::uint32_t is_npc = 0;
+      std::uint32_t ping = 0;
+      asi::mem::Read<std::uint32_t>(objects[i], &remote);
+      asi::mem::Read<std::uint32_t>(objects[i] + 0x04, &is_npc);
+      if (asi::mem::Read<std::uint32_t>(objects[i] + layout.ping_at, &ping) &&
+          ping > 0 && ping < 1500)
+        ++with_ping;
+
+      // A remote player pointer that is null or a heap address, and an NPC
+      // flag that is a flag. Anything else means we are not looking at a
+      // CPlayerInfo.
+      if (is_npc <= 1 && (remote == 0 || IsHeapPointer(remote))) ++well_formed;
+    }
+    layout.confirmed = checked >= 4 && well_formed == checked;
+    layout.ping_populated = with_ping > 0;
   }
 
   // The local id is the field before the local name, not the first plausible
@@ -393,22 +416,18 @@ const Layout& ResolveLayout() {
   if (layout.local_name >= 8) {
     const auto* present = reinterpret_cast<const std::uint32_t*>(
         layout.player_pool + layout.not_empty_array);
-    // Zero passes every test trivially, so a non-zero candidate wins; zero is
-    // only accepted when nothing else fits, since it is a legitimate id.
-    const std::uint32_t candidates[] = {layout.local_name - 6,
-                                        layout.local_name - 8};
-    for (bool want_non_zero : {true, false}) {
-      for (std::uint32_t offset : candidates) {
-        if (layout.local_id_at != 0) break;
-        std::uint16_t value = 0;
-        if (!asi::mem::Read<std::uint16_t>(layout.player_pool + offset, &value))
-          continue;
-        if (value >= kMaxPlayers) continue;
-        if (want_non_zero && value == 0) continue;
-        if (present[value] != 0) continue;
-        layout.local_id_at = offset;
-      }
-      if (layout.local_id_at != 0) break;
+    // The declaration puts the id right before the alignment padding and the
+    // name, so it is taken from there rather than searched for. Rejecting a
+    // candidate because its slot is occupied was a mistake: it assumed the
+    // local player is absent from the remote pool, and on this server that
+    // assumption pushed the search onto a field of zeroes instead.
+    const std::uint32_t offset = layout.local_name - 6;
+    std::uint16_t value = 0;
+    if (offset >= 4 &&
+        asi::mem::Read<std::uint16_t>(layout.player_pool + offset, &value) &&
+        value < kMaxPlayers) {
+      layout.local_id_at = offset;
+      layout.local_id_occupied = present[value] != 0;
     }
   }
 
@@ -484,8 +503,17 @@ json ReadWorld() {
   if (layout.local_id_at != 0) {
     std::uint16_t local_id = 0;
     if (asi::mem::Read<std::uint16_t>(layout.player_pool + layout.local_id_at,
-                                      &local_id))
+                                      &local_id)) {
       self["id"] = local_id;
+      // If that id is also in the remote pool, the name held there settles
+      // whether it is really us.
+      if (present[local_id] != 0) {
+        std::string pool_name;
+        if (ReadStdString(objects[local_id] + 0x0C, layout.string_variant,
+                          &pool_name))
+          self["name_in_pool"] = pool_name;
+      }
+    }
   }
 
   // Counted before the move: reading size() off a container that has already
@@ -502,7 +530,9 @@ json ReadWorld() {
         {"local_name_at", layout.local_name},
         {"local_id_at", layout.local_id_at},
         {"score_at", layout.score_at},
-        {"ping_at", layout.ping_at}}},
+        {"ping_at", layout.ping_at},
+        {"ping_populated", layout.ping_populated},
+        {"local_id_occupied", layout.local_id_occupied}}},
       {"self", std::move(self)},
       {"player_count", player_count},
       {"players", std::move(players)},
