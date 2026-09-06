@@ -63,6 +63,69 @@ constexpr std::uint32_t kRemoteVeh   = 0x04;
 constexpr std::uint32_t kRemoteTeam  = 0x08;
 constexpr std::uint32_t kRemoteState = 0x09;
 
+// Offsets inside the game's own CPed, taken from plugin-sdk's declarations for
+// GTA SA 1.0 US. Unlike everything above these are not SA-MP's, so they are
+// checkable against the HUD: the health bar on screen is this number.
+constexpr std::uint32_t kPedHealth      = 0x540;
+constexpr std::uint32_t kPedMaxHealth   = 0x544;
+constexpr std::uint32_t kPedArmour      = 0x548;
+constexpr std::uint32_t kPedVehicle     = 0x58C;
+constexpr std::uint32_t kPedWeapons     = 0x5A0;
+constexpr std::uint32_t kPedWeaponSlot  = 0x718;
+// CWeapon is 0x1C bytes: type, state, ammo in clip, total ammo.
+constexpr std::uint32_t kWeaponStride   = 0x1C;
+constexpr std::uint32_t kWeaponAmmoClip = 0x08;
+constexpr std::uint32_t kWeaponAmmo     = 0x0C;
+constexpr int           kWeaponSlots    = 13;
+
+// The id is what the game stores and what the agent should reason about; the
+// name is a convenience, and anything unrecognised stays unnamed rather than
+// being guessed at.
+const char* WeaponName(std::uint32_t id) {
+  switch (id) {
+    case 0:  return "fist";
+    case 1:  return "brass knuckles";
+    case 2:  return "golf club";
+    case 3:  return "nightstick";
+    case 4:  return "knife";
+    case 5:  return "baseball bat";
+    case 6:  return "shovel";
+    case 7:  return "pool cue";
+    case 8:  return "katana";
+    case 9:  return "chainsaw";
+    case 15: return "cane";
+    case 16: return "grenade";
+    case 17: return "tear gas";
+    case 18: return "molotov";
+    case 22: return "pistol";
+    case 23: return "silenced pistol";
+    case 24: return "desert eagle";
+    case 25: return "shotgun";
+    case 26: return "sawn-off shotgun";
+    case 27: return "combat shotgun";
+    case 28: return "micro smg";
+    case 29: return "mp5";
+    case 30: return "ak-47";
+    case 31: return "m4";
+    case 32: return "tec-9";
+    case 33: return "rifle";
+    case 34: return "sniper rifle";
+    case 35: return "rpg";
+    case 36: return "hs rocket";
+    case 37: return "flamethrower";
+    case 38: return "minigun";
+    case 39: return "satchel charge";
+    case 40: return "detonator";
+    case 41: return "spray can";
+    case 42: return "fire extinguisher";
+    case 43: return "camera";
+    case 44: return "night vision";
+    case 45: return "thermal goggles";
+    case 46: return "parachute";
+    default: return nullptr;
+  }
+}
+
 struct Position {
   float x = 0.0f;
   float y = 0.0f;
@@ -106,14 +169,59 @@ Position ReadEntityPosition(std::uintptr_t entity) {
   return out;
 }
 
+// Health, armour and what the ped is holding. `full` adds the weapon's ammo,
+// which is worth reporting for ourselves and noise for everyone else.
+json ReadPedDetails(std::uintptr_t game_ped, bool full) {
+  json out = json::object();
+
+  float health = 0.0f;
+  float max_health = 0.0f;
+  float armour = 0.0f;
+  // A ped's health runs 0..100 by default and servers raise the maximum, but
+  // nothing legitimate is negative or in the thousands.
+  if (asi::mem::Read<float>(game_ped + kPedHealth, &health) && health >= 0.0f &&
+      health < 10000.0f)
+    out["health"] = health;
+  if (asi::mem::Read<float>(game_ped + kPedMaxHealth, &max_health) &&
+      max_health > 0.0f && max_health < 10000.0f)
+    out["max_health"] = max_health;
+  if (asi::mem::Read<float>(game_ped + kPedArmour, &armour) && armour >= 0.0f &&
+      armour < 10000.0f)
+    out["armour"] = armour;
+
+  std::uint32_t vehicle = 0;
+  if (asi::mem::Read<std::uint32_t>(game_ped + kPedVehicle, &vehicle))
+    out["in_vehicle"] = IsHeapPointer(vehicle);
+
+  std::uint8_t slot = 0;
+  if (asi::mem::Read<std::uint8_t>(game_ped + kPedWeaponSlot, &slot) &&
+      slot < kWeaponSlots) {
+    const std::uintptr_t weapon =
+        game_ped + kPedWeapons + slot * kWeaponStride;
+    std::uint32_t type = 0;
+    if (asi::mem::Read<std::uint32_t>(weapon, &type) && type <= 46) {
+      out["weapon"] = type;
+      if (const char* name = WeaponName(type)) out["weapon_name"] = name;
+      if (full) {
+        std::uint32_t clip = 0;
+        std::uint32_t ammo = 0;
+        if (asi::mem::Read<std::uint32_t>(weapon + kWeaponAmmoClip, &clip))
+          out["ammo_in_clip"] = clip;
+        if (asi::mem::Read<std::uint32_t>(weapon + kWeaponAmmo, &ammo))
+          out["ammo"] = ammo;
+      }
+    }
+  }
+  return out;
+}
+
 // samp_ped is SA-MP's wrapper; the game's entity hangs off it.
-Position PositionOfSampPed(std::uint32_t samp_ped) {
-  if (!IsHeapPointer(samp_ped)) return {};
+std::uint32_t GamePedOfSampPed(std::uint32_t samp_ped) {
+  if (!IsHeapPointer(samp_ped)) return 0;
   std::uint32_t game_ped = 0;
   if (!asi::mem::Read<std::uint32_t>(samp_ped + kSampPedToGamePed, &game_ped))
-    return {};
-  if (!IsHeapPointer(game_ped)) return {};
-  return ReadEntityPosition(game_ped);
+    return 0;
+  return IsHeapPointer(game_ped) ? game_ped : 0;
 }
 
 Layout g_layout;
@@ -704,17 +812,16 @@ json ReadWorld() {
 
       std::uint32_t samp_ped = 0;
       asi::mem::Read<std::uint32_t>(remote + kRemotePed, &samp_ped);
-      const Position position = PositionOfSampPed(samp_ped);
+      const std::uint32_t game_ped = GamePedOfSampPed(samp_ped);
+      const Position position = ReadEntityPosition(game_ped);
       entry["streamed"] = position.valid;
       if (position.valid) {
         entry["pos"] = {position.x, position.y, position.z};
+        // Whether the person nearby is hurt and what they are holding is the
+        // sort of thing a decision actually turns on.
+        entry.update(ReadPedDetails(game_ped, /*full=*/false));
         ++streamed;
       }
-
-      std::uint32_t vehicle = 0;
-      if (asi::mem::Read<std::uint32_t>(remote + kRemoteVeh, &vehicle) &&
-          IsHeapPointer(vehicle))
-        entry["in_vehicle"] = true;
     } else {
       entry["streamed"] = false;
     }
@@ -755,8 +862,12 @@ json ReadWorld() {
         IsHeapPointer(local_player)) {
       std::uint32_t samp_ped = 0;
       asi::mem::Read<std::uint32_t>(local_player, &samp_ped);
-      const Position position = PositionOfSampPed(samp_ped);
-      if (position.valid) self["pos"] = {position.x, position.y, position.z};
+      const std::uint32_t game_ped = GamePedOfSampPed(samp_ped);
+      const Position position = ReadEntityPosition(game_ped);
+      if (position.valid) {
+        self["pos"] = {position.x, position.y, position.z};
+        self.update(ReadPedDetails(game_ped, /*full=*/true));
+      }
     }
   }
 

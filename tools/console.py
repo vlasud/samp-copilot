@@ -89,9 +89,16 @@ def run_command(client, line):
             rows.append((distance, player))
         rows.sort(key=lambda row: row[0])
         for distance, player in rows[:int(argument or 10)]:
+            marks = []
+            if player.get("in_vehicle"):
+                marks.append("in a vehicle")
+            if player.get("health") is not None:
+                marks.append("hp %.0f" % player["health"])
+            if player.get("weapon_name"):
+                marks.append(player["weapon_name"])
             print("  %6.1f m  id %-4d %-22s %s" % (
                 distance, player["id"], player["name"],
-                "in a vehicle" if player.get("in_vehicle") else ""), flush=True)
+                ", ".join(marks)), flush=True)
         print("  (%d streamed of %d in the pool)" % (
             len(rows), world.get("player_count", 0)), flush=True)
     elif command == "players":
