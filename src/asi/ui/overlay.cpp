@@ -36,6 +36,7 @@ bool               g_disabled    = false;
 IDirect3DDevice9*  g_device      = nullptr;
 HWND               g_window      = nullptr;
 bool               g_toggle_down = false;
+bool               g_resources_live = false;
 
 const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
 const ImVec4 kAmber{0.95f, 0.75f, 0.30f, 1.0f};
@@ -93,6 +94,22 @@ bool Initialise(IDirect3DDevice9* device) {
   LOG_INFO("overlay initialised on hwnd 0x{:08X} (F9 toggles it)",
            reinterpret_cast<std::uintptr_t>(g_window));
   return true;
+}
+
+// True when render target 0 is the swap chain's back buffer rather than one of
+// the game's own off-screen surfaces.
+bool IsBackBufferBound(IDirect3DDevice9* device) {
+  IDirect3DSurface9* target = nullptr;
+  if (FAILED(device->GetRenderTarget(0, &target)) || !target) return false;
+
+  IDirect3DSurface9* back = nullptr;
+  const bool same =
+      SUCCEEDED(device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back)) &&
+      back == target;
+
+  target->Release();
+  if (back) back->Release();
+  return same;
 }
 
 void PollToggle() {
@@ -178,6 +195,13 @@ void DrawPanel() {
 void Overlay::Render(IDirect3DDevice9* device) {
   if (!device || g_disabled) return;
 
+  // A lost device cannot be drawn on, and the game is about to Reset it. Let
+  // go of everything now rather than waiting to be told.
+  if (device->TestCooperativeLevel() != D3D_OK) {
+    OnLostDevice();
+    return;
+  }
+
   // The game can recreate its device outright rather than resetting it, which
   // leaves the backend pointing at a dead object.
   if (g_initialised && device != g_device) {
@@ -189,6 +213,13 @@ void Overlay::Render(IDirect3DDevice9* device) {
   PollToggle();
   if (!g_visible) return;
 
+  // Only the back buffer. GTA ends a scene for every off-screen target it
+  // renders - the radar, mirrors, the text baked onto signs - and drawing into
+  // one of those bakes this panel into a game texture, which is exactly what
+  // it looked like.
+  if (!IsBackBufferBound(device)) return;
+
+  g_resources_live = true;
   ImGui_ImplDX9_NewFrame();
   ImGui_ImplWin32_NewFrame();
   ImGui::NewFrame();
@@ -199,11 +230,17 @@ void Overlay::Render(IDirect3DDevice9* device) {
 }
 
 void Overlay::OnLostDevice() {
-  if (g_initialised) ImGui_ImplDX9_InvalidateDeviceObjects();
+  if (!g_initialised || !g_resources_live) return;
+  ImGui_ImplDX9_InvalidateDeviceObjects();
+  g_resources_live = false;
+  LOG_INFO("released d3d9 resources ahead of a device reset");
 }
 
 void Overlay::OnResetDevice() {
-  if (g_initialised) ImGui_ImplDX9_CreateDeviceObjects();
+  // Deliberately does not recreate anything here. ImGui_ImplDX9_NewFrame
+  // rebuilds the font texture on its own once the device is usable again, and
+  // doing it early - while the game may still be mid-reset - is how the
+  // recreate ends up on a device that is not ready.
 }
 
 void Overlay::Shutdown() { Teardown(); }

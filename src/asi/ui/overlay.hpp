@@ -20,8 +20,9 @@ class Overlay {
   // if the game hands us a different device than last time.
   static void Render(IDirect3DDevice9* device);
 
-  // Around the game's own Reset. Skipping these turns the first alt-tab back
-  // into the game into a crash.
+  // Releases every D3DPOOL_DEFAULT resource we hold. Idempotent, and it has to
+  // be: Reset fails with D3DERR_INVALIDCALL while any of them still exists,
+  // and the game shows its own error box and gives up.
   static void OnLostDevice();
   static void OnResetDevice();
 

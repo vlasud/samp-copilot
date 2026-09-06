@@ -58,8 +58,10 @@ The mod also writes `bot.asi.log` beside itself.
 reading:
 
 - `Present -> ...`, `EndScene -> ...`, `Reset -> ...` name the module that owns
-  each vtable slot. If they are not all `d3d9.dll`, another overlay (NVIDIA,
-  Steam, sampvoice) got there first and we are chaining onto its hook.
+  each vtable slot. On this machine Present and EndScene are `d3d9.dll` but
+  Reset is `apphelp.dll`: GTA SA runs under a Windows compatibility shim that
+  owns that slot. `Reset hook fired for the first time` says whether the shim
+  still routes through us.
 - `overlay faulted while drawing` means the panel hit an access violation and
   switched itself off. The rest of the module keeps running.
 - `CRASH ...` names the exception, the faulting module and offset, and the
@@ -77,6 +79,21 @@ you are in:
 
 Tools that need the game thread (`probe_memory`) time out with that same
 explanation rather than hanging.
+
+## Two mistakes worth not repeating
+
+**Drawing on every EndScene bakes the panel into game textures.** GTA ends a
+scene for each off-screen target it renders - the radar, mirrors, the text on
+signs - so an overlay drawn unconditionally ends up inside those textures and
+then appears, huge, on a prison wall. The panel now draws only when render
+target 0 is the swap chain back buffer.
+
+**Holding D3D resources across a device loss makes Reset fail.** Alt-tabbing
+out of exclusive fullscreen loses the device; `Reset` then returns
+`D3DERR_INVALIDCALL` (0x8876086C) while any D3DPOOL_DEFAULT resource is still
+alive, and the game gives up with its own error box. Resources are released on
+the first of three signals: `Present` returning `D3DERR_DEVICELOST`,
+`TestCooperativeLevel` reporting anything but `D3D_OK`, or the Reset hook.
 
 ## SA-MP versions
 
