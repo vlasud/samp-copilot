@@ -46,15 +46,24 @@ def main():
     r.check("hook installed", status["frame"]["hook_installed"] is True, status.get("verdict"))
     r.check("patch bytes intact", status["hook"]["present_intact"] is True or
             status["hook"]["endscene_intact"] is True, status.get("hook"))
-    rendering = status["frame"]["idle_ms"] < 2000
-    r.check("game is rendering", rendering,
-            "idle_ms=%s - alt-tab into the game and rerun" % status["frame"]["idle_ms"])
     r.check("SA-MP recognised", status["samp"]["loaded"] and
             status["samp"]["version"] != "unknown", status.get("samp"))
 
-    if not rendering:
-        print("\nThe game thread is parked, so the tools below cannot run.",
+    # Not a check. Typing in a terminal means the game is not the foreground
+    # window, so its render thread is parked and everything below would time
+    # out. That is the cost of asking from here, not a fault in the module.
+    if status["frame"]["idle_ms"] >= 2000:
+        print("", flush=True)
+        print("The game is not rendering (idle_ms=%s), which is normal while "
+              "you are reading this." % status["frame"]["idle_ms"], flush=True)
+        print("Nothing that needs the game thread can run. For the memory "
+              "probe, read what the", flush=True)
+        print("module logged by itself at startup:", flush=True)
+        print("    Get-Content D:\\SAMP\\bot.asi.log | Select-String probe",
               flush=True)
+        print("or press F11 twice in game and use the Run memory probe button.",
+              flush=True)
+        print("", flush=True)
         print("FAILURES: " + str(r.failures), flush=True)
         return 1 if r.failures else 0
 
