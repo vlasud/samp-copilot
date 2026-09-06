@@ -617,10 +617,7 @@ void DumpPools(const Layout& layout) {
 // instead, and four bytes each confined to a narrow range, agreeing across
 // half a dozen unrelated players, is a signature arbitrary memory does not
 // meet.
-constexpr std::uint32_t kSyncSearchTo   = 0x300;
 constexpr std::uint8_t  kMaxWeaponId    = 46;
-constexpr std::uint8_t  kMaxSpecialAction = 68;
-constexpr int           kSyncSamples    = 6;
 
 // The range the game reserves for vehicle models.
 constexpr std::int16_t kFirstVehicleModel = 400;
@@ -1000,11 +997,20 @@ bool DumpPlayerRecords() {
   return true;
 }
 
-// Collects the CRemotePlayer of every streamed player, then looks for the
-// offset where all of them read as a plausible health, armour, weapon and
-// special action - and where they are not all identical, since a row of
-// identical bytes proves nothing about what they mean.
-std::uint32_t FindSyncBlock(const Layout& layout) {
+// Finds m_fReportedHealth: the value the server sent, and the one SA-MP draws
+// over a nametag.
+//
+// A previous attempt matched on four bytes each within a plausible range and
+// picked up something else entirely - living players read back as 0 hp. Ranges
+// are too weak a claim when the samples resemble each other.
+//
+// A float is a much narrower target, and health has a giveaway: most players
+// are on exactly 100. A coordinate is never exactly 100.0f for half a dozen
+// people at once, so that, and not a range, is what identifies the field.
+constexpr std::uint32_t kRemoteWindow = 0x400;
+constexpr int           kHealthSamples = 6;
+
+std::uint32_t FindReportedHealth(const Layout& layout) {
   const auto* objects = reinterpret_cast<const std::uint32_t*>(
       layout.player_pool + layout.object_array);
   const auto* present = reinterpret_cast<const std::uint32_t*>(
@@ -1019,32 +1025,33 @@ std::uint32_t FindSyncBlock(const Layout& layout) {
     std::uint32_t samp_ped = 0;
     asi::mem::Read<std::uint32_t>(remote, &samp_ped);
     if (GamePedOfSampPed(samp_ped) == 0) continue;  // not streamed
+    if (!asi::mem::IsReadable(remote, kRemoteWindow)) continue;
     remotes.push_back(remote);
   }
-  if (static_cast<int>(remotes.size()) < kSyncSamples) return 0;
+  if (static_cast<int>(remotes.size()) < kHealthSamples) return 0;
 
-  for (std::uint32_t offset = 0; offset < kSyncSearchTo; ++offset) {
+  for (std::uint32_t offset = 4; offset + 4 <= kRemoteWindow; ++offset) {
+    int at_full = 0;
     bool plausible = true;
-    bool varies = false;
-    std::uint8_t first[4] = {};
 
     for (std::size_t i = 0; i < remotes.size() && plausible; ++i) {
-      std::uint8_t values[4] = {};
-      for (int b = 0; b < 4 && plausible; ++b)
-        plausible = asi::mem::Read<std::uint8_t>(remotes[i] + offset + b,
-                                                 &values[b]);
-      if (!plausible) break;
-      // A living player has some health; armour and weapon have hard ceilings.
-      plausible = values[0] >= 1 && values[0] <= 100 && values[1] <= 100 &&
-                  values[2] <= kMaxWeaponId && values[3] <= kMaxSpecialAction;
-      if (i == 0) {
-        for (int b = 0; b < 4; ++b) first[b] = values[b];
-      } else {
-        for (int b = 0; b < 4; ++b)
-          if (values[b] != first[b]) varies = true;
-      }
+      float health = 0.0f;
+      float armour = 0.0f;
+      std::memcpy(&health, reinterpret_cast<const void*>(remotes[i] + offset),
+                  sizeof(health));
+      std::memcpy(&armour,
+                  reinterpret_cast<const void*>(remotes[i] + offset - 4),
+                  sizeof(armour));
+
+      // Alive, within the server's usual ceiling, and armour right before it.
+      plausible = health == health && health > 0.0f && health <= 100.0f &&
+                  armour == armour && armour >= 0.0f && armour <= 100.0f;
+      if (health == 100.0f) ++at_full;
     }
-    if (plausible && varies) return offset;
+    // Half the sample sitting on exactly full health is what a coordinate
+    // cannot imitate.
+    if (plausible && at_full * 2 >= static_cast<int>(remotes.size()))
+      return offset;
   }
   return 0;
 }
@@ -1078,9 +1085,9 @@ json ReadWorld() {
   static unsigned long long next_sync_attempt_ms = 0;
   if (sync_at == 0 && GetTickCount64() >= next_sync_attempt_ms) {
     next_sync_attempt_ms = GetTickCount64() + 3000;
-    sync_at = FindSyncBlock(layout);
+    sync_at = FindReportedHealth(layout);
     if (sync_at != 0)
-      LOG_INFO("player sync block at CRemotePlayer+0x{:X}", sync_at);
+      LOG_INFO("reported health at CRemotePlayer+0x{:X}", sync_at);
   }
 
   std::size_t with_ping = 0;
@@ -1128,22 +1135,40 @@ json ReadWorld() {
       if (position.valid) {
         entry["pos"] = {position.x, position.y, position.z};
         ++streamed;
+
+        // What the ped holds is what the renderer draws, so this one is
+        // honest even though its health is not. Every nearby player reading
+        // back as unarmed was the truth about a street of civilians, and
+        // dropping it over that was an overcorrection.
+        std::uint8_t slot = 0;
+        if (asi::mem::Read<std::uint8_t>(game_ped + kPedWeaponSlot, &slot) &&
+            slot < kWeaponSlots) {
+          std::uint32_t type = 0;
+          if (asi::mem::Read<std::uint32_t>(
+                  game_ped + kPedWeapons + slot * kWeaponStride, &type) &&
+              type <= kMaxWeaponId) {
+            entry["weapon"] = type;
+            if (const char* name = WeaponName(type)) entry["weapon_name"] = name;
+          }
+        }
       }
 
       // Health, armour and weapon as the server reported them. Not from the
       // game ped: that one is a local puppet SA-MP keeps at a large health so
       // it cannot die on our machine.
       if (sync_at != 0) {
-        std::uint8_t values[4] = {};
-        bool ok = true;
-        for (int b = 0; b < 4 && ok; ++b)
-          ok = asi::mem::Read<std::uint8_t>(remote + sync_at + b, &values[b]);
-        if (ok) {
-          entry["health"] = values[0];
-          entry["armour"] = values[1];
-          entry["weapon"] = values[2];
-          if (const char* name = WeaponName(values[2]))
-            entry["weapon_name"] = name;
+        float health = 0.0f;
+        float armour = 0.0f;
+        if (asi::mem::Read<float>(remote + sync_at, &health) &&
+            asi::mem::Read<float>(remote + sync_at - 4, &armour) &&
+            health > 0.0f && health <= 100.0f && armour >= 0.0f &&
+            armour <= 100.0f) {
+          entry["health"] = health;
+          entry["armour"] = armour;
+        } else {
+          // The offset stopped making sense, so it was never the right one.
+          // Better to drop it and look again than to keep publishing it.
+          sync_at = 0;
         }
       }
     } else {
