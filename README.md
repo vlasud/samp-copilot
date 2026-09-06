@@ -204,16 +204,14 @@ tools/    console.py, selftest.py, mcp_http.py, fingerprint_samp.py
 | positions and distances | `CPed` -> game entity -> `CPlaceable` matrix | the person beside you reads 1.0 m, one walking away 10 m then 33 m |
 | our health, armour, weapon, ammo | game ped, plugin-sdk offsets | 79 hp against the HUD bar; weapon 15 the minute the chat said a cane was bought |
 | vehicles: id, model, position | GTA's own `CPool` at `gta_sa.exe+0x774494` | a row of scooters at 1.6, 3.3, 9.1 m, all model 462 - the id another mod's overlay showed for them |
+| other players' health and armour | `CRemotePlayer+0x1BC`, what the server reported | one armed player on 63 hp and 100 armour among civilians on 100 |
+| what other players are holding | their game ped, same fields as ours | a desert eagle on the one player carrying one |
 
 Not read, and not guessed at either:
 
 - **Score and ping.** Absent from `CPlayerInfo` and from `CRemotePlayer`; none
   of the values the scoreboard shows appears anywhere in either. They arrive
   from the server in an RPC and belong with that work.
-- **Other players' health and weapons.** Their game ped is a local puppet -
-  SA-MP gives it a large health so it cannot die on our machine, which is why
-  every player read back as 1000 hp holding a fist. The true value is
-  `m_fReportedHealth`, which also arrives by RPC.
 - **Money.** The HUD shows more than fits in the ped field that holds it.
 
 ## How offsets get established
@@ -245,8 +243,16 @@ Three findings cost a day between them and are worth not rediscovering:
 2. A field that is small, non-zero and different for everyone describes a ping
    and also describes `std::string`'s own length field. "doom" had a ping of 4.
 3. A measurement taken once at startup is not a property of the layout. Scores
-   and pings are all legitimately zero seconds after connecting, and the
-   vehicle pool is legitimately empty.
+   and pings are all legitimately zero seconds after connecting, the vehicle
+   pool is legitimately empty, and nobody is streamed in. This one cost three
+   separate mistakes before it was learned.
+4. Identify a field by something structural, not by how a server usually
+   looks. "Most players are on exactly 100" found nothing, because two of six
+   were. Health is stored in a float but arrives as a byte, so it is always a
+   whole number - that holds whatever state the players are in.
+5. A reader must not be stricter than the search that found the field for it.
+   Insisting health be above zero discarded the offset the moment one player
+   was dead, and discarded it for everyone else in the same pass.
 
 ## Status
 
