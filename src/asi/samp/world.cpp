@@ -645,36 +645,50 @@ bool SlotInUse(std::uintptr_t byte_map, int index) {
   return (flags & 0x80) == 0;
 }
 
-GamePool FindVehiclePool() {
+GamePool FindVehiclePool(std::string* why) {
   GamePool pool;
   const asi::mem::Module game = asi::mem::FindModule(nullptr);
-  if (!game.valid()) return pool;
-
-  const std::uintptr_t at =
-      game.base + (kVehiclePoolPtr - kDefaultImageBase);
-  std::uint32_t pool_address = 0;
-  if (!asi::mem::Read<std::uint32_t>(at, &pool_address) ||
-      !IsHeapPointer(pool_address))
+  if (!game.valid()) {
+    *why = "gta_sa.exe is not there, which cannot happen";
     return pool;
+  }
+
+  const std::uintptr_t at = game.base + (kVehiclePoolPtr - kDefaultImageBase);
+  std::uint32_t pool_address = 0;
+  if (!asi::mem::Read<std::uint32_t>(at, &pool_address)) {
+    *why = "the pool pointer address is not readable";
+    return pool;
+  }
+  if (!IsHeapPointer(pool_address)) {
+    *why = "nothing that looks like a pool at gta_sa.exe+0x774494";
+    return pool;
+  }
 
   std::uint32_t objects = 0;
   std::uint32_t byte_map = 0;
   std::int32_t  size = 0;
   if (!asi::mem::Read<std::uint32_t>(pool_address + kPoolObjects, &objects) ||
       !asi::mem::Read<std::uint32_t>(pool_address + kPoolByteMap, &byte_map) ||
-      !asi::mem::Read<std::int32_t>(pool_address + kPoolSize, &size))
+      !asi::mem::Read<std::int32_t>(pool_address + kPoolSize, &size)) {
+    *why = "the pool header is not readable";
     return pool;
-  if (!IsHeapPointer(objects) || !IsHeapPointer(byte_map)) return pool;
-  if (size <= 0 || size > kMaxPoolSize) return pool;
+  }
+  if (!IsHeapPointer(objects) || !IsHeapPointer(byte_map) || size <= 0 ||
+      size > kMaxPoolSize) {
+    *why = "the pool header does not read as one: objects, map, size";
+    return pool;
+  }
 
-  // Collect a few slots the game says are in use, then find the stride that
-  // turns all of them into vehicles. A stride that works for eight unrelated
-  // slots at once is the stride.
   int occupied[8];
   int occupied_count = 0;
   for (int i = 0; i < size && occupied_count < 8; ++i)
     if (SlotInUse(byte_map, i)) occupied[occupied_count++] = i;
-  if (occupied_count < 2) return pool;
+  if (occupied_count < 2) {
+    // Not a failure of the layout - just nothing in the world yet.
+    *why = "the pool is there with " + std::to_string(size) +
+           " slots, but fewer than two are in use";
+    return pool;
+  }
 
   for (std::uint32_t stride = kMinStride; stride < kMaxStride; stride += 4) {
     bool all_vehicles = true;
@@ -691,8 +705,13 @@ GamePool FindVehiclePool() {
     pool.byte_map = byte_map;
     pool.size     = size;
     pool.stride   = stride;
-    break;
+    return pool;
   }
+
+  *why = "the pool has " + std::to_string(size) + " slots with " +
+         std::to_string(occupied_count) +
+         " in use, but no element size between 0x400 and 0x1200 turns them "
+         "into vehicles";
   return pool;
 }
 
@@ -1064,16 +1083,23 @@ json ReadWorld() {
                   &local_name);
   json vehicles = json::array();
   {
+    // Looked for again until it is found, not decided once. The first call
+    // lands a second after connecting, when the world may hold no vehicles at
+    // all - the same mistake that made ping look broken for a whole session.
     static GamePool pool;
-    static bool searched = false;
-    if (!searched) {
-      searched = true;
-      pool = FindVehiclePool();
-      if (pool.valid())
-        LOG_INFO("game vehicle pool: {} slots of {} bytes at 0x{:08X}",
-                 pool.size, pool.stride, pool.objects);
-      else
-        LOG_WARN("the game's vehicle pool did not check out");
+    static unsigned long long next_attempt_ms = 0;
+    if (!pool.valid()) {
+      const unsigned long long now = GetTickCount64();
+      if (now >= next_attempt_ms) {
+        next_attempt_ms = now + 3000;
+        std::string why;
+        pool = FindVehiclePool(&why);
+        if (pool.valid())
+          LOG_INFO("game vehicle pool: {} slots of 0x{:X} bytes at 0x{:08X}",
+                   pool.size, pool.stride, pool.objects);
+        else
+          LOG_WARN("no vehicle pool yet - {}", why);
+      }
     }
 
     if (pool.valid()) {
