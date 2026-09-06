@@ -61,6 +61,7 @@ struct Layout {
   // CVehiclePool and the offset of its object array, found the same way.
   std::uintptr_t vehicle_pool    = 0;
   std::uint32_t  vehicle_objects = 0;
+  std::uint32_t  vehicle_count   = 0;
   // The host address read out of CNetGame - the proof the root pointer is real.
   std::string    host;
   std::string    note;

@@ -136,8 +136,7 @@ const char* WeaponName(std::uint32_t id) {
 constexpr int kMaxVehicles = 2000;
 // m_nCount plus a hundred-entry waiting list put the arrays a little over
 // 0x1100 in; the window is generous because that is arithmetic, not fact.
-constexpr std::uint32_t kVehicleSearchFrom = 0x0800;
-constexpr std::uint32_t kVehicleSearchTo   = 0x2000;
+constexpr std::uint32_t kVehicleSearchTo = 0x8000;
 // CEntity::m_nModelIndex, from plugin-sdk. The same CPlaceable base as a ped,
 // so position comes from the matrix we already trust.
 constexpr std::uint32_t kEntityModel = 0x22;
@@ -607,48 +606,42 @@ void DumpPools(const Layout& layout) {
   LOG_INFO("wrote {}", path);
 }
 
-bool LooksLikeVehicleArrays(std::uintptr_t pool, std::uint32_t offset) {
-  const std::uintptr_t objects = pool + offset;
-  const std::uintptr_t flags   = objects + kMaxVehicles * 4;
-  const std::uintptr_t game    = flags + kMaxVehicles * 4;
-  if (!asi::mem::IsReadable(objects, kMaxVehicles * 4 * 3)) return false;
+// Finds the array of vehicles by what it points at rather than by its shape.
+//
+// Looking for "an array of booleans between two arrays of pointers" failed
+// twice and then turned out to describe nothing in the slot that should hold
+// vehicles at all. A vehicle, though, is unmistakable: an entity whose model
+// index is in the range the game reserves for vehicles, sitting somewhere on
+// a map six thousand units across. Eight of those in a row is not a
+// coincidence any run of bytes can produce.
+constexpr std::int16_t kFirstVehicleModel = 400;
+constexpr std::int16_t kLastVehicleModel  = 611;
+constexpr std::uint32_t kMinVehiclesFound = 8;
 
-  const auto* object_values = reinterpret_cast<const std::uint32_t*>(objects);
-  const auto* flag_values   = reinterpret_cast<const std::uint32_t*>(flags);
-  const auto* game_values   = reinterpret_cast<const std::uint32_t*>(game);
+bool IsVehicleEntity(std::uint32_t entity) {
+  if (!IsHeapPointer(entity)) return false;
+  std::int16_t model = 0;
+  if (!asi::mem::Read<std::int16_t>(entity + kEntityModel, &model)) return false;
+  if (model < kFirstVehicleModel || model > kLastVehicleModel) return false;
+  return ReadEntityPosition(entity).valid;
+}
 
-  // A cheap sample first: two thousand slots is a lot to walk for every
-  // candidate offset, and garbage fails on the first few.
-  for (int i = 0; i < kMaxVehicles; i += 128)
-    if (flag_values[i] > 1) return false;
-
-  auto plausible = [](std::uint32_t value) {
-    return value == 0 ||
-           (value >= 0x00010000u && value < 0xC0000000u && value % 4 == 0);
-  };
-
-  int flagged = 0;
-  int with_entity = 0;
-  for (int i = 0; i < kMaxVehicles; ++i) {
-    // The signature is an array of booleans flanked by two arrays of
-    // pointers. Requiring the flag and the wrapper to agree was an assumption
-    // too far: the server can know about a vehicle that is not streamed to us,
-    // and that is exactly the case this failed on.
-    if (flag_values[i] > 1) return false;
-    if (!plausible(object_values[i]) || !plausible(game_values[i])) return false;
-    if (flag_values[i] != 0) ++flagged;
-    if (game_values[i] != 0) ++with_entity;
+// Returns how many entries of the run are vehicles, and how long the run is.
+std::uint32_t CountVehicleRun(std::uintptr_t at, std::uint32_t max_entries,
+                              std::uint32_t* run_length) {
+  std::uint32_t found = 0;
+  std::uint32_t index = 0;
+  for (; index < max_entries; ++index) {
+    std::uint32_t value = 0;
+    if (!asi::mem::Read<std::uint32_t>(at + index * 4, &value)) break;
+    const bool pointerish =
+        value == 0 || (value >= 0x00010000u && value < 0xC0000000u &&
+                       value % 4 == 0);
+    if (!pointerish) break;
+    if (value != 0 && IsVehicleEntity(value)) ++found;
   }
-  if (flagged == 0 || flagged >= kMaxVehicles) return false;
-  if (with_entity == 0) return false;
-
-  int checked = 0;
-  for (int i = 0; i < kMaxVehicles && checked < 4; ++i) {
-    if (game_values[i] == 0) continue;
-    if (!IsHeapPointer(game_values[i])) return false;
-    ++checked;
-  }
-  return checked > 0;
+  *run_length = index;
+  return found;
 }
 
 std::string CommandLineHost() {
@@ -902,25 +895,31 @@ const Layout& ResolveLayout() {
 
   // The vehicle pool lives in the same block of pointers as the player pool.
   if (layout.pools != 0) {
-    for (int slot = 0; slot < kPoolSlotsToTry && layout.vehicle_pool == 0;
-         ++slot) {
-      std::uint32_t candidate = 0;
-      if (!asi::mem::Read<std::uint32_t>(layout.pools + slot * 4, &candidate))
+    std::uint32_t best_found = 0;
+    for (int slot = 0; slot < kPoolSlotsToTry; ++slot) {
+      std::uint32_t pool = 0;
+      if (!asi::mem::Read<std::uint32_t>(layout.pools + slot * 4, &pool))
         continue;
-      if (!IsHeapPointer(candidate)) continue;
-      for (std::uint32_t inner = kVehicleSearchFrom; inner < kVehicleSearchTo;
-           ++inner) {
-        if (!LooksLikeVehicleArrays(candidate, inner)) continue;
-        layout.vehicle_pool    = candidate;
-        layout.vehicle_objects = inner;
-        LOG_INFO("vehicle pool at 0x{:08X}, objects +0x{:X}", candidate, inner);
-        break;
+      if (!IsHeapPointer(pool)) continue;
+
+      for (std::uint32_t offset = 0; offset < kVehicleSearchTo; ++offset) {
+        std::uint32_t run = 0;
+        const std::uint32_t found =
+            CountVehicleRun(pool + offset, kMaxVehicles, &run);
+        if (found < kMinVehiclesFound || found <= best_found) continue;
+        best_found             = found;
+        layout.vehicle_pool    = pool;
+        layout.vehicle_objects = offset;
+        layout.vehicle_count   = run;
       }
     }
-    if (layout.vehicle_pool == 0) {
-      LOG_WARN("no vehicle pool found in the block at 0x{:08X}", layout.pools);
-      DumpPools(layout);
-    }
+    if (layout.vehicle_pool != 0)
+      LOG_INFO("vehicle entities at 0x{:08X}+0x{:X}, {} slots, {} of them cars",
+               layout.vehicle_pool, layout.vehicle_objects, layout.vehicle_count,
+               best_found);
+    else
+      LOG_WARN("no run of vehicle entities found in the block at 0x{:08X}",
+               layout.pools);
   }
 
   layout.valid = true;
@@ -1041,31 +1040,25 @@ json ReadWorld() {
     ReadStdString(layout.player_pool + layout.local_name, layout.string_variant,
                   &local_name);
   json vehicles = json::array();
-  if (layout.vehicle_pool != 0) {
-    const std::uintptr_t objects = layout.vehicle_pool + layout.vehicle_objects;
-    const std::uintptr_t flags   = objects + kMaxVehicles * 4;
-    const std::uintptr_t game    = flags + kMaxVehicles * 4;
-    if (asi::mem::IsReadable(objects, kMaxVehicles * 4 * 3)) {
-      const auto* flag_values = reinterpret_cast<const std::uint32_t*>(flags);
-      const auto* game_values = reinterpret_cast<const std::uint32_t*>(game);
+  if (layout.vehicle_pool != 0 && layout.vehicle_count != 0) {
+    const std::uintptr_t entities = layout.vehicle_pool + layout.vehicle_objects;
+    for (std::uint32_t id = 0; id < layout.vehicle_count; ++id) {
+      std::uint32_t entity = 0;
+      if (!asi::mem::Read<std::uint32_t>(entities + id * 4, &entity)) break;
+      if (!IsHeapPointer(entity)) continue;
 
-      for (int id = 0; id < kMaxVehicles; ++id) {
-        if (flag_values[id] == 0) continue;
-        const std::uint32_t entity = game_values[id];
-        if (!IsHeapPointer(entity)) continue;
+      const Position position = ReadEntityPosition(entity);
+      if (!position.valid) continue;
 
-        const Position position = ReadEntityPosition(entity);
-        if (!position.valid) continue;
+      std::int16_t model = 0;
+      if (!asi::mem::Read<std::int16_t>(entity + kEntityModel, &model)) continue;
+      if (model < kFirstVehicleModel || model > kLastVehicleModel) continue;
 
-        json entry{{"id", id}, {"pos", {position.x, position.y, position.z}}};
-        std::int16_t model = 0;
-        // Model ids are reported as the game stores them; naming two hundred
-        // of them from memory is exactly the sort of guess to avoid.
-        if (asi::mem::Read<std::int16_t>(entity + kEntityModel, &model) &&
-            model > 0)
-          entry["model"] = model;
-        vehicles.push_back(std::move(entry));
-      }
+      // Model ids are reported as the game stores them; naming two hundred
+      // of them from memory is exactly the sort of guess to avoid.
+      vehicles.push_back({{"id", id},
+                          {"model", model},
+                          {"pos", {position.x, position.y, position.z}}});
     }
   }
 
