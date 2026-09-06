@@ -9,7 +9,8 @@ process to start.
 Commands:
     status              hooked or not, SA-MP build, and the verdict when the
                         frame counter is not moving
-    world               latest world state and how stale it is
+    world               summary of the world: self, counts, staleness
+    players [n]         the first n players in the pool, in full
     probe [text]        search samp.dll for text; with no text, the nickname
                         from the launcher command line
     scan <text>         search the whole process (stutters the game once)
@@ -64,7 +65,17 @@ def run_command(client, line):
     if command == "status":
         show(client.tool("bot_status"))
     elif command == "world":
-        show(client.tool("get_world"))
+        # Six hundred players is not something to read in a terminal; the
+        # summary is what a person wants and `players` is what a machine does.
+        result = client.tool("get_world")
+        world = result.get("world", {})
+        summary = {k: v for k, v in world.items() if k != "players"}
+        summary["world_age_ms"] = result.get("world_age_ms")
+        show(summary)
+    elif command == "players":
+        world = client.tool("get_world").get("world", {})
+        limit = int(argument or 15)
+        show(world.get("players", [])[:limit])
     elif command == "probe":
         show(client.tool("probe_memory", {"needle": argument} if argument else {}))
     elif command == "scan":

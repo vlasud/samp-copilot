@@ -338,6 +338,45 @@ const Layout& ResolveLayout() {
     return g_layout;
   }
 
+  {
+    const auto* objects = reinterpret_cast<const std::uint32_t*>(
+        layout.player_pool + layout.object_array);
+    const auto* present = reinterpret_cast<const std::uint32_t*>(
+        layout.player_pool + layout.not_empty_array);
+
+    // Score and ping follow the name, but only after however many bytes this
+    // build's std::string occupies - which is the thing we could not assume in
+    // the first place. Ping gives itself away instead: across a server full of
+    // people it is small, non-zero and different for everyone.
+    for (std::uint32_t offset = 0x14; offset < 0x40 && layout.ping_at == 0;
+         ++offset) {
+      std::vector<std::uint32_t> values;
+      for (int i = 0; i < kMaxPlayers && values.size() < 16; ++i) {
+        if (present[i] == 0) continue;
+        std::uint32_t value = 0;
+        if (!asi::mem::Read<std::uint32_t>(objects[i] + offset, &value)) break;
+        values.push_back(value);
+      }
+      if (values.size() < 8) break;
+
+      bool plausible = true;
+      int  non_zero = 0;
+      for (std::uint32_t value : values) {
+        if (value > 1500) { plausible = false; break; }
+        if (value != 0) ++non_zero;
+      }
+      if (!plausible || non_zero < 4) continue;
+
+      std::size_t distinct = 0;
+      for (std::size_t i = 0; i < values.size(); ++i) {
+        bool seen = false;
+        for (std::size_t j = 0; j < i && !seen; ++j) seen = values[j] == values[i];
+        if (!seen) ++distinct;
+      }
+      if (distinct >= 4) layout.ping_at = offset;
+    }
+  }
+
   // The local player's own record sits between the largest id and the slot
   // arrays. Its exact offset depends on the packed width of the id, so it is
   // searched for rather than computed - and it is not worth failing over.
@@ -347,6 +386,25 @@ const Layout& ResolveLayout() {
                       &name) &&
         name.size() >= 3) {
       layout.local_name = offset;
+      break;
+    }
+  }
+
+  // The local player is never one of the remote slots, so a candidate id that
+  // names an occupied slot is simply the wrong field.
+  {
+    const auto* present = reinterpret_cast<const std::uint32_t*>(
+        layout.player_pool + layout.not_empty_array);
+    const std::uint32_t limit =
+        layout.local_name ? layout.local_name : layout.object_array;
+    for (std::uint32_t offset = 0; offset + 2 <= limit; ++offset) {
+      std::uint16_t candidate = 0;
+      if (!asi::mem::Read<std::uint16_t>(layout.player_pool + offset,
+                                         &candidate))
+        continue;
+      if (candidate == 0 || candidate >= kMaxPlayers) continue;
+      if (present[candidate] != 0) continue;
+      layout.local_id_at = offset;
       break;
     }
   }
@@ -394,16 +452,15 @@ json ReadWorld() {
 
     json entry{{"id", id}, {"name", name}, {"npc", is_npc != 0}};
 
-    // Score and ping follow the name; their offset depends on how wide the
-    // string turned out to be.
-    const std::uint32_t after_name =
-        0x0C + (layout.string_variant == 0 ? 24u : 28u);
-    std::uint32_t score = 0;
-    std::uint32_t ping = 0;
-    if (asi::mem::Read<std::uint32_t>(info + after_name, &score))
-      entry["score"] = static_cast<int>(score);
-    if (asi::mem::Read<std::uint32_t>(info + after_name + 4, &ping))
-      entry["ping"] = ping;
+    if (layout.ping_at != 0) {
+      std::uint32_t ping = 0;
+      std::uint32_t score = 0;
+      if (asi::mem::Read<std::uint32_t>(info + layout.ping_at, &ping))
+        entry["ping"] = ping;
+      if (layout.ping_at >= 4 &&
+          asi::mem::Read<std::uint32_t>(info + layout.ping_at - 4, &score))
+        entry["score"] = static_cast<int>(score);
+    }
     players.push_back(std::move(entry));
   }
 
@@ -412,14 +469,22 @@ json ReadWorld() {
     ReadStdString(layout.player_pool + layout.local_name, layout.string_variant,
                   &local_name);
   std::uint16_t local_id = 0;
-  asi::mem::Read<std::uint16_t>(layout.player_pool + 0x04, &local_id);
+  if (layout.local_id_at != 0 || layout.local_name != 0)
+    asi::mem::Read<std::uint16_t>(layout.player_pool + layout.local_id_at,
+                                  &local_id);
+  std::uint32_t largest_id = 0;
+  asi::mem::Read<std::uint32_t>(layout.player_pool, &largest_id);
 
+  // Counted before the move: reading size() off a container that has already
+  // been moved out of is how this reported zero next to six hundred players.
+  const std::size_t player_count = players.size();
   return json{
       {"resolved", true},
       {"host", layout.host},
+      {"largest_id", largest_id},
       {"self", {{"id", local_id}, {"name", local_name}}},
+      {"player_count", player_count},
       {"players", std::move(players)},
-      {"player_count", players.size()},
   };
 }
 

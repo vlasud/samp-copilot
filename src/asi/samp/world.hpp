@@ -40,6 +40,13 @@ struct Layout {
   // Where the local player's own name sits inside CPlayerPool. Found rather
   // than computed, and optional: the pool is worth reading without it.
   std::uint32_t  local_name = 0;
+  // Where the local id sits, verified against the pool: the local player is
+  // never one of the remote slots, so a candidate that names an occupied slot
+  // is the wrong field.
+  std::uint32_t  local_id_at = 0;
+  // Ping inside CPlayerInfo, found by the shape of the values across players.
+  // Score is the field immediately before it. Zero means neither was located.
+  std::uint32_t  ping_at = 0;
   // The host address read out of CNetGame - the proof the root pointer is real.
   std::string    host;
   std::string    note;
