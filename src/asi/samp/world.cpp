@@ -606,83 +606,94 @@ void DumpPools(const Layout& layout) {
   LOG_INFO("wrote {}", path);
 }
 
-// Finds the array of vehicles by what it points at rather than by its shape.
-//
-// Looking for "an array of booleans between two arrays of pointers" failed
-// twice and then turned out to describe nothing in the slot that should hold
-// vehicles at all. A vehicle, though, is unmistakable: an entity whose model
-// index is in the range the game reserves for vehicles, sitting somewhere on
-// a map six thousand units across. Eight of those in a row is not a
-// coincidence any run of bytes can produce.
+// The range the game reserves for vehicle models.
 constexpr std::int16_t kFirstVehicleModel = 400;
 constexpr std::int16_t kLastVehicleModel  = 611;
-constexpr std::uint32_t kMinVehiclesFound = 8;
 
-bool IsVehicleEntity(std::uint32_t entity) {
-  if (!IsHeapPointer(entity)) return false;
-  std::int16_t model = 0;
-  if (!asi::mem::Read<std::int16_t>(entity + kEntityModel, &model)) return false;
-  if (model < kFirstVehicleModel || model > kLastVehicleModel) return false;
-  return ReadEntityPosition(entity).valid;
-}
+// The game's own vehicle pool, which is where vehicles actually live.
+//
+// Four attempts to find them through SA-MP's Pools came up empty, and the
+// last one proved why: ten thousand pointers in those structures were
+// followed and not one led to an entity with a vehicle model. They are not
+// there. GTA keeps its own pool, it holds every vehicle in the world
+// including traffic, and plugin-sdk gives its address outright.
+//
+// CPool is { objects, byteMap, size, firstFree }; a slot is in use when the
+// top bit of its byteMap entry is clear.
+constexpr std::uintptr_t kDefaultImageBase = 0x400000;
+constexpr std::uintptr_t kVehiclePoolPtr   = 0xB74494;
+constexpr std::uint32_t  kPoolObjects   = 0x00;
+constexpr std::uint32_t  kPoolByteMap   = 0x04;
+constexpr std::uint32_t  kPoolSize      = 0x08;
+constexpr int            kMaxPoolSize   = 20000;
+// The pool stores the largest derived vehicle, so the stride is not
+// sizeof(CVehicle) and is worked out from the data instead of assumed.
+constexpr std::uint32_t kMinStride = 0x400;
+constexpr std::uint32_t kMaxStride = 0x1200;
 
-// One linear pass per pool, with a hard ceiling on the expensive checks.
-//
-// The previous attempt walked up to two thousand entries at every one of
-// thirty-odd thousand offsets in every pool, and treated a null as a valid
-// entry - so a region of zeroes cost the full walk each time. That is
-// hundreds of millions of iterations on the render thread, which is not a
-// crash but a game that never finishes its first frame.
-//
-// Instead: sweep each pool once per alignment, marking which words point at a
-// vehicle, and keep the longest stretch of vehicles-and-nulls found. Cheap
-// range tests come first so that a pool full of zeroes costs almost nothing,
-// and the budget bounds the rest whatever the memory looks like.
-struct VehicleRun {
-  std::uint32_t offset = 0;
-  std::uint32_t length = 0;
-  std::uint32_t found  = 0;
+struct GamePool {
+  std::uintptr_t objects = 0;
+  std::uintptr_t byte_map = 0;
+  int            size = 0;
+  std::uint32_t  stride = 0;
+  bool valid() const { return stride != 0; }
 };
 
-bool CheapPointer(std::uint32_t value) {
-  return value >= 0x00010000u && value < 0xC0000000u && value % 4 == 0;
+bool SlotInUse(std::uintptr_t byte_map, int index) {
+  std::uint8_t flags = 0;
+  if (!asi::mem::Read<std::uint8_t>(byte_map + index, &flags)) return false;
+  return (flags & 0x80) == 0;
 }
 
-VehicleRun FindVehicleRun(std::uintptr_t pool, std::uint32_t window_bytes,
-                          std::uint32_t* budget) {
-  VehicleRun best;
-  const std::uint32_t words = window_bytes / 4;
+GamePool FindVehiclePool() {
+  GamePool pool;
+  const asi::mem::Module game = asi::mem::FindModule(nullptr);
+  if (!game.valid()) return pool;
 
-  for (std::uint32_t align = 0; align < 4; ++align) {
-    VehicleRun current;
-    bool open = false;
+  const std::uintptr_t at =
+      game.base + (kVehiclePoolPtr - kDefaultImageBase);
+  std::uint32_t pool_address = 0;
+  if (!asi::mem::Read<std::uint32_t>(at, &pool_address) ||
+      !IsHeapPointer(pool_address))
+    return pool;
 
-    for (std::uint32_t i = 0; i < words; ++i) {
-      const std::uintptr_t at = pool + align + i * 4;
-      std::uint32_t value = 0;
-      if (!asi::mem::Read<std::uint32_t>(at, &value)) break;
+  std::uint32_t objects = 0;
+  std::uint32_t byte_map = 0;
+  std::int32_t  size = 0;
+  if (!asi::mem::Read<std::uint32_t>(pool_address + kPoolObjects, &objects) ||
+      !asi::mem::Read<std::uint32_t>(pool_address + kPoolByteMap, &byte_map) ||
+      !asi::mem::Read<std::int32_t>(pool_address + kPoolSize, &size))
+    return pool;
+  if (!IsHeapPointer(objects) || !IsHeapPointer(byte_map)) return pool;
+  if (size <= 0 || size > kMaxPoolSize) return pool;
 
-      bool belongs = value == 0;
-      if (!belongs && CheapPointer(value) && *budget > 0) {
-        --*budget;
-        if (IsVehicleEntity(value)) belongs = true;
-      }
+  // Collect a few slots the game says are in use, then find the stride that
+  // turns all of them into vehicles. A stride that works for eight unrelated
+  // slots at once is the stride.
+  int occupied[8];
+  int occupied_count = 0;
+  for (int i = 0; i < size && occupied_count < 8; ++i)
+    if (SlotInUse(byte_map, i)) occupied[occupied_count++] = i;
+  if (occupied_count < 2) return pool;
 
-      if (belongs) {
-        if (!open) {
-          open = true;
-          current = VehicleRun{align + i * 4, 0, 0};
-        }
-        ++current.length;
-        if (value != 0) ++current.found;
-      } else if (open) {
-        if (current.found > best.found) best = current;
-        open = false;
-      }
+  for (std::uint32_t stride = kMinStride; stride < kMaxStride; stride += 4) {
+    bool all_vehicles = true;
+    for (int i = 0; i < occupied_count && all_vehicles; ++i) {
+      const std::uintptr_t entity = objects + occupied[i] * stride;
+      std::int16_t model = 0;
+      all_vehicles =
+          asi::mem::Read<std::int16_t>(entity + kEntityModel, &model) &&
+          model >= kFirstVehicleModel && model <= kLastVehicleModel &&
+          ReadEntityPosition(entity).valid;
     }
-    if (open && current.found > best.found) best = current;
+    if (!all_vehicles) continue;
+    pool.objects  = objects;
+    pool.byte_map = byte_map;
+    pool.size     = size;
+    pool.stride   = stride;
+    break;
   }
-  return best;
+  return pool;
 }
 
 std::string CommandLineHost() {
@@ -934,40 +945,6 @@ const Layout& ResolveLayout() {
     }
   }
 
-  // The vehicle pool lives in the same block of pointers as the player pool.
-  if (layout.pools != 0) {
-    // Enough to recognise the array without letting the search off its lead.
-    std::uint32_t budget = 60000;
-    const ULONGLONG started = GetTickCount64();
-
-    for (int slot = 0; slot < kPoolSlotsToTry; ++slot) {
-      std::uint32_t pool = 0;
-      if (!asi::mem::Read<std::uint32_t>(layout.pools + slot * 4, &pool))
-        continue;
-      if (!IsHeapPointer(pool)) continue;
-
-      std::uint32_t window = kVehicleSearchTo;
-      while (window > 0x1000 && !asi::mem::IsReadable(pool, window)) window /= 2;
-
-      const VehicleRun run = FindVehicleRun(pool, window, &budget);
-      if (run.found < kMinVehiclesFound || run.found <= layout.vehicles_found)
-        continue;
-      layout.vehicle_pool    = pool;
-      layout.vehicle_objects = run.offset;
-      layout.vehicle_count   = run.length;
-      layout.vehicles_found  = run.found;
-    }
-
-    if (layout.vehicle_pool != 0)
-      LOG_INFO("vehicles at 0x{:08X}+0x{:X}: {} slots, {} of them cars, {} ms",
-               layout.vehicle_pool, layout.vehicle_objects, layout.vehicle_count,
-               layout.vehicles_found, GetTickCount64() - started);
-    else
-      LOG_WARN("no run of vehicle entities in the block at 0x{:08X} ({} ms, "
-               "budget left {})", layout.pools, GetTickCount64() - started,
-               budget);
-  }
-
   layout.valid = true;
   layout.note  = "resolved";
   g_layout     = layout;
@@ -1086,25 +1063,38 @@ json ReadWorld() {
     ReadStdString(layout.player_pool + layout.local_name, layout.string_variant,
                   &local_name);
   json vehicles = json::array();
-  if (layout.vehicle_pool != 0 && layout.vehicle_count != 0) {
-    const std::uintptr_t entities = layout.vehicle_pool + layout.vehicle_objects;
-    for (std::uint32_t id = 0; id < layout.vehicle_count; ++id) {
-      std::uint32_t entity = 0;
-      if (!asi::mem::Read<std::uint32_t>(entities + id * 4, &entity)) break;
-      if (!IsHeapPointer(entity)) continue;
+  {
+    static GamePool pool;
+    static bool searched = false;
+    if (!searched) {
+      searched = true;
+      pool = FindVehiclePool();
+      if (pool.valid())
+        LOG_INFO("game vehicle pool: {} slots of {} bytes at 0x{:08X}",
+                 pool.size, pool.stride, pool.objects);
+      else
+        LOG_WARN("the game's vehicle pool did not check out");
+    }
 
-      const Position position = ReadEntityPosition(entity);
-      if (!position.valid) continue;
+    if (pool.valid()) {
+      for (int id = 0; id < pool.size; ++id) {
+        if (!SlotInUse(pool.byte_map, id)) continue;
+        const std::uintptr_t entity = pool.objects + id * pool.stride;
 
-      std::int16_t model = 0;
-      if (!asi::mem::Read<std::int16_t>(entity + kEntityModel, &model)) continue;
-      if (model < kFirstVehicleModel || model > kLastVehicleModel) continue;
+        std::int16_t model = 0;
+        if (!asi::mem::Read<std::int16_t>(entity + kEntityModel, &model))
+          continue;
+        if (model < kFirstVehicleModel || model > kLastVehicleModel) continue;
 
-      // Model ids are reported as the game stores them; naming two hundred
-      // of them from memory is exactly the sort of guess to avoid.
-      vehicles.push_back({{"id", id},
-                          {"model", model},
-                          {"pos", {position.x, position.y, position.z}}});
+        const Position position = ReadEntityPosition(entity);
+        if (!position.valid) continue;
+
+        // Model ids are reported as the game stores them; naming two hundred
+        // of them from memory is exactly the sort of guess to avoid.
+        vehicles.push_back({{"id", id},
+                            {"model", model},
+                            {"pos", {position.x, position.y, position.z}}});
+      }
     }
   }
 
