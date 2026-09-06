@@ -17,6 +17,7 @@ Commands:
     quit
 """
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -25,8 +26,10 @@ import time
 
 class Mcp:
     def __init__(self, exe):
+        # CreateProcess rejects a relative path written with forward
+        # slashes, so the caller gets to type it either way.
         self.p = subprocess.Popen(
-            [exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            [os.path.abspath(exe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
         self._id = 0
         threading.Thread(target=self._drain_stderr, daemon=True).start()

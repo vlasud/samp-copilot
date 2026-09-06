@@ -8,6 +8,7 @@ bot.asi on the named pipe. Exercises the whole loop without launching the game.
 import ctypes
 import json
 import msvcrt
+import os
 import subprocess
 import sys
 import threading
@@ -22,8 +23,10 @@ class Mcp:
     """The agent side: JSON-RPC 2.0 over the child's stdin/stdout."""
 
     def __init__(self, exe):
+        # CreateProcess rejects a relative path written with forward
+        # slashes, so the caller gets to type it either way.
         self.p = subprocess.Popen(
-            [exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            [os.path.abspath(exe)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", bufsize=1)
         self._id = 0
 
