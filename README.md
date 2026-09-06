@@ -30,6 +30,23 @@ Artifacts land in `build/x86/bin/<config>/`:
 Requires Visual Studio 2026 (or any MSVC with an x86 toolset) and CMake 3.25+.
 `nlohmann/json` and `spdlog` are fetched at configure time.
 
+## Try it against the running game
+
+1. Build, then copy `bot.asi` into the game folder. The ASI loader already
+   there picks up any `*.asi` in that directory.
+2. Start `tools/console.py` - it launches the MCP server and gives you a prompt.
+   It can be started before or after the game; whichever connects second dials in.
+3. Launch the game as usual.
+4. `status` should show the link up and the SA-MP build that was recognised.
+   `watch` prints the frame counter each second: if it climbs, the hook is
+   executing on the game thread.
+5. `probe` searches samp.dll for the nickname the launcher passed on the command
+   line. A hit means the module is reading the live client, not guessing.
+   `scan <text>` sweeps the whole process for anything visible on screen.
+
+The mod writes `bot.asi.log` beside itself; read that first when something does
+not work.
+
 ## Test without the game
 
 `tools/smoke_test.py` drives the MCP server exactly as an agent would while
@@ -69,18 +86,24 @@ and paste the resulting line into `kKnown[]` in `src/asi/samp/version.cpp`.
 src/common/   protocol.hpp   wire format, shared by both sides
               pipe.*         overlapped named-pipe transport
 src/asi/      dllmain.cpp    entry point and worker thread
+              bridge.*       game thread <-> IO thread queues
               samp/          SA-MP client version detection
-              hooks/         (empty) frame, chat and dialog hooks
-              state/         (empty) world snapshot collector
+              hooks/frame.*  per-frame callback via the d3d9 vtable
+              state/memory.* validated read-only access to the process
+              state/probe.*  snapshot builder and the memory probe
               actions/       (empty) action execution on the game thread
 src/mcp/      server.*       JSON-RPC 2.0 and the tool registry
               state.*        in-memory cache of everything received
+              rpc.*          matches an action with the result it produced
               main.cpp       tool definitions
-tools/        smoke_test.py, fingerprint_samp.py
+tools/        console.py, smoke_test.py, fingerprint_samp.py
 ```
 
 ## Status
 
-The transport works end to end. The collector and the action executor are
-stubs: `bot.asi` sends a heartbeat snapshot and logs incoming actions without
-performing them.
+Working: the transport, the frame hook, the game-thread bridge, and read-only
+memory access with `probe_memory`.
+
+Stubs: the world collector (snapshots carry frame and module stats, not players
+or vehicles) and every action other than `probe_memory` - those answer with an
+explicit "not implemented yet" rather than a false success.

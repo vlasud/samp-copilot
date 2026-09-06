@@ -11,17 +11,66 @@
 #include <atomic>
 #include <string>
 
+#include "bridge.hpp"
 #include "common/pipe.hpp"
 #include "common/protocol.hpp"
-#include "samp/version.hpp"
+#include "hooks/frame.hpp"
 #include "log.hpp"
+#include "samp/version.hpp"
+#include "state/probe.hpp"
 
 namespace gtabot::asi {
 namespace {
 
-std::atomic<bool>       g_running{false};
-ipc::PipeClient*        g_link = nullptr;
-HANDLE                  g_thread = nullptr;
+// A snapshot four times a second is plenty for an agent and invisible in frame
+// time; at 60 fps that is one build every fifteenth frame.
+constexpr unsigned long long kFramesPerSnapshot = 15;
+// Bounded so a burst of queued work cannot turn into a frame spike.
+constexpr std::size_t kTasksPerFrame = 4;
+constexpr DWORD       kWorkerPeriodMs = 50;
+
+std::atomic<bool> g_running{false};
+ipc::PipeClient*  g_link = nullptr;
+
+// Game thread. Everything that touches client memory happens here and nowhere
+// else.
+void OnFrame() {
+  Bridge::RunPending(kTasksPerFrame);
+
+  static unsigned long long last_snapshot_frame = 0;
+  const unsigned long long frame = FrameHook::frames();
+  if (frame - last_snapshot_frame >= kFramesPerSnapshot) {
+    last_snapshot_frame = frame;
+    Bridge::Publish(proto::Make(proto::msg::kSnapshot, BuildSnapshot()));
+  }
+}
+
+void HandleAction(const proto::Envelope& env) {
+  const std::string kind = env.payload.value("kind", std::string{});
+  const std::uint64_t id = env.id;
+
+  if (kind == proto::action::kProbeMemory) {
+    const proto::json args = env.payload;
+    Bridge::PostToGameThread([id, args]() {
+      try {
+        Bridge::Publish(proto::Make(proto::msg::kResult,
+                                    {{"ok", true}, {"data", ProbeMemory(args)}},
+                                    id));
+      } catch (const std::exception& e) {
+        Bridge::Publish(proto::Make(proto::msg::kResult,
+                                    {{"ok", false}, {"error", e.what()}}, id));
+      }
+    });
+    return;
+  }
+
+  // Everything else is still a stub. Saying so beats reporting a success the
+  // agent would then build on.
+  LOG_WARN("unimplemented action: {}", kind);
+  Bridge::Publish(proto::Make(
+      proto::msg::kResult,
+      {{"ok", false}, {"error", "action not implemented yet: " + kind}}, id));
+}
 
 void OnMessage(const proto::Envelope& env) {
   if (env.v != proto::kVersion) {
@@ -30,24 +79,24 @@ void OnMessage(const proto::Envelope& env) {
     return;
   }
   if (env.type == proto::msg::kAction) {
-    // Actions must run on the game thread. Until the frame hook exists they
-    // are only logged, so the transport can be exercised end to end first.
-    LOG_INFO("action id={} kind={}", env.id,
-             env.payload.value("kind", std::string{"?"}));
+    HandleAction(env);
     return;
   }
   LOG_DEBUG("<- {}", env.type);
 }
 
-void OnLinkState(bool connected) {
-  LOG_INFO("link {}", connected ? "up" : "down");
-}
+void OnLinkState(bool connected) { LOG_INFO("link {}", connected ? "up" : "down"); }
 
 DWORD WINAPI Worker(LPVOID) {
   InitLogging("bot.asi.log");
   LOG_INFO("bot.asi v{} starting, protocol v{}", GTABOT_VERSION, proto::kVersion);
 
-  // SA-MP is loaded by samp.exe well after the ASI loader runs.
+  // Install before waiting for SA-MP: the hook needs no client, and having it
+  // running early means the frame counter itself becomes a liveness signal.
+  if (!FrameHook::Install(&OnFrame))
+    LOG_ERROR("frame hook could not be installed - no game-thread access");
+
+  // SA-MP is injected by samp.exe well after the ASI loader runs.
   const samp::Client client = samp::WaitForClient(/*timeout_ms=*/60'000);
   if (!client.base) {
     LOG_ERROR("samp.dll never appeared - running without a SA-MP client");
@@ -68,35 +117,35 @@ DWORD WINAPI Worker(LPVOID) {
     return 1;
   }
 
-  proto::json hello = {
+  const proto::json hello = {
       {"component", "bot.asi"},
       {"version", GTABOT_VERSION},
-      {"samp", {{"version", samp::ToString(client.version)},
-                {"base", client.base},
-                {"size_of_image", client.size_of_image},
-                {"timestamp", client.timestamp}}},
+      {"samp",
+       {{"version", samp::ToString(client.version)},
+        {"base", client.base},
+        {"size_of_image", client.size_of_image},
+        {"timestamp", client.timestamp}}},
+      {"frame_hook", FrameHook::installed()},
       {"pid", static_cast<std::uint32_t>(GetCurrentProcessId())},
   };
 
   bool announced = false;
   while (g_running.load(std::memory_order_acquire)) {
     if (g_link->connected()) {
-      if (!announced) {
-        announced = g_link->Send(proto::Make(proto::msg::kHello, hello));
-      } else {
-        // Placeholder heartbeat. The real collector replaces this with a
-        // double-buffered snapshot published from the frame hook.
-        g_link->Send(proto::Make(
-            proto::msg::kSnapshot,
-            {{"stub", true}, {"tick", GetTickCount64()}}));
+      if (!announced) announced = g_link->Send(proto::Make(proto::msg::kHello, hello));
+      if (announced) {
+        for (proto::Envelope& env : Bridge::DrainOutbox()) {
+          if (!g_link->Send(env)) break;
+        }
       }
     } else {
       announced = false;
     }
-    Sleep(1000);
+    Sleep(kWorkerPeriodMs);
   }
 
   LOG_INFO("bot.asi stopping");
+  FrameHook::Uninstall();
   g_link->Stop();
   delete g_link;
   g_link = nullptr;
@@ -112,8 +161,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     case DLL_PROCESS_ATTACH:
       DisableThreadLibraryCalls(module);
       gtabot::asi::g_running.store(true, std::memory_order_release);
-      gtabot::asi::g_thread =
-          CreateThread(nullptr, 0, &gtabot::asi::Worker, nullptr, 0, nullptr);
+      CreateThread(nullptr, 0, &gtabot::asi::Worker, nullptr, 0, nullptr);
       break;
     case DLL_PROCESS_DETACH:
       // On process teardown Windows has already killed the other threads;

@@ -23,4 +23,11 @@ FetchContent_Declare(spdlog
   GIT_TAG        v1.14.1
   GIT_SHALLOW    ON)
 
-FetchContent_MakeAvailable(nlohmann_json spdlog)
+# Inline x86 hooking. Small, battle-tested, no runtime dependencies.
+set(MINHOOK_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(minhook
+  GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
+  GIT_TAG        v1.3.4
+  GIT_SHALLOW    ON)
+
+FetchContent_MakeAvailable(nlohmann_json spdlog minhook)

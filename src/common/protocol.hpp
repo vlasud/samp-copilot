@@ -56,6 +56,8 @@ inline constexpr const char* kMoveTo        = "move_to";
 inline constexpr const char* kStop          = "stop";
 inline constexpr const char* kVehicleEnter  = "vehicle_enter";
 inline constexpr const char* kVehicleExit   = "vehicle_exit";
+// Diagnostics: proves the module can read the client's memory.
+inline constexpr const char* kProbeMemory   = "probe_memory";
 }  // namespace action
 
 // ---------------------------------------------------------------------------

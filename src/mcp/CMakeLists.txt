@@ -1,7 +1,8 @@
 add_executable(gta_mcp
   main.cpp
   server.cpp
-  state.cpp)
+  state.cpp
+  rpc.cpp)
 
 target_include_directories(gta_mcp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
 target_link_libraries(gta_mcp PRIVATE gtabot_common)
