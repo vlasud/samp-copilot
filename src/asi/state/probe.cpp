@@ -14,17 +14,17 @@
 namespace gtabot::asi {
 namespace {
 
-proto::json DescribeModule(const wchar_t* name) {
+json DescribeModule(const wchar_t* name) {
   const mem::Module module = mem::FindModule(name);
   if (!module.valid()) return nullptr;
-  return proto::json{{"base", module.base}, {"size", module.size}};
+  return json{{"base", module.base}, {"size", module.size}};
 }
 
 // samp.exe starts the game with the connection details on the command line.
 // Whatever it says is ground truth we did not have to find in memory - which
 // makes it the perfect needle to prove a memory read against.
-proto::json ParseCommandLine(const std::string& line) {
-  proto::json out = proto::json::object();
+json ParseCommandLine(const std::string& line) {
+  json out = json::object();
   const char* keys[][2] = {{"-n", "nick"}, {"-h", "host"}, {"-p", "port"},
                            {"-z", "password"}};
   for (const auto& key : keys) {
@@ -53,10 +53,10 @@ std::string HexDump(std::uintptr_t address, std::size_t bytes) {
   return out + " |" + ascii + "|";
 }
 
-proto::json HitsToJson(const std::vector<mem::Hit>& hits, bool with_context) {
-  proto::json out = proto::json::array();
+json HitsToJson(const std::vector<mem::Hit>& hits, bool with_context) {
+  json out = json::array();
   for (std::size_t i = 0; i < hits.size(); ++i) {
-    proto::json entry{{"address", hits[i].address}};
+    json entry{{"address", hits[i].address}};
     if (hits[i].rva) entry["rva"] = hits[i].rva;
     // A hexdump around the first few hits turns "we found it" into something
     // that can be eyeballed against what is on screen.
@@ -70,31 +70,67 @@ proto::json HitsToJson(const std::vector<mem::Hit>& hits, bool with_context) {
 
 }  // namespace
 
-proto::json BuildSnapshot() {
+json BuildWorldSnapshot() {
   const samp::Client client = samp::Detect();
-  return proto::json{
-      {"frame",
-       {{"hook_installed", FrameHook::installed()},
-        {"driver", FrameHook::driver()},
-        {"frames", FrameHook::frames()},
-        {"fps", FrameHook::fps()}}},
+  return json{
       {"samp",
        {{"loaded", client.base != 0},
         {"version", samp::ToString(client.version)},
         {"base", client.base}}},
+      // Placeholders until the pools are read. Named now so the shape the
+      // agent consumes does not change under it later.
+      {"self", nullptr},
+      {"players", json::array()},
+      {"vehicles", json::array()},
+  };
+}
+
+json BuildStatusSnapshot() {
+  const FrameHook::Integrity integrity = FrameHook::CheckIntegrity();
+  const std::uint64_t idle = FrameHook::idle_ms();
+
+  // The whole point of this field: say plainly which of the two failure modes
+  // is happening, instead of leaving a frozen counter to be interpreted.
+  const char* verdict = "ok";
+  if (!FrameHook::installed()) {
+    verdict = "hook not installed";
+  } else if (!integrity.present_intact && !integrity.endscene_intact) {
+    verdict = "our patch bytes are gone - something else rewrote the entry point";
+  } else if (FrameHook::frames() == 0) {
+    verdict = "hooked, but the game has not presented a single frame yet";
+  } else if (idle > 2000) {
+    verdict = "patch intact but no frames - the game is not rendering "
+              "(alt-tabbed out of exclusive fullscreen does this)";
+  }
+
+  return json{
+      {"frame",
+       {{"hook_installed", FrameHook::installed()},
+        {"driver", FrameHook::driver()},
+        {"frames", FrameHook::frames()},
+        {"fps", FrameHook::fps()},
+        {"idle_ms", idle}}},
+      {"hook",
+       {{"present_hooked", integrity.present_hooked},
+        {"present_intact", integrity.present_intact},
+        {"present_byte", integrity.present_byte},
+        {"endscene_hooked", integrity.endscene_hooked},
+        {"endscene_intact", integrity.endscene_intact},
+        {"endscene_byte", integrity.endscene_byte}}},
+      {"verdict", verdict},
       {"bridge",
        {{"pending_tasks", Bridge::pending_tasks()},
         {"dropped_tasks", Bridge::dropped_tasks()}}},
   };
 }
 
-proto::json ProbeMemory(const proto::json& args) {
+json ProbeMemory(const json& args) {
   const std::string scope = args.value("scope", std::string{"samp"});
   const std::size_t max_hits = args.value("max_hits", std::size_t{16});
   std::string needle = args.value("needle", std::string{});
 
   const std::string command_line = GetCommandLineA();
-  const proto::json parsed = ParseCommandLine(command_line);
+  const json parsed = ParseCommandLine(command_line);
 
   // With no needle given, look for the nickname the launcher passed in. If it
   // turns up inside samp.dll's memory, the read path is proven end to end.
@@ -114,7 +150,7 @@ proto::json ProbeMemory(const proto::json& args) {
   std::size_t scanned_bytes = 0;
   for (const mem::Region& region : regions) scanned_bytes += region.size;
 
-  proto::json out{
+  json out{
       {"modules",
        {{"gta_sa.exe", DescribeModule(nullptr)},
         {"samp.dll", DescribeModule(L"samp.dll")},

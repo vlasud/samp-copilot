@@ -1,15 +1,14 @@
 #pragma once
 //
-// The two-way channel between the game thread and the IO thread.
+// The channel between the game thread and everyone else.
 //
 // Work that must touch game memory is posted here and executed inside the
-// frame hook. Anything the game thread produces goes into the outbox and is
-// written to the pipe by the worker, so the render thread never blocks on IO.
+// frame hook, so no other thread ever reads a structure while the game is
+// mutating it.
 //
 #include <functional>
-#include <vector>
 
-#include "common/protocol.hpp"
+#include "types.hpp"
 
 namespace gtabot::asi {
 
@@ -24,9 +23,12 @@ class Bridge {
   // requests cannot turn into a frame spike.
   static void RunPending(std::size_t max_tasks);
 
-  // Game thread produces, worker consumes.
-  static void Publish(proto::Envelope envelope);
-  static std::vector<proto::Envelope> DrainOutbox();
+  // The latest world state the game thread managed to build. Kept in a slot
+  // rather than the outbox so the worker can keep reporting - with the age
+  // attached - even while the game has stopped rendering and the game thread
+  // is producing nothing at all.
+  static void SetWorld(json world);
+  static json GetWorld(std::int64_t* age_ms);
 
   static std::size_t pending_tasks();
   // Tasks dropped because the queue was full - a stuck game thread, not a

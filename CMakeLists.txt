@@ -25,6 +25,4 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 include(cmake/Dependencies.cmake)
 
-add_subdirectory(src/common)
 add_subdirectory(src/asi)
-add_subdirectory(src/mcp)

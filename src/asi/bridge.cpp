@@ -7,16 +7,16 @@ namespace gtabot::asi {
 namespace {
 
 // If the game thread stops draining (loading screen, alt-tab, a stall) the
-// queues must not grow without bound.
-constexpr std::size_t kMaxTasks   = 256;
-constexpr std::size_t kMaxOutbox  = 512;
+// queue must not grow without bound.
+constexpr std::size_t kMaxTasks = 256;
 
 std::mutex                       g_task_mutex;
 std::deque<Bridge::Task>         g_tasks;
 std::size_t                      g_dropped = 0;
 
-std::mutex                       g_outbox_mutex;
-std::deque<proto::Envelope>      g_outbox;
+std::mutex   g_world_mutex;
+json  g_world;
+std::int64_t g_world_ms = 0;
 
 }  // namespace
 
@@ -47,18 +47,16 @@ void Bridge::RunPending(std::size_t max_tasks) {
   }
 }
 
-void Bridge::Publish(proto::Envelope envelope) {
-  std::lock_guard<std::mutex> lock(g_outbox_mutex);
-  if (g_outbox.size() >= kMaxOutbox) g_outbox.pop_front();
-  g_outbox.push_back(std::move(envelope));
+void Bridge::SetWorld(json world) {
+  std::lock_guard<std::mutex> lock(g_world_mutex);
+  g_world    = std::move(world);
+  g_world_ms = NowMillis();
 }
 
-std::vector<proto::Envelope> Bridge::DrainOutbox() {
-  std::lock_guard<std::mutex> lock(g_outbox_mutex);
-  std::vector<proto::Envelope> out(std::make_move_iterator(g_outbox.begin()),
-                                   std::make_move_iterator(g_outbox.end()));
-  g_outbox.clear();
-  return out;
+json Bridge::GetWorld(std::int64_t* age_ms) {
+  std::lock_guard<std::mutex> lock(g_world_mutex);
+  if (age_ms) *age_ms = g_world_ms ? NowMillis() - g_world_ms : -1;
+  return g_world;
 }
 
 std::size_t Bridge::pending_tasks() {

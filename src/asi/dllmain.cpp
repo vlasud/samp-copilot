@@ -2,6 +2,10 @@
 // bot.asi - loaded into gta_sa.exe by the ASI loader already present in the
 // game folder (vorbisFile.dll).
 //
+// Everything lives in this one module: the frame hook, the state collector,
+// the debug overlay, and the MCP server an agent talks to over loopback HTTP.
+// There is no second process and no IPC.
+//
 // DllMain does nothing but spawn a worker: the loader holds the loader lock
 // while calling us, and anything that touches another module from in there
 // deadlocks sooner or later.
@@ -9,92 +13,67 @@
 #include <windows.h>
 
 #include <atomic>
-#include <string>
 
 #include "bridge.hpp"
-#include "common/pipe.hpp"
-#include "common/protocol.hpp"
 #include "hooks/frame.hpp"
 #include "log.hpp"
+#include "mcp/http.hpp"
+#include "mcp/server.hpp"
+#include "mcp/tools.hpp"
 #include "samp/version.hpp"
 #include "state/probe.hpp"
+#include "types.hpp"
+#include "ui/status_source.hpp"
 
 namespace gtabot::asi {
 namespace {
 
-// A snapshot four times a second is plenty for an agent and invisible in frame
-// time; at 60 fps that is one build every fifteenth frame.
-constexpr unsigned long long kFramesPerSnapshot = 15;
+// Loopback only. An agent connects to http://127.0.0.1:8765/mcp.
+constexpr std::uint16_t kMcpPort = 8765;
+
+// A world rebuild four times a second is plenty for an agent and invisible in
+// frame time; at 60 fps that is one build every fifteenth frame.
+constexpr unsigned long long kFramesPerWorldBuild = 15;
 // Bounded so a burst of queued work cannot turn into a frame spike.
 constexpr std::size_t kTasksPerFrame = 4;
-constexpr DWORD       kWorkerPeriodMs = 50;
 
 std::atomic<bool> g_running{false};
-ipc::PipeClient*  g_link = nullptr;
 
-// Game thread. Everything that touches client memory happens here and nowhere
-// else.
+// Game thread. Everything that touches client memory happens here, and only
+// here.
 void OnFrame() {
   Bridge::RunPending(kTasksPerFrame);
 
-  static unsigned long long last_snapshot_frame = 0;
+  static unsigned long long last_world_frame = 0;
   const unsigned long long frame = FrameHook::frames();
-  if (frame - last_snapshot_frame >= kFramesPerSnapshot) {
-    last_snapshot_frame = frame;
-    Bridge::Publish(proto::Make(proto::msg::kSnapshot, BuildSnapshot()));
+  if (frame - last_world_frame >= kFramesPerWorldBuild) {
+    last_world_frame = frame;
+    Bridge::SetWorld(BuildWorldSnapshot());
   }
 }
-
-void HandleAction(const proto::Envelope& env) {
-  const std::string kind = env.payload.value("kind", std::string{});
-  const std::uint64_t id = env.id;
-
-  if (kind == proto::action::kProbeMemory) {
-    const proto::json args = env.payload;
-    Bridge::PostToGameThread([id, args]() {
-      try {
-        Bridge::Publish(proto::Make(proto::msg::kResult,
-                                    {{"ok", true}, {"data", ProbeMemory(args)}},
-                                    id));
-      } catch (const std::exception& e) {
-        Bridge::Publish(proto::Make(proto::msg::kResult,
-                                    {{"ok", false}, {"error", e.what()}}, id));
-      }
-    });
-    return;
-  }
-
-  // Everything else is still a stub. Saying so beats reporting a success the
-  // agent would then build on.
-  LOG_WARN("unimplemented action: {}", kind);
-  Bridge::Publish(proto::Make(
-      proto::msg::kResult,
-      {{"ok", false}, {"error", "action not implemented yet: " + kind}}, id));
-}
-
-void OnMessage(const proto::Envelope& env) {
-  if (env.v != proto::kVersion) {
-    LOG_WARN("dropping message with protocol v{} (we speak v{})", env.v,
-             proto::kVersion);
-    return;
-  }
-  if (env.type == proto::msg::kAction) {
-    HandleAction(env);
-    return;
-  }
-  LOG_DEBUG("<- {}", env.type);
-}
-
-void OnLinkState(bool connected) { LOG_INFO("link {}", connected ? "up" : "down"); }
 
 DWORD WINAPI Worker(LPVOID) {
   InitLogging("bot.asi.log");
-  LOG_INFO("bot.asi v{} starting, protocol v{}", GTABOT_VERSION, proto::kVersion);
+  LOG_INFO("bot.asi v{} starting", GTABOT_VERSION);
 
   // Install before waiting for SA-MP: the hook needs no client, and having it
   // running early means the frame counter itself becomes a liveness signal.
   if (!FrameHook::Install(&OnFrame))
     LOG_ERROR("frame hook could not be installed - no game-thread access");
+
+  static mcp::Server        server("gtabot", GTABOT_VERSION);
+  static mcp::HttpTransport transport;
+  mcp::RegisterTools(&server);
+
+  StatusSource::Mcp status;
+  if (transport.Start(&server, kMcpPort)) {
+    status.listening = true;
+    status.endpoint  = "127.0.0.1:" + std::to_string(kMcpPort) + "/mcp";
+  } else {
+    status.endpoint = transport.last_error();
+    LOG_ERROR("mcp server did not start: {}", transport.last_error());
+  }
+  StatusSource::SetMcp(status);
 
   // SA-MP is injected by samp.exe well after the ASI loader runs.
   const samp::Client client = samp::WaitForClient(/*timeout_ms=*/60'000);
@@ -111,44 +90,18 @@ DWORD WINAPI Worker(LPVOID) {
     }
   }
 
-  g_link = new ipc::PipeClient();
-  if (!g_link->Start(&OnMessage, &OnLinkState)) {
-    LOG_ERROR("failed to start the IPC client");
-    return 1;
-  }
-
-  const proto::json hello = {
-      {"component", "bot.asi"},
-      {"version", GTABOT_VERSION},
-      {"samp",
-       {{"version", samp::ToString(client.version)},
-        {"base", client.base},
-        {"size_of_image", client.size_of_image},
-        {"timestamp", client.timestamp}}},
-      {"frame_hook", FrameHook::installed()},
-      {"pid", static_cast<std::uint32_t>(GetCurrentProcessId())},
-  };
-
-  bool announced = false;
+  // Nothing to pump: the HTTP transport and the frame hook each run on their
+  // own. This loop only keeps the request counter on the overlay fresh.
   while (g_running.load(std::memory_order_acquire)) {
-    if (g_link->connected()) {
-      if (!announced) announced = g_link->Send(proto::Make(proto::msg::kHello, hello));
-      if (announced) {
-        for (proto::Envelope& env : Bridge::DrainOutbox()) {
-          if (!g_link->Send(env)) break;
-        }
-      }
-    } else {
-      announced = false;
-    }
-    Sleep(kWorkerPeriodMs);
+    StatusSource::Mcp current = StatusSource::mcp();
+    current.requests = transport.requests();
+    StatusSource::SetMcp(current);
+    Sleep(250);
   }
 
   LOG_INFO("bot.asi stopping");
+  transport.Stop();
   FrameHook::Uninstall();
-  g_link->Stop();
-  delete g_link;
-  g_link = nullptr;
   ShutdownLogging();
   return 0;
 }

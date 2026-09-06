@@ -2,70 +2,68 @@
 
 A bridge between an AI agent and a GTA San Andreas / SA-MP client.
 
-Three pieces:
+One artifact: `bot.asi`, loaded into the game. Inside it sit the frame hook, the
+state collector, the in-game debug overlay, and an MCP server the agent talks to
+over loopback HTTP. There is no second process and no IPC.
 
-| Piece | What it is | Where it runs |
-|---|---|---|
-| `bot.asi` | x86 DLL, collects client state and performs actions | inside `gta_sa.exe` |
-| named pipe | NDJSON, versioned, reconnects on its own | between the two |
-| `gta-mcp.exe` | MCP server on stdio, owns the pipe and the collected data | its own process |
-
-The MCP server owns the pipe rather than the mod, so restarting the game does
-not drop the agent session or the data collected so far. Load order between the
-two never matters: whichever starts second dials in.
+```
+gta_sa.exe
++-- bot.asi
+    +-- frame hook (d3d9 Present / EndScene / Reset)
+    |     +-- world snapshots, queued actions, ImGui overlay
+    +-- MCP server -> http://127.0.0.1:8765/mcp  <- the agent
+```
 
 ## Build
 
-`gta_sa.exe` is 32-bit, so everything here is x86 - the top-level `CMakeLists.txt`
-refuses to configure otherwise.
+`gta_sa.exe` is 32-bit, so everything here is x86 - the top-level
+`CMakeLists.txt` refuses to configure otherwise.
 
 ```
 cmake --preset x86
-cmake --build --preset debug
+cmake --build --preset release
 ```
 
-Artifacts land in `build/x86/bin/<config>/`:
-`bot.asi` and `gta-mcp.exe`.
-
-Requires Visual Studio 2026 (or any MSVC with an x86 toolset) and CMake 3.25+.
-`nlohmann/json` and `spdlog` are fetched at configure time.
-
-## Try it against the running game
-
-1. Build, then copy `bot.asi` into the game folder. The ASI loader already
-   there picks up any `*.asi` in that directory.
-2. Start `tools/console.py` - it launches the MCP server and gives you a prompt.
-   It can be started before or after the game; whichever connects second dials in.
-3. Launch the game as usual.
-4. `status` should show the link up and the SA-MP build that was recognised.
-   `watch` prints the frame counter each second: if it climbs, the hook is
-   executing on the game thread.
-5. `probe` searches samp.dll for the nickname the launcher passed on the command
-   line. A hit means the module is reading the live client, not guessing.
-   `scan <text>` sweeps the whole process for anything visible on screen.
-
-The mod writes `bot.asi.log` beside itself; read that first when something does
-not work.
-
-## Test without the game
-
-`tools/smoke_test.py` drives the MCP server exactly as an agent would while
-impersonating `bot.asi` on the pipe. It covers the handshake, tool listing,
-every tool, action delivery and the error paths.
-
-```
-python tools/smoke_test.py build/x86/bin/Debug/gta-mcp.exe
-```
+`bot.asi` lands in `build/x86/bin/RelWithDebInfo/`. Requires Visual Studio 2026
+(or any MSVC with an x86 toolset) and CMake 3.25+. nlohmann/json, spdlog,
+MinHook and Dear ImGui are fetched at configure time.
 
 ## Install
 
-Copy `bot.asi` into the game folder (`D:\SAMP`). The ASI loader already
-present there (`vorbisFile.dll`, with the original renamed to
-`vorbisHooked.dll`) picks up any `*.asi` in that directory. The mod writes
-`bot.asi.log` beside itself; read that first when something does not work.
+Copy `bot.asi` into the game folder (`D:\SAMP`). The ASI loader already there
+(`vorbisFile.dll`, with the original renamed to `vorbisHooked.dll`) picks up any
+`*.asi` in that directory.
 
-Then run `gta-mcp.exe`. It is a stdio MCP server, so an agent launches it as a
-subprocess rather than you starting it by hand.
+## Use
+
+Start the game. **F8** toggles the in-game panel, which shows the frame counter,
+hook integrity, the SA-MP build, the MCP endpoint and the tail of the log -
+everything that used to require alt-tabbing to a terminal.
+
+To drive it from outside:
+
+```
+python tools/console.py     # interactive, stands in for the agent loop
+python tools/selftest.py    # checks the endpoint end to end
+```
+
+Both talk plain JSON-RPC over HTTP; `tools/mcp_http.py` is the whole client and
+is short enough to paste into an agent loop.
+
+The mod also writes `bot.asi.log` beside itself.
+
+## A frozen frame counter
+
+The frame hook only runs while the game renders, and GTA SA stops presenting
+when it is minimised out of exclusive fullscreen. `bot_status` says which case
+you are in:
+
+- `verdict: ok` - frames are flowing.
+- `patch intact but no frames` - the game is not rendering. Alt-tab back in.
+- `our patch bytes are gone` - something else rewrote the entry point.
+
+Tools that need the game thread (`probe_memory`) time out with that same
+explanation rather than hanging.
 
 ## SA-MP versions
 
@@ -83,27 +81,31 @@ and paste the resulting line into `kKnown[]` in `src/asi/samp/version.cpp`.
 ## Layout
 
 ```
-src/common/   protocol.hpp   wire format, shared by both sides
-              pipe.*         overlapped named-pipe transport
-src/asi/      dllmain.cpp    entry point and worker thread
-              bridge.*       game thread <-> IO thread queues
-              samp/          SA-MP client version detection
-              hooks/frame.*  per-frame callback via the d3d9 vtable
-              state/memory.* validated read-only access to the process
-              state/probe.*  snapshot builder and the memory probe
-              actions/       (empty) action execution on the game thread
-src/mcp/      server.*       JSON-RPC 2.0 and the tool registry
-              state.*        in-memory cache of everything received
-              rpc.*          matches an action with the result it produced
-              main.cpp       tool definitions
-tools/        console.py, smoke_test.py, fingerprint_samp.py
+src/asi/  dllmain.cpp     entry point and worker thread
+          types.*         shared json alias and action names
+          log.*           file log plus the ring the overlay draws
+          bridge.*        post work to the game thread; world snapshot slot
+          hooks/frame.*   per-frame callback via the d3d9 vtable
+          samp/           SA-MP client version detection
+          state/memory.*  validated read-only access to the process
+          state/probe.*   snapshot builder and the memory probe
+          mcp/server.*    JSON-RPC 2.0 and the tool registry
+          mcp/http.*      loopback HTTP transport
+          mcp/rpc.*       makes a game-thread round trip synchronous
+          mcp/tools.*     the tool definitions
+          ui/overlay.*    the ImGui panel
+tools/    console.py, selftest.py, mcp_http.py, fingerprint_samp.py
 ```
 
 ## Status
 
-Working: the transport, the frame hook, the game-thread bridge, and read-only
-memory access with `probe_memory`.
+Working: the frame hook, the game-thread bridge, validated read-only memory
+access via `probe_memory`, the MCP server, and the overlay.
 
 Stubs: the world collector (snapshots carry frame and module stats, not players
-or vehicles) and every action other than `probe_memory` - those answer with an
-explicit "not implemented yet" rather than a false success.
+or vehicles) and every action - those answer with an explicit "not implemented
+yet" rather than a false success.
+
+Not covered by tests: with the server inside the game process, nothing can be
+exercised without the game running. `tools/selftest.py` is the replacement and
+needs a live session.

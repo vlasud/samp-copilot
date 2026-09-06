@@ -30,4 +30,30 @@ FetchContent_Declare(minhook
   GIT_TAG        v1.3.4
   GIT_SHALLOW    ON)
 
-FetchContent_MakeAvailable(nlohmann_json spdlog minhook)
+# The in-game debug overlay. Pinned to the last of the 1.91 line: 1.92 reworked
+# the font and texture API, and the DX9 backend here is the well-worn one.
+FetchContent_Declare(imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui.git
+  GIT_TAG        v1.91.9b
+  GIT_SHALLOW    ON)
+
+FetchContent_MakeAvailable(nlohmann_json spdlog minhook imgui)
+
+# Dear ImGui ships no build system, so the sources and the two backends we need
+# are compiled into a target of our own.
+add_library(imgui STATIC
+  "${imgui_SOURCE_DIR}/imgui.cpp"
+  "${imgui_SOURCE_DIR}/imgui_draw.cpp"
+  "${imgui_SOURCE_DIR}/imgui_tables.cpp"
+  "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
+  "${imgui_SOURCE_DIR}/backends/imgui_impl_dx9.cpp"
+  "${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp")
+
+target_include_directories(imgui PUBLIC
+  "${imgui_SOURCE_DIR}"
+  "${imgui_SOURCE_DIR}/backends")
+
+# Drawing happens inside the game's own render call, where there is no room for
+# an unwind, and the overlay never allocates from a failing path anyway.
+target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_DEMO_WINDOWS)
+target_link_libraries(imgui PUBLIC d3d9 dwmapi)

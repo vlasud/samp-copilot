@@ -1,0 +1,109 @@
+#include "mcp/tools.hpp"
+
+#include <stdexcept>
+#include <string>
+
+#include "bridge.hpp"
+#include "log.hpp"
+#include "mcp/rpc.hpp"
+#include "mcp/server.hpp"
+#include "state/probe.hpp"
+#include "types.hpp"
+
+namespace gtabot::mcp {
+namespace {
+
+// A scan of samp.dll alone takes a frame or two; sweeping the whole process is
+// a second of memcmp, and it runs inside the game's frame.
+constexpr int kFastTimeoutMs = 5000;
+constexpr int kScanTimeoutMs = 60000;
+
+json NoArguments() {
+  return json{{"type", "object"}, {"properties", json::object()}};
+}
+
+}  // namespace
+
+void RegisterTools(Server* server) {
+  server->AddTool({
+      "bot_status",
+      "Whether the module is hooked into the game, which SA-MP build it found, "
+      "and - when the frame counter is not moving - the verdict explaining "
+      "why. Call this first when anything looks wrong.",
+      NoArguments(),
+      [](const json&) {
+        // Status is assembled off the game thread on purpose: it has to keep
+        // answering precisely when the game thread has stopped running.
+        json status = asi::BuildStatusSnapshot();
+        std::int64_t world_age_ms = -1;
+        status["world"]        = asi::Bridge::GetWorld(&world_age_ms);
+        status["world_age_ms"] = world_age_ms;
+        return status;
+      },
+  });
+
+  server->AddTool({
+      "get_world",
+      "The most recent world state the game thread managed to build: the local "
+      "player, nearby players and vehicles. Check world_age_ms - a large value "
+      "means the game is not rendering and this is stale.",
+      NoArguments(),
+      [](const json&) {
+        std::int64_t world_age_ms = -1;
+        json world = asi::Bridge::GetWorld(&world_age_ms);
+        return json{{"world", std::move(world)}, {"world_age_ms", world_age_ms}};
+      },
+  });
+
+  server->AddTool({
+      "probe_memory",
+      "Proves the module really reads the SA-MP client's live memory. Searches "
+      "the running process for a literal string and reports where it was "
+      "found, with a hexdump around each hit. With no needle it looks for the "
+      "nickname the launcher passed on the command line. Scope 'samp' searches "
+      "samp.dll only and is fast; 'process' sweeps everything and briefly "
+      "stutters the game.",
+      {{"type", "object"},
+       {"properties",
+        {{"needle",
+          {{"type", "string"},
+           {"description",
+            "Literal ASCII text to look for - a nickname, or something "
+            "visible on screen right now."}}},
+         {"scope",
+          {{"type", "string"},
+           {"enum", json::array({"samp", "process"})},
+           {"description", "Defaults to 'samp'."}}},
+         {"max_hits", {{"type", "integer"}, {"minimum", 1}, {"maximum", 256}}}}}},
+      [](const json& args) {
+        const bool whole_process =
+            args.value("scope", std::string{"samp"}) == "process";
+        return Rpc::RunOnGameThread(
+            [args] { return asi::ProbeMemory(args); },
+            whole_process ? kScanTimeoutMs : kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "send_chat",
+      "Send a line of text or a slash command to the server chat as the "
+      "player.",
+      {{"type", "object"},
+       {"properties",
+        {{"text",
+          {{"type", "string"},
+           {"maxLength", 128},
+           {"description", "The line to send, including any leading slash."}}}}},
+       {"required", json::array({"text"})}},
+      [](const json& args) -> json {
+        const std::string text = args.value("text", std::string{});
+        if (text.empty()) throw std::runtime_error("text must not be empty");
+        // Deliberately explicit: reporting success for something that did not
+        // happen would have the agent build on a lie.
+        throw std::runtime_error(
+            std::string("action not implemented yet: ") + action::kChatSend);
+      },
+  });
+}
+
+}  // namespace gtabot::mcp

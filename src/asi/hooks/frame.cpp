@@ -6,29 +6,44 @@
 #include <MinHook.h>
 
 #include <atomic>
+#include <cstring>
 
 #include "log.hpp"
+#include "ui/overlay.hpp"
 
 namespace gtabot::asi {
 namespace {
 
 // IDirect3DDevice9 vtable slots, fixed by the COM interface layout.
+constexpr int kResetSlot    = 16;
 constexpr int kPresentSlot  = 17;
 constexpr int kEndSceneSlot = 42;
 
 using PresentFn  = HRESULT(APIENTRY*)(IDirect3DDevice9*, const RECT*, const RECT*,
                                       HWND, const RGNDATA*);
 using EndSceneFn = HRESULT(APIENTRY*)(IDirect3DDevice9*);
+using ResetFn    = HRESULT(APIENTRY*)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
 using CreateFn   = IDirect3D9*(WINAPI*)(UINT);
 
 PresentFn  g_original_present  = nullptr;
 EndSceneFn g_original_endscene = nullptr;
+ResetFn    g_original_reset    = nullptr;
+
+// Entry points we patched, plus the bytes MinHook left there. Comparing the
+// two later is what tells a stalled game apart from an unhooked one.
+constexpr std::size_t kPatchBytes = 5;  // x86 relative jump
+void*         g_present_target  = nullptr;
+void*         g_endscene_target = nullptr;
+void*         g_reset_target    = nullptr;
+unsigned char g_present_patch[kPatchBytes]  = {};
+unsigned char g_endscene_patch[kPatchBytes] = {};
 
 FrameCallback              g_callback;
 std::atomic<bool>          g_installed{false};
 std::atomic<bool>          g_present_seen{false};
 std::atomic<unsigned long long> g_frames{0};
 std::atomic<double>        g_fps{0.0};
+std::atomic<unsigned long long> g_last_frame_ms{0};
 
 // The callback must never be re-entered if it somehow causes another present.
 thread_local bool t_in_callback = false;
@@ -36,6 +51,7 @@ thread_local bool t_in_callback = false;
 void Tick() {
   const unsigned long long n =
       g_frames.fetch_add(1, std::memory_order_relaxed) + 1;
+  g_last_frame_ms.store(GetTickCount64(), std::memory_order_relaxed);
 
   static unsigned long long last_count = 0;
   static ULONGLONG          last_ms    = 0;
@@ -77,12 +93,32 @@ HRESULT APIENTRY HookedEndScene(IDirect3DDevice9* device) {
   // which case Present never fires and EndScene has to drive the tick. Once
   // Present is seen, EndScene stops ticking so no frame is counted twice.
   if (!g_present_seen.load(std::memory_order_relaxed)) Tick();
+
+  // The overlay draws here rather than in Present: this is the one place where
+  // the device is still inside a BeginScene/EndScene pair and will take our
+  // geometry.
+  try {
+    Overlay::Render(device);
+  } catch (...) {
+    // Never let the panel unwind through the game's render code.
+  }
   return g_original_endscene(device);
+}
+
+HRESULT APIENTRY HookedReset(IDirect3DDevice9* device,
+                             D3DPRESENT_PARAMETERS* params) {
+  // Alt-tabbing out of exclusive fullscreen loses the device; coming back
+  // resets it. Anything holding D3D resources has to let go first, or the
+  // reset fails and the next frame draws with dead handles.
+  Overlay::OnLostDevice();
+  const HRESULT hr = g_original_reset(device, params);
+  if (SUCCEEDED(hr)) Overlay::OnResetDevice();
+  return hr;
 }
 
 // Creates a device only to read its vtable, then tears everything down, so no
 // device of ours lingers to compete with the game's.
-bool ResolveVTable(void** present_out, void** endscene_out) {
+bool ResolveVTable(void** present_out, void** endscene_out, void** reset_out) {
   HMODULE d3d9 = LoadLibraryW(L"d3d9.dll");
   if (!d3d9) {
     LOG_ERROR("d3d9.dll is not loadable");
@@ -133,6 +169,7 @@ bool ResolveVTable(void** present_out, void** endscene_out) {
     void** vtable = *reinterpret_cast<void***>(device);
     *present_out  = vtable[kPresentSlot];
     *endscene_out = vtable[kEndSceneSlot];
+    *reset_out    = vtable[kResetSlot];
     device->Release();
     ok = true;
   } else {
@@ -153,10 +190,12 @@ bool FrameHook::Install(FrameCallback on_frame) {
 
   void* present  = nullptr;
   void* endscene = nullptr;
-  if (!ResolveVTable(&present, &endscene)) return false;
-  LOG_INFO("d3d9 vtable resolved: Present=0x{:08X} EndScene=0x{:08X}",
+  void* reset    = nullptr;
+  if (!ResolveVTable(&present, &endscene, &reset)) return false;
+  LOG_INFO("d3d9 vtable resolved: Present=0x{:08X} EndScene=0x{:08X} Reset=0x{:08X}",
            reinterpret_cast<unsigned int>(present),
-           reinterpret_cast<unsigned int>(endscene));
+           reinterpret_cast<unsigned int>(endscene),
+           reinterpret_cast<unsigned int>(reset));
 
   if (MH_Initialize() != MH_OK) {
     LOG_ERROR("MH_Initialize failed");
@@ -168,6 +207,11 @@ bool FrameHook::Install(FrameCallback on_frame) {
                                     reinterpret_cast<void**>(&g_original_present));
   const MH_STATUS e = MH_CreateHook(endscene, &HookedEndScene,
                                     reinterpret_cast<void**>(&g_original_endscene));
+  const MH_STATUS r = MH_CreateHook(reset, &HookedReset,
+                                    reinterpret_cast<void**>(&g_original_reset));
+  if (r != MH_OK)
+    LOG_ERROR("Reset is unhooked ({}) - the overlay will not survive a device "
+              "loss", static_cast<int>(r));
   if (p != MH_OK && e != MH_OK) {
     LOG_ERROR("MH_CreateHook failed for both entry points ({}, {})",
               static_cast<int>(p), static_cast<int>(e));
@@ -180,6 +224,14 @@ bool FrameHook::Install(FrameCallback on_frame) {
     return false;
   }
 
+  g_present_target  = p == MH_OK ? present : nullptr;
+  g_endscene_target = e == MH_OK ? endscene : nullptr;
+  g_reset_target    = r == MH_OK ? reset : nullptr;
+  if (g_present_target)
+    memcpy(g_present_patch, g_present_target, kPatchBytes);
+  if (g_endscene_target)
+    memcpy(g_endscene_patch, g_endscene_target, kPatchBytes);
+
   g_installed.store(true, std::memory_order_release);
   LOG_INFO("frame hook installed (Present={}, EndScene={})",
            p == MH_OK ? "ok" : "failed", e == MH_OK ? "ok" : "failed");
@@ -190,7 +242,38 @@ void FrameHook::Uninstall() {
   if (!g_installed.exchange(false, std::memory_order_acq_rel)) return;
   MH_DisableHook(MH_ALL_HOOKS);
   MH_Uninitialize();
-  g_callback = nullptr;
+  Overlay::Shutdown();
+  g_callback        = nullptr;
+  g_present_target  = nullptr;
+  g_endscene_target = nullptr;
+  g_reset_target    = nullptr;
+}
+
+std::uint64_t FrameHook::idle_ms() {
+  const unsigned long long last =
+      g_last_frame_ms.load(std::memory_order_relaxed);
+  if (last == 0) return 0;
+  const ULONGLONG now = GetTickCount64();
+  return now > last ? now - last : 0;
+}
+
+FrameHook::Integrity FrameHook::CheckIntegrity() {
+  Integrity out;
+  if (!g_installed.load(std::memory_order_acquire)) return out;
+
+  if (g_present_target) {
+    out.present_hooked = true;
+    out.present_byte   = *static_cast<const unsigned char*>(g_present_target);
+    out.present_intact =
+        memcmp(g_present_target, g_present_patch, kPatchBytes) == 0;
+  }
+  if (g_endscene_target) {
+    out.endscene_hooked = true;
+    out.endscene_byte   = *static_cast<const unsigned char*>(g_endscene_target);
+    out.endscene_intact =
+        memcmp(g_endscene_target, g_endscene_patch, kPatchBytes) == 0;
+  }
+  return out;
 }
 
 bool FrameHook::installed() { return g_installed.load(std::memory_order_acquire); }

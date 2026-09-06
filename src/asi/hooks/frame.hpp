@@ -34,6 +34,25 @@ class FrameHook {
   static double        fps();
   // Which entry point is actually driving the tick, for diagnostics.
   static const char*   driver();
+  // Milliseconds since the last frame. A stalled game and a removed hook look
+  // identical from the frame counter alone, which is what Integrity separates.
+  static std::uint64_t idle_ms();
+
+  // Whether the patch bytes we installed are still in place. If they are, a
+  // frozen frame counter means the game stopped presenting - alt-tab out of
+  // exclusive fullscreen does exactly that. If they are gone, something else
+  // in the process rewrote the entry point.
+  struct Integrity {
+    bool present_hooked  = false;
+    bool endscene_hooked = false;
+    bool present_intact  = false;
+    bool endscene_intact = false;
+    // First byte currently at each entry point, for the log.
+    std::uint8_t present_byte  = 0;
+    std::uint8_t endscene_byte = 0;
+  };
+  // Safe from any thread: it only reads code bytes in d3d9.dll.
+  static Integrity CheckIntegrity();
 };
 
 }  // namespace gtabot::asi

@@ -1,29 +1,21 @@
-#include "server.hpp"
+#include "mcp/server.hpp"
 
-#include <cstdio>
-#include <iostream>
+#include <stdexcept>
 #include <utility>
+
+#include "log.hpp"
 
 namespace gtabot::mcp {
 namespace {
 
-// The revision this server implements. Reported back verbatim during
-// initialize; a client asking for something else still gets this, which is the
-// documented behaviour when the requested revision is unsupported.
+// The revision this server implements. Reported back during initialize; a
+// client asking for something else still gets this, which is the documented
+// behaviour when the requested revision is unsupported.
 constexpr const char* kProtocolVersion = "2025-06-18";
 
-constexpr int kParseError     = -32700;
 constexpr int kInvalidRequest = -32600;
 constexpr int kMethodNotFound = -32601;
 constexpr int kInvalidParams  = -32602;
-
-void WriteLine(const json& j) {
-  // A single write, then flush: clients read line by line and a partial line
-  // stalls the session.
-  const std::string line = j.dump() + "\n";
-  std::fwrite(line.data(), 1, line.size(), stdout);
-  std::fflush(stdout);
-}
 
 }  // namespace
 
@@ -40,12 +32,10 @@ json Server::Error(int code, const std::string& message) {
 }
 
 json Server::HandleInitialize(const json& params) {
-  initialized_ = true;
   const std::string asked = params.value("protocolVersion", std::string{});
-  if (!asked.empty() && asked != kProtocolVersion) {
-    std::fprintf(stderr, "[mcp] client asked for %s, offering %s\n",
-                 asked.c_str(), kProtocolVersion);
-  }
+  if (!asked.empty() && asked != kProtocolVersion)
+    LOG_WARN("mcp client asked for {}, offering {}", asked, kProtocolVersion);
+
   return json{
       {"protocolVersion", kProtocolVersion},
       {"capabilities", {{"tools", {{"listChanged", false}}}}},
@@ -79,6 +69,7 @@ json Server::HandleToolsCall(const json& params) {
   } catch (const std::exception& e) {
     // A failing tool is a result, not a transport error: the model should see
     // the message and be able to react.
+    LOG_WARN("tool {} failed: {}", name, e.what());
     return json{
         {"content", json::array({{{"type", "text"}, {"text", e.what()}}})},
         {"isError", true},
@@ -86,19 +77,21 @@ json Server::HandleToolsCall(const json& params) {
   }
 }
 
-json Server::Dispatch(const json& request, bool* is_notification) {
+json Server::Handle(const json& request) {
+  ++requests_;
   const std::string method = request.value("method", std::string{});
   const json params = request.value("params", json::object());
-  *is_notification = !request.contains("id") || request["id"].is_null();
+  const bool is_notification =
+      !request.contains("id") || request["id"].is_null();
 
   json response{{"jsonrpc", "2.0"}};
-  if (!*is_notification) response["id"] = request["id"];
+  if (!is_notification) response["id"] = request["id"];
 
   try {
     if (method == "initialize") {
       response["result"] = HandleInitialize(params);
     } else if (method == "notifications/initialized") {
-      return response;  // notification: nothing to send back
+      return json::object();
     } else if (method == "ping") {
       response["result"] = json::object();
     } else if (method == "tools/list") {
@@ -113,27 +106,9 @@ json Server::Dispatch(const json& request, bool* is_notification) {
   } catch (const std::exception& e) {
     response["error"] = Error(kInvalidRequest, e.what());
   }
+
+  if (is_notification) return json::object();
   return response;
-}
-
-void Server::Run() {
-  std::string line;
-  while (std::getline(std::cin, line)) {
-    if (line.empty()) continue;
-    if (line.back() == '\r') line.pop_back();  // tolerate CRLF clients
-
-    const json request = json::parse(line, nullptr, /*allow_exceptions=*/false);
-    if (request.is_discarded() || !request.is_object()) {
-      WriteLine({{"jsonrpc", "2.0"},
-                 {"id", nullptr},
-                 {"error", Error(kParseError, "malformed JSON-RPC message")}});
-      continue;
-    }
-
-    bool is_notification = false;
-    json response = Dispatch(request, &is_notification);
-    if (!is_notification) WriteLine(response);
-  }
 }
 
 }  // namespace gtabot::mcp

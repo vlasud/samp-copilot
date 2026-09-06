@@ -1,21 +1,18 @@
 #pragma once
 //
-// Minimal MCP server over the stdio transport.
+// MCP server: JSON-RPC 2.0 dispatch and a tool registry.
 //
-// The transport is newline-delimited JSON-RPC 2.0 on stdin/stdout. Nothing
-// other than protocol traffic may ever be written to stdout - diagnostics go to
-// stderr, which the client is expected to capture.
+// Transport-agnostic on purpose - it takes a request object and returns a
+// response object. The HTTP layer in http.hpp feeds it; nothing here knows
+// about sockets.
 //
 #include <functional>
 #include <map>
 #include <string>
-#include <vector>
 
-#include <nlohmann/json.hpp>
+#include "types.hpp"
 
 namespace gtabot::mcp {
-
-using json = nlohmann::json;
 
 struct Tool {
   std::string name;
@@ -23,7 +20,7 @@ struct Tool {
   json        input_schema;
   // Returns the tool result content. Throwing std::runtime_error turns into an
   // `isError` result rather than a transport-level failure, which is what MCP
-  // clients expect for a tool that ran and failed.
+  // clients expect from a tool that ran and failed.
   std::function<json(const json& arguments)> handler;
 };
 
@@ -33,11 +30,14 @@ class Server {
 
   void AddTool(Tool tool);
 
-  // Reads stdin until EOF. Returns when the client closes the transport.
-  void Run();
+  // Handles one JSON-RPC request. Returns an empty json for notifications,
+  // which carry no response.
+  json Handle(const json& request);
+
+  std::size_t tool_count() const { return tools_.size(); }
+  std::uint64_t requests_served() const { return requests_; }
 
  private:
-  json Dispatch(const json& request, bool* is_notification);
   json HandleInitialize(const json& params);
   json HandleToolsList() const;
   json HandleToolsCall(const json& params);
@@ -47,7 +47,7 @@ class Server {
   std::string name_;
   std::string version_;
   std::map<std::string, Tool> tools_;
-  bool initialized_ = false;
+  std::uint64_t requests_ = 0;
 };
 
 }  // namespace gtabot::mcp
