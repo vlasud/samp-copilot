@@ -11,6 +11,7 @@
 #include "bridge.hpp"
 #include "hooks/frame.hpp"
 #include "samp/version.hpp"
+#include "samp/world.hpp"
 #include "state/memory.hpp"
 
 namespace gtabot::asi {
@@ -73,13 +74,11 @@ json HitsToJson(const std::vector<mem::Hit>& hits, bool with_context) {
 }  // namespace
 
 json BuildWorldSnapshot() {
-  return json{
-      // Placeholders until the pools are read. Named now so the shape the
-      // agent consumes does not change under it later.
-      {"self", nullptr},
-      {"players", json::array()},
-      {"vehicles", json::array()},
-  };
+  json world = samp::ReadWorld();
+  // Vehicles are the next pool along; the key exists now so the shape the
+  // agent consumes does not change under it later.
+  world["vehicles"] = json::array();
+  return world;
 }
 
 json BuildStatusSnapshot() {

@@ -18,6 +18,7 @@
 #include "mcp/rpc.hpp"
 #include "samp/discovery.hpp"
 #include "samp/version.hpp"
+#include "samp/world.hpp"
 #include "state/probe.hpp"
 #include "ui/status_source.hpp"
 
@@ -241,6 +242,18 @@ void DrawPanel() {
     std::snprintf(buffer, sizeof(buffer), "0x%08X",
                   static_cast<unsigned int>(client.base));
     Label("base", buffer);
+  }
+
+  ImGui::Separator();
+  const samp::Layout& layout = samp::ResolveLayout();
+  if (layout.valid) {
+    char pool_text[32];
+    std::snprintf(pool_text, sizeof(pool_text), "0x%08X",
+                  static_cast<unsigned>(layout.player_pool));
+    Label("pool", pool_text, kGreen);
+    Label("host", layout.host, kGreen);
+  } else {
+    Label("pool", layout.note.empty() ? "not resolved" : layout.note, kAmber);
   }
 
   ImGui::Separator();

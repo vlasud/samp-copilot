@@ -127,6 +127,25 @@ soon as the game window stops being the foreground window, checked in both the
 EndScene and the Present hook. The Reset hook stays as a backstop and logs
 every call it does see.
 
+## Where the SA-MP offsets come from
+
+The field order comes from the public
+[SAMP-API](https://github.com/BlastHackNet/SAMP-API) headers for 0.3.7-R1. The
+byte offsets do not: working those out by hand from a class declaration means
+one wrong assumption about padding produces plausible-looking nonsense. So
+each one is either anchored to something checkable or found by the shape of
+the data:
+
+| What | How it is established |
+|---|---|
+| `CNetGame` | `*(samp.dll + 0x21A0F8)`, and only accepted if the host address at +0x20 matches the `-h` the launcher was given |
+| `CNetGame::Pools` | nine consecutive heap pointers near the tail of CNetGame, found by that shape |
+| `CPlayerPool` slots | 1004 `CPlayerInfo*` followed by 1004 flags that are only ever 0 or 1 - a signature nothing else matches |
+| `std::string` | two plausible MSVC layouts; the one that yields a readable local player name is the one this client was built with |
+
+When any of that fails to line up, `get_world` reports `resolved: false` with a
+note saying where it stopped, rather than reporting something wrong.
+
 ## Establishing the player pool's layout
 
 Every offset inside the SA-MP client is build-specific, and copying a table of

@@ -7,6 +7,7 @@ add_library(bot MODULE
   hooks/frame.cpp
   samp/version.cpp
   samp/discovery.cpp
+  samp/world.cpp
   state/memory.cpp
   state/probe.cpp
   mcp/server.cpp
