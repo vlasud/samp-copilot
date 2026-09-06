@@ -89,13 +89,14 @@ def run_command(client, line):
             rows.append((distance, player))
         rows.sort(key=lambda row: row[0])
         for distance, player in rows[:int(argument or 10)]:
+            # Health and weapons are deliberately absent for other players:
+            # their game ped is a local puppet and reports neither honestly.
             marks = []
             if player.get("in_vehicle"):
                 marks.append("in a vehicle")
-            if player.get("health") is not None:
-                marks.append("hp %.0f" % player["health"])
-            if player.get("weapon_name"):
-                marks.append(player["weapon_name"])
+            state = player.get("state")
+            if state == 32:
+                marks.append("wasted")
             print("  %6.1f m  id %-4d %-22s %s" % (
                 distance, player["id"], player["name"],
                 ", ".join(marks)), flush=True)

@@ -62,6 +62,8 @@ constexpr std::uint32_t kRemotePed   = 0x00;
 constexpr std::uint32_t kRemoteVeh   = 0x04;
 constexpr std::uint32_t kRemoteTeam  = 0x08;
 constexpr std::uint32_t kRemoteState = 0x09;
+constexpr std::uint8_t  kStatePassenger = 18;
+constexpr std::uint8_t  kStateDriver    = 19;
 
 // Offsets inside the game's own CPed, taken from plugin-sdk's declarations for
 // GTA SA 1.0 US. Unlike everything above these are not SA-MP's, so they are
@@ -807,8 +809,17 @@ json ReadWorld() {
       if (asi::mem::Read<std::uint8_t>(remote + kRemoteTeam, &team) &&
           team != 255)
         entry["team"] = team;
-      if (asi::mem::Read<std::uint8_t>(remote + kRemoteState, &state))
+      if (asi::mem::Read<std::uint8_t>(remote + kRemoteState, &state)) {
         entry["state"] = state;
+        // SA-MP's own state, which is what the server told us, rather than the
+        // game ped's vehicle field - see below for why that one lies.
+        entry["in_vehicle"] = state == kStateDriver || state == kStatePassenger;
+      }
+
+      std::uint32_t vehicle = 0;
+      if (asi::mem::Read<std::uint32_t>(remote + kRemoteVeh, &vehicle) &&
+          IsHeapPointer(vehicle))
+        entry["in_vehicle"] = true;
 
       std::uint32_t samp_ped = 0;
       asi::mem::Read<std::uint32_t>(remote + kRemotePed, &samp_ped);
@@ -817,11 +828,16 @@ json ReadWorld() {
       entry["streamed"] = position.valid;
       if (position.valid) {
         entry["pos"] = {position.x, position.y, position.z};
-        // Whether the person nearby is hurt and what they are holding is the
-        // sort of thing a decision actually turns on.
-        entry.update(ReadPedDetails(game_ped, /*full=*/false));
         ++streamed;
       }
+
+      // No health, armour or weapon here, and not because they are hard to
+      // reach. The game ped of a remote player is a local puppet: SA-MP gives
+      // it a large health value so it cannot die on our machine, since damage
+      // is the server's to decide - which is why every player read back as
+      // 1000 hp holding a fist. What is true is m_fReportedHealth, sent by the
+      // server, and that arrives in the sync packets along with score and
+      // ping. It belongs to that work, not to this.
     } else {
       entry["streamed"] = false;
     }
