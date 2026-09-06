@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <cstdio>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -25,11 +27,15 @@ constexpr int kPoolCount   = 9;
 constexpr int kPlayerPoolIndex = 6;
 // How far into CNetGame to look for the Pools pointer. It is the last member,
 // and the struct is a little over 0x3C0 bytes.
-constexpr std::uint32_t kPoolsSearchFrom = 0x300;
-constexpr std::uint32_t kPoolsSearchTo   = 0x460;
+constexpr std::uint32_t kPoolsSearchFrom = 0x200;
+constexpr std::uint32_t kPoolsSearchTo   = 0x600;
 // CPlayerPool starts with the largest id and the local player's own details,
 // so the arrays begin somewhere in the first few dozen bytes.
-constexpr std::uint32_t kArraySearchTo = 0x80;
+constexpr std::uint32_t kArraySearchTo = 0x100;
+// Which slot of the pool block holds the player pool. Searched rather than
+// trusted: the declaration says the seventh, but a null pool ahead of it would
+// shift nothing while a miscount would move everything.
+constexpr int kPoolSlotsToTry = 12;
 
 Layout g_layout;
 bool   g_resolved = false;
@@ -83,9 +89,10 @@ bool ReadStdString(std::uintptr_t address, int variant, std::string* out) {
   return true;
 }
 
-// The pool holds 1004 CPlayerInfo pointers - null for empty slots - followed by
-// 1004 flags that are only ever 0 or 1. Nothing else in the structure looks
-// like that, which is what makes it findable without a computed offset.
+// The pool holds 1004 CPlayerInfo pointers - null for empty slots - alongside
+// 1004 flags saying which of them are in use. The signature is the agreement
+// between the two arrays, not the exact value of the flag: assuming a BOOL is
+// literally 1 is the kind of detail that quietly fails.
 bool LooksLikeSlotArrays(std::uintptr_t pool, std::uint32_t offset) {
   const std::uintptr_t objects   = pool + offset;
   const std::uintptr_t not_empty = objects + kMaxPlayers * 4;
@@ -96,15 +103,88 @@ bool LooksLikeSlotArrays(std::uintptr_t pool, std::uint32_t offset) {
 
   int occupied = 0;
   for (int i = 0; i < kMaxPlayers; ++i) {
-    if (flag_values[i] > 1) return false;
-    const bool present = flag_values[i] == 1;
-    if (present) {
-      if (!IsHeapPointer(object_values[i])) return false;
-      ++occupied;
+    const bool flagged = flag_values[i] != 0;
+    const bool has_object = object_values[i] != 0;
+    if (flagged != has_object) return false;
+    if (!flagged) continue;
+    // A cheap range check for every slot; the expensive one only for a few.
+    if (object_values[i] < 0x00010000u || object_values[i] >= 0xC0000000u ||
+        object_values[i] % 4 != 0)
+      return false;
+    ++occupied;
+  }
+  if (occupied == 0) return false;  // indistinguishable from a run of zeroes
+
+  int checked = 0;
+  for (int i = 0; i < kMaxPlayers && checked < 4; ++i) {
+    if (flag_values[i] == 0) continue;
+    if (!IsHeapPointer(object_values[i])) return false;
+    ++checked;
+  }
+  return true;
+}
+
+// Written once when the pool cannot be found, so a second attempt does not
+// need another round trip to learn what is actually in the structure.
+void DumpNetGame(std::uintptr_t net_game, const std::string& host) {
+  const std::string path = ModuleDirectory() + "bot.netgame-dump.txt";
+  std::ofstream file(path, std::ios::trunc);
+  if (!file) return;
+
+  auto describe = [](std::uint32_t value) -> std::string {
+    char text[64];
+    if (value == 0) return "0";
+    if (IsHeapPointer(value)) {
+      std::uint32_t first = 0;
+      asi::mem::Read<std::uint32_t>(value, &first);
+      std::snprintf(text, sizeof(text), "-> heap 0x%08X [0x%08X]", value, first);
+      return text;
+    }
+    if (value < 100000) {
+      std::snprintf(text, sizeof(text), "int %u", value);
+      return text;
+    }
+    return "";
+  };
+
+  char header[160];
+  std::snprintf(header, sizeof(header),
+                "CNetGame at 0x%08X, host %s\n"
+                "The player pool was not found. Every word of the structure,\n"
+                "then the head of each block it points to.\n\n",
+                static_cast<unsigned>(net_game), host.c_str());
+  file << header;
+
+  for (std::uint32_t offset = 0; offset < 0x600; offset += 4) {
+    std::uint32_t value = 0;
+    if (!asi::mem::Read<std::uint32_t>(net_game + offset, &value)) break;
+    char line[128];
+    std::snprintf(line, sizeof(line), "  +0x%03X  %08X  %s\n", offset, value,
+                  describe(value).c_str());
+    file << line;
+  }
+
+  file << "\n\nblocks pointed to from +0x200 onwards\n";
+  for (std::uint32_t offset = 0x200; offset < 0x600; offset += 4) {
+    std::uint32_t value = 0;
+    if (!asi::mem::Read<std::uint32_t>(net_game + offset, &value)) break;
+    if (!IsHeapPointer(value)) continue;
+    if (!asi::mem::IsReadable(value, 16 * 4)) continue;
+
+    char line[128];
+    std::snprintf(line, sizeof(line), "\n  from +0x%03X -> 0x%08X\n", offset,
+                  value);
+    file << line;
+    for (int i = 0; i < 16; ++i) {
+      std::uint32_t entry = 0;
+      asi::mem::Read<std::uint32_t>(value + i * 4, &entry);
+      std::snprintf(line, sizeof(line), "      [%2d]  %08X  %s\n", i, entry,
+                    describe(entry).c_str());
+      file << line;
     }
   }
-  // An all-empty pool is indistinguishable from a run of zeroes.
-  return occupied > 0;
+  LOG_INFO("wrote {} - CNetGame is there but the player pool was not found",
+           path);
 }
 
 std::string CommandLineHost() {
@@ -170,7 +250,8 @@ const Layout& ResolveLayout() {
     return g_layout;
   }
 
-  // Pools: nine consecutive heap pointers, at the tail of CNetGame.
+  // Pools: a block of mostly-heap pointers at the tail of CNetGame.
+  int pool_candidates = 0;
   for (std::uint32_t offset = kPoolsSearchFrom; offset < kPoolsSearchTo;
        offset += 4) {
     std::uint32_t candidate = 0;
@@ -178,27 +259,42 @@ const Layout& ResolveLayout() {
     if (!IsHeapPointer(candidate)) continue;
     if (!asi::mem::IsReadable(candidate, kPoolCount * 4)) continue;
 
+    // Requiring all nine pools to be non-null was too strict - the block is
+    // recognised by mostly being pointers, and the player pool is then
+    // identified by what it contains rather than by its index.
+    if (!asi::mem::IsReadable(candidate, kPoolSlotsToTry * 4)) continue;
     const auto* entries = reinterpret_cast<const std::uint32_t*>(candidate);
-    bool all_pools = true;
-    for (int i = 0; i < kPoolCount && all_pools; ++i)
-      all_pools = IsHeapPointer(entries[i]);
-    if (!all_pools) continue;
+    int pointer_like = 0;
+    for (int i = 0; i < kPoolCount; ++i)
+      if (entries[i] != 0 && IsHeapPointer(entries[i])) ++pointer_like;
+    if (pointer_like < kPoolCount - 3) continue;
+    ++pool_candidates;
 
-    const std::uintptr_t player_pool = entries[kPlayerPoolIndex];
-    for (std::uint32_t inner = 0; inner < kArraySearchTo; inner += 4) {
-      if (!LooksLikeSlotArrays(player_pool, inner)) continue;
-      layout.pools           = candidate;
-      layout.player_pool     = player_pool;
-      layout.object_array    = inner;
-      layout.not_empty_array = inner + kMaxPlayers * 4;
-      break;
+    for (int slot = 0; slot < kPoolSlotsToTry && !layout.player_pool; ++slot) {
+      const std::uintptr_t player_pool = entries[slot];
+      if (player_pool == 0 || !IsHeapPointer(player_pool)) continue;
+      for (std::uint32_t inner = 0; inner < kArraySearchTo; inner += 4) {
+        if (!LooksLikeSlotArrays(player_pool, inner)) continue;
+        layout.pools           = candidate;
+        layout.player_pool     = player_pool;
+        layout.object_array    = inner;
+        layout.not_empty_array = inner + kMaxPlayers * 4;
+        break;
+      }
     }
     if (layout.player_pool) break;
   }
 
   if (!layout.player_pool) {
-    layout.note = "found CNetGame (host " + layout.host +
-                  ") but no player pool - nobody is in the pool yet";
+    static bool dumped = false;
+    if (!dumped) {
+      dumped = true;
+      DumpNetGame(net_game, layout.host);
+    }
+    layout.note = "found CNetGame (host " + layout.host + ") and " +
+                  std::to_string(pool_candidates) +
+                  " pool-block candidates, but none of them held an array of "
+                  "1004 player slots";
     g_layout = layout;
     g_resolved = false;
     return g_layout;
