@@ -1010,6 +1010,10 @@ bool DumpPlayerRecords() {
 constexpr std::uint32_t kRemoteWindow = 0x400;
 constexpr int           kHealthSamples = 6;
 
+void CollectStreamedRemotes(const Layout& layout,
+                            std::vector<std::uintptr_t>* remotes,
+                            std::vector<int>* ids, std::size_t limit);
+
 // Prints every float column in CRemotePlayer that could be a health, across
 // the players streamed in right now.
 //
@@ -1021,25 +1025,9 @@ void DumpRemoteFloats(const Layout& layout) {
   std::ofstream file(path, std::ios::trunc);
   if (!file) return;
 
-  const auto* objects = reinterpret_cast<const std::uint32_t*>(
-      layout.player_pool + layout.object_array);
-  const auto* present = reinterpret_cast<const std::uint32_t*>(
-      layout.player_pool + layout.not_empty_array);
-
   std::vector<std::uintptr_t> remotes;
   std::vector<int> ids;
-  for (int i = 0; i < kMaxPlayers && remotes.size() < 8; ++i) {
-    if (present[i] == 0) continue;
-    std::uint32_t remote = 0;
-    if (!asi::mem::Read<std::uint32_t>(objects[i], &remote)) continue;
-    if (!IsHeapPointer(remote)) continue;
-    std::uint32_t samp_ped = 0;
-    asi::mem::Read<std::uint32_t>(remote, &samp_ped);
-    if (GamePedOfSampPed(samp_ped) == 0) continue;
-    if (!asi::mem::IsReadable(remote, kRemoteWindow)) continue;
-    remotes.push_back(remote);
-    ids.push_back(i);
-  }
+  CollectStreamedRemotes(layout, &remotes, &ids, 8);
 
   char line[256];
   std::snprintf(line, sizeof(line),
@@ -1079,14 +1067,16 @@ void DumpRemoteFloats(const Layout& layout) {
   LOG_INFO("wrote {}", path);
 }
 
-std::uint32_t FindReportedHealth(const Layout& layout) {
+// The CRemotePlayer of everyone streamed in right now, with their ids.
+void CollectStreamedRemotes(const Layout& layout,
+                            std::vector<std::uintptr_t>* remotes,
+                            std::vector<int>* ids, std::size_t limit) {
   const auto* objects = reinterpret_cast<const std::uint32_t*>(
       layout.player_pool + layout.object_array);
   const auto* present = reinterpret_cast<const std::uint32_t*>(
       layout.player_pool + layout.not_empty_array);
 
-  std::vector<std::uintptr_t> remotes;
-  for (int i = 0; i < kMaxPlayers && remotes.size() < 16; ++i) {
+  for (int i = 0; i < kMaxPlayers && remotes->size() < limit; ++i) {
     if (present[i] == 0) continue;
     std::uint32_t remote = 0;
     if (!asi::mem::Read<std::uint32_t>(objects[i], &remote)) continue;
@@ -1095,8 +1085,15 @@ std::uint32_t FindReportedHealth(const Layout& layout) {
     asi::mem::Read<std::uint32_t>(remote, &samp_ped);
     if (GamePedOfSampPed(samp_ped) == 0) continue;  // not streamed
     if (!asi::mem::IsReadable(remote, kRemoteWindow)) continue;
-    remotes.push_back(remote);
+    remotes->push_back(remote);
+    if (ids) ids->push_back(i);
   }
+}
+
+std::uint32_t FindReportedHealth(const Layout& layout, std::size_t* samples) {
+  std::vector<std::uintptr_t> remotes;
+  CollectStreamedRemotes(layout, &remotes, nullptr, 16);
+  *samples = remotes.size();
   if (static_cast<int>(remotes.size()) < kHealthSamples) return 0;
 
   for (std::uint32_t offset = 4; offset + 4 <= kRemoteWindow; ++offset) {
@@ -1154,15 +1151,20 @@ json ReadWorld() {
   static unsigned long long next_sync_attempt_ms = 0;
   if (sync_at == 0 && GetTickCount64() >= next_sync_attempt_ms) {
     next_sync_attempt_ms = GetTickCount64() + 3000;
-    sync_at = FindReportedHealth(layout);
+    std::size_t samples = 0;
+    sync_at = FindReportedHealth(layout, &samples);
     if (sync_at != 0) {
       LOG_INFO("reported health at CRemotePlayer+0x{:X}", sync_at);
+    } else if (samples < kHealthSamples) {
+      // Not a failure to find it - nobody is close enough to look at. Saying
+      // so beats writing an empty table, which is what a one-shot diagnostic
+      // fired a second after connecting produced.
+      LOG_INFO("waiting for players to stream in before looking for health "
+               "({} so far)", samples);
     } else {
-      static bool described = false;
-      if (!described) {
-        described = true;
-        DumpRemoteFloats(layout);
-      }
+      DumpRemoteFloats(layout);
+      LOG_WARN("no health column among {} streamed players - wrote the table",
+               samples);
     }
   }
 
