@@ -306,19 +306,49 @@ const Layout& ResolveLayout() {
     return g_layout;
   }
 
-  // CPlayerPool begins with the largest id and then the local player's own
-  // record, whose name is the first std::string in the structure.
-  for (int variant = 0; variant < 2 && layout.string_variant < 0; ++variant) {
-    std::string name;
-    if (ReadStdString(layout.player_pool + 0x0C, variant, &name) && !name.empty())
-      layout.string_variant = variant;
+  // Which std::string layout the client was built with is decided against the
+  // players in the pool, not against the local player: there are dozens of
+  // them to agree with each other, and CPlayerInfo puts the name at a fixed
+  // +0x0C whatever the packing, because every member before it is four bytes.
+  {
+    const auto* objects = reinterpret_cast<const std::uint32_t*>(
+        layout.player_pool + layout.object_array);
+    const auto* present = reinterpret_cast<const std::uint32_t*>(
+        layout.player_pool + layout.not_empty_array);
+
+    for (int variant = 0; variant < 2 && layout.string_variant < 0; ++variant) {
+      int agreed = 0;
+      int tried  = 0;
+      for (int i = 0; i < kMaxPlayers && tried < 6; ++i) {
+        if (present[i] == 0) continue;
+        ++tried;
+        std::string name;
+        if (ReadStdString(objects[i] + 0x0C, variant, &name) && !name.empty())
+          ++agreed;
+      }
+      // One lucky read proves nothing; every player agreeing does.
+      if (tried > 0 && agreed == tried) layout.string_variant = variant;
+    }
   }
   if (layout.string_variant < 0) {
-    layout.note = "player pool found, but the local player's name does not "
-                  "read as a std::string in either layout";
+    layout.note = "player pool found, but no player name reads as a "
+                  "std::string in either layout";
     g_layout = layout;
     g_resolved = true;
     return g_layout;
+  }
+
+  // The local player's own record sits between the largest id and the slot
+  // arrays. Its exact offset depends on the packed width of the id, so it is
+  // searched for rather than computed - and it is not worth failing over.
+  for (std::uint32_t offset = 4; offset < layout.object_array; ++offset) {
+    std::string name;
+    if (ReadStdString(layout.player_pool + offset, layout.string_variant,
+                      &name) &&
+        name.size() >= 3) {
+      layout.local_name = offset;
+      break;
+    }
   }
 
   layout.valid = true;
@@ -327,9 +357,10 @@ const Layout& ResolveLayout() {
   g_resolved   = true;
 
   LOG_INFO("SA-MP layout resolved: CNetGame=0x{:08X} host={} pools=0x{:08X} "
-           "playerPool=0x{:08X} objects=+0x{:X} string layout {}",
+           "playerPool=0x{:08X} objects=+0x{:X} localName=+0x{:X} "
+           "string layout {}",
            layout.net_game, layout.host, layout.pools, layout.player_pool,
-           layout.object_array, layout.string_variant);
+           layout.object_array, layout.local_name, layout.string_variant);
   return g_layout;
 }
 
@@ -377,14 +408,16 @@ json ReadWorld() {
   }
 
   std::string local_name;
-  ReadStdString(layout.player_pool + 0x0C, layout.string_variant, &local_name);
-  std::uint32_t local_id = 0;
-  asi::mem::Read<std::uint32_t>(layout.player_pool + 0x04, &local_id);
+  if (layout.local_name != 0)
+    ReadStdString(layout.player_pool + layout.local_name, layout.string_variant,
+                  &local_name);
+  std::uint16_t local_id = 0;
+  asi::mem::Read<std::uint16_t>(layout.player_pool + 0x04, &local_id);
 
   return json{
       {"resolved", true},
       {"host", layout.host},
-      {"self", {{"id", local_id & 0xFFFF}, {"name", local_name}}},
+      {"self", {{"id", local_id}, {"name", local_name}}},
       {"players", std::move(players)},
       {"player_count", players.size()},
   };

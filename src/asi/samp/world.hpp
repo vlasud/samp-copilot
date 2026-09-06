@@ -37,6 +37,9 @@ struct Layout {
   std::uint32_t  not_empty_array = 0;
   // 0 or 1: which MSVC std::string layout this build uses.
   int            string_variant = -1;
+  // Where the local player's own name sits inside CPlayerPool. Found rather
+  // than computed, and optional: the pool is worth reading without it.
+  std::uint32_t  local_name = 0;
   // The host address read out of CNetGame - the proof the root pointer is real.
   std::string    host;
   std::string    note;
