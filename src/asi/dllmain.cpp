@@ -92,9 +92,11 @@ DWORD WINAPI Worker(LPVOID) {
     }
   }
 
-  // Nothing to pump: the HTTP transport and the frame hook each run on their
-  // own. This loop only keeps the request counter on the overlay fresh.
+  // The HTTP transport and the frame hook each run on their own; this loop
+  // keeps the overlay's request counter fresh and gives the frame hook a
+  // chance to re-point Reset once the game's device exists.
   while (g_running.load(std::memory_order_acquire)) {
+    FrameHook::AdoptGameDevice();
     StatusSource::Mcp current = StatusSource::mcp();
     current.requests = transport.requests();
     StatusSource::SetMcp(current);

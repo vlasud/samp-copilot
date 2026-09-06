@@ -36,6 +36,10 @@ constexpr std::size_t kPatchBytes = 5;  // x86 relative jump
 void*         g_present_target  = nullptr;
 void*         g_endscene_target = nullptr;
 void*         g_reset_target    = nullptr;
+
+// The first device the game hands us, and whether its vtable has been examined.
+std::atomic<void*> g_game_device{nullptr};
+std::atomic<bool>  g_device_adopted{false};
 unsigned char g_present_patch[kPatchBytes]  = {};
 unsigned char g_endscene_patch[kPatchBytes] = {};
 
@@ -95,6 +99,7 @@ HRESULT APIENTRY HookedPresent(IDirect3DDevice9* device, const RECT* src,
                                const RECT* dest, HWND window,
                                const RGNDATA* dirty) {
   g_present_seen.store(true, std::memory_order_relaxed);
+  g_game_device.store(device, std::memory_order_relaxed);
   Tick();
   const HRESULT hr = g_original_present(device, src, dest, window, dirty);
 
@@ -107,6 +112,7 @@ HRESULT APIENTRY HookedPresent(IDirect3DDevice9* device, const RECT* src,
 }
 
 HRESULT APIENTRY HookedEndScene(IDirect3DDevice9* device) {
+  g_game_device.store(device, std::memory_order_relaxed);
   // RenderWare can present through a swap chain instead of the device, in
   // which case Present never fires and EndScene has to drive the tick. Once
   // Present is seen, EndScene stops ticking so no frame is counted twice.
@@ -303,6 +309,40 @@ FrameHook::Integrity FrameHook::CheckIntegrity() {
         memcmp(g_endscene_target, g_endscene_patch, kPatchBytes) == 0;
   }
   return out;
+}
+
+void FrameHook::AdoptGameDevice() {
+  if (!g_installed.load(std::memory_order_acquire)) return;
+  if (g_device_adopted.load(std::memory_order_acquire)) return;
+
+  auto* device = static_cast<IDirect3DDevice9*>(
+      g_game_device.load(std::memory_order_relaxed));
+  if (!device) return;
+  g_device_adopted.store(true, std::memory_order_release);
+
+  void** vtable = *reinterpret_cast<void***>(device);
+  void*  actual = vtable[kResetSlot];
+
+  LOG_INFO("game device Reset -> {} (we hooked {})",
+           mem::DescribeAddress(reinterpret_cast<std::uintptr_t>(actual)),
+           mem::DescribeAddress(reinterpret_cast<std::uintptr_t>(g_reset_target)));
+  if (actual == g_reset_target) {
+    LOG_INFO("Reset hook already covers the game's device");
+    return;
+  }
+
+  if (g_reset_target) MH_RemoveHook(g_reset_target);
+  g_original_reset = nullptr;
+  if (MH_CreateHook(actual, &HookedReset,
+                    reinterpret_cast<void**>(&g_original_reset)) != MH_OK ||
+      MH_EnableHook(actual) != MH_OK) {
+    LOG_ERROR("could not hook the game device's Reset - a device loss will "
+              "still fail");
+    g_reset_target = nullptr;
+    return;
+  }
+  g_reset_target = actual;
+  LOG_INFO("Reset hook moved onto the game device's own entry point");
 }
 
 bool FrameHook::installed() { return g_installed.load(std::memory_order_acquire); }

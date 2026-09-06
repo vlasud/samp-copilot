@@ -36,7 +36,7 @@ Copy `bot.asi` into the game folder (`D:\SAMP`). The ASI loader already there
 
 ## Use
 
-Start the game. **F9** toggles the in-game panel (F8 is GTA's screenshot key), which shows the frame counter,
+Start the game. **F11** toggles the in-game panel (F8 is GTA's screenshot key), which shows the frame counter,
 hook integrity, the SA-MP build, the MCP endpoint and the tail of the log -
 everything that used to require alt-tabbing to a terminal.
 
@@ -60,8 +60,11 @@ reading:
 - `Present -> ...`, `EndScene -> ...`, `Reset -> ...` name the module that owns
   each vtable slot. On this machine Present and EndScene are `d3d9.dll` but
   Reset is `apphelp.dll`: GTA SA runs under a Windows compatibility shim that
-  owns that slot. `Reset hook fired for the first time` says whether the shim
-  still routes through us.
+  owns that slot.
+- `game device Reset -> ... (we hooked ...)` compares the entry point the game's
+  own device uses against the one resolved at startup from a throwaway device.
+  They are not always the same, and the hook moves onto the game's if they
+  differ.
 - `overlay faulted while drawing` means the panel hit an access violation and
   switched itself off. The rest of the module keeps running.
 - `CRASH ...` names the exception, the faulting module and offset, and the
@@ -94,6 +97,12 @@ out of exclusive fullscreen loses the device; `Reset` then returns
 alive, and the game gives up with its own error box. Resources are released on
 the first of three signals: `Present` returning `D3DERR_DEVICELOST`,
 `TestCooperativeLevel` reporting anything but `D3D_OK`, or the Reset hook.
+
+Releasing is only half of it - the release has to happen *before* the game's
+Reset, which means intercepting the Reset the game actually calls. Resolving
+that address from a throwaway device is not enough when a shim owns the slot,
+so the hook re-points itself onto the game device's own vtable entry once that
+device exists.
 
 ## SA-MP versions
 

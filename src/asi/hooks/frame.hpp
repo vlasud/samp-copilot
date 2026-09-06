@@ -53,6 +53,17 @@ class FrameHook {
   };
   // Safe from any thread: it only reads code bytes in d3d9.dll.
   static Integrity CheckIntegrity();
+
+  // Re-points the Reset hook at the function the game's own device actually
+  // uses.
+  //
+  // The install-time addresses come from a throwaway device, and that is not
+  // always the same vtable the game ends up with - a compatibility shim owns
+  // this slot here. Getting it wrong is not cosmetic: if Reset slips past us
+  // we never release our D3D resources, and the game's Reset then fails with
+  // D3DERR_INVALIDCALL. Call periodically from any thread; it does its work
+  // once.
+  static void AdoptGameDevice();
 };
 
 }  // namespace gtabot::asi

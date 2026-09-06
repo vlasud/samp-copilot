@@ -23,8 +23,8 @@
 namespace gtabot::asi {
 namespace {
 
-// F9: F8 is GTA's own screenshot key.
-constexpr int kToggleKey = VK_F9;
+// F11: F8 is GTA's screenshot key and F9 was taken too.
+constexpr int kToggleKey = VK_F11;
 constexpr int kLogLines  = 14;
 // Rebuilding the status json costs allocations; at 96 fps that is pure waste
 // for numbers a human reads. Refresh it four times a second instead.
@@ -91,7 +91,7 @@ bool Initialise(IDirect3DDevice9* device) {
 
   g_device      = device;
   g_initialised = true;
-  LOG_INFO("overlay initialised on hwnd 0x{:08X} (F9 toggles it)",
+  LOG_INFO("overlay initialised on hwnd 0x{:08X} (F11 toggles it)",
            reinterpret_cast<std::uintptr_t>(g_window));
   return true;
 }
