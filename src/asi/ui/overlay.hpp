@@ -27,6 +27,12 @@ class Overlay {
 
   static void Shutdown();
 
+  // Called by the frame hook when drawing faulted. The panel is a debugging
+  // aid; it does not get to take someone's session with it, so it switches
+  // itself off for good and the game carries on.
+  static void DisableAfterFault();
+  static bool disabled();
+
   static bool visible();
   static void SetVisible(bool visible);
 };

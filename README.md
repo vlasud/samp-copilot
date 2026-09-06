@@ -36,7 +36,7 @@ Copy `bot.asi` into the game folder (`D:\SAMP`). The ASI loader already there
 
 ## Use
 
-Start the game. **F8** toggles the in-game panel, which shows the frame counter,
+Start the game. **F9** toggles the in-game panel (F8 is GTA's screenshot key), which shows the frame counter,
 hook integrity, the SA-MP build, the MCP endpoint and the tail of the log -
 everything that used to require alt-tabbing to a terminal.
 
@@ -51,6 +51,19 @@ Both talk plain JSON-RPC over HTTP; `tools/mcp_http.py` is the whole client and
 is short enough to paste into an agent loop.
 
 The mod also writes `bot.asi.log` beside itself.
+
+## When it crashes
+
+`bot.asi.log` is written before anything else and holds three things worth
+reading:
+
+- `Present -> ...`, `EndScene -> ...`, `Reset -> ...` name the module that owns
+  each vtable slot. If they are not all `d3d9.dll`, another overlay (NVIDIA,
+  Steam, sampvoice) got there first and we are chaining onto its hook.
+- `overlay faulted while drawing` means the panel hit an access violation and
+  switched itself off. The rest of the module keeps running.
+- `CRASH ...` names the exception, the faulting module and offset, and the
+  address being accessed. It is logged before the game's own handler runs.
 
 ## A frozen frame counter
 

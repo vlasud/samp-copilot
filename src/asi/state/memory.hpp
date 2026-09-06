@@ -30,6 +30,10 @@ struct Region {
 
 Module FindModule(const wchar_t* name);
 
+// "d3d9.dll+0x1B70", or "0x680C05D0 (no module)". Used to say whose code we
+// are about to hook, and where a crash actually happened.
+std::string DescribeAddress(std::uintptr_t address);
+
 // True when [address, address+size) is committed and readable.
 bool IsReadable(std::uintptr_t address, std::size_t size);
 

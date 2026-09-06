@@ -29,6 +29,8 @@ class Bridge {
   // is producing nothing at all.
   static void SetWorld(json world);
   static json GetWorld(std::int64_t* age_ms);
+  // Just the age, without copying the snapshot - the overlay asks every frame.
+  static std::int64_t world_age_ms();
 
   static std::size_t pending_tasks();
   // Tasks dropped because the queue was full - a stuck game thread, not a

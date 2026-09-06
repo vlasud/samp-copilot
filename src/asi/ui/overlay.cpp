@@ -23,12 +23,16 @@
 namespace gtabot::asi {
 namespace {
 
-// F8: far enough from anything GTA or SA-MP binds by default.
-constexpr int kToggleKey = VK_F8;
+// F9: F8 is GTA's own screenshot key.
+constexpr int kToggleKey = VK_F9;
 constexpr int kLogLines  = 14;
+// Rebuilding the status json costs allocations; at 96 fps that is pure waste
+// for numbers a human reads. Refresh it four times a second instead.
+constexpr unsigned long long kRefreshMs = 250;
 
 bool               g_initialised = false;
 bool               g_visible     = true;
+bool               g_disabled    = false;
 IDirect3DDevice9*  g_device      = nullptr;
 HWND               g_window      = nullptr;
 bool               g_toggle_down = false;
@@ -86,7 +90,7 @@ bool Initialise(IDirect3DDevice9* device) {
 
   g_device      = device;
   g_initialised = true;
-  LOG_INFO("overlay initialised on hwnd 0x{:08X} (F8 toggles it)",
+  LOG_INFO("overlay initialised on hwnd 0x{:08X} (F9 toggles it)",
            reinterpret_cast<std::uintptr_t>(g_window));
   return true;
 }
@@ -98,7 +102,15 @@ void PollToggle() {
 }
 
 void DrawPanel() {
-  const json status = BuildStatusSnapshot();
+  static json               cached;
+  static unsigned long long cached_at = 0;
+  const unsigned long long now = GetTickCount64();
+  if (cached.is_null() || now - cached_at >= kRefreshMs) {
+    cached    = BuildStatusSnapshot();
+    cached_at = now;
+  }
+
+  const json& status = cached;
   const json frame  = status.value("frame", json::object());
   const json hook   = status.value("hook", json::object());
   const std::string verdict = status.value("verdict", std::string{"?"});
@@ -143,8 +155,7 @@ void DrawPanel() {
   Label("in flight", std::to_string(mcp::Rpc::in_flight()) + "  timed out " +
                          std::to_string(mcp::Rpc::timed_out()));
 
-  std::int64_t world_age_ms = -1;
-  Bridge::GetWorld(&world_age_ms);
+  const std::int64_t world_age_ms = Bridge::world_age_ms();
   Label("world age", world_age_ms < 0 ? "never built"
                                       : std::to_string(world_age_ms) + " ms");
   Label("task queue", std::to_string(Bridge::pending_tasks()) + " pending, " +
@@ -165,7 +176,7 @@ void DrawPanel() {
 }  // namespace
 
 void Overlay::Render(IDirect3DDevice9* device) {
-  if (!device) return;
+  if (!device || g_disabled) return;
 
   // The game can recreate its device outright rather than resetting it, which
   // leaves the backend pointing at a dead object.
@@ -196,6 +207,17 @@ void Overlay::OnResetDevice() {
 }
 
 void Overlay::Shutdown() { Teardown(); }
+
+void Overlay::DisableAfterFault() {
+  // Deliberately does not tear ImGui down: whatever faulted may be mid-way
+  // through its own state, and unwinding it now is another chance to crash.
+  g_disabled = true;
+  g_visible  = false;
+  LOG_ERROR("overlay faulted while drawing - switched off for this session, "
+            "the rest of the module keeps running");
+}
+
+bool Overlay::disabled() { return g_disabled; }
 
 bool Overlay::visible() { return g_visible; }
 

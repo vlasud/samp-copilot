@@ -2,6 +2,7 @@ add_library(bot MODULE
   dllmain.cpp
   types.cpp
   log.cpp
+  crash_log.cpp
   bridge.cpp
   hooks/frame.cpp
   samp/version.cpp

@@ -4,6 +4,7 @@
 #include <psapi.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 
 namespace gtabot::asi::mem {
@@ -41,6 +42,41 @@ Module FindModule(const wchar_t* name) {
   module.base = reinterpret_cast<std::uintptr_t>(info.lpBaseOfDll);
   module.size = info.SizeOfImage;
   return module;
+}
+
+std::string DescribeAddress(std::uintptr_t address) {
+  char buffer[64];
+  HMODULE owner = nullptr;
+  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                              GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                          reinterpret_cast<LPCWSTR>(address), &owner) ||
+      !owner) {
+    std::snprintf(buffer, sizeof(buffer), "0x%08X (no module)",
+                  static_cast<unsigned int>(address));
+    return buffer;
+  }
+
+  wchar_t path[MAX_PATH] = {};
+  GetModuleFileNameW(owner, path, MAX_PATH);
+  std::wstring wide(path);
+  const std::size_t slash = wide.find_last_of(L"\\/");
+  if (slash != std::wstring::npos) wide = wide.substr(slash + 1);
+
+  // Narrowing wchar_t to char by truncation loses anything outside ASCII, and
+  // a module path is not guaranteed to stay inside it.
+  std::string name;
+  const int needed = WideCharToMultiByte(CP_UTF8, 0, wide.c_str(),
+                                         static_cast<int>(wide.size()), nullptr,
+                                         0, nullptr, nullptr);
+  if (needed > 0) {
+    name.resize(static_cast<std::size_t>(needed));
+    WideCharToMultiByte(CP_UTF8, 0, wide.c_str(), static_cast<int>(wide.size()),
+                        name.data(), needed, nullptr, nullptr);
+  }
+  std::snprintf(buffer, sizeof(buffer), "+0x%X",
+                static_cast<unsigned int>(address -
+                                          reinterpret_cast<std::uintptr_t>(owner)));
+  return name + buffer;
 }
 
 bool IsReadable(std::uintptr_t address, std::size_t size) {

@@ -15,6 +15,7 @@
 #include <atomic>
 
 #include "bridge.hpp"
+#include "crash_log.hpp"
 #include "hooks/frame.hpp"
 #include "log.hpp"
 #include "mcp/http.hpp"
@@ -55,6 +56,7 @@ void OnFrame() {
 DWORD WINAPI Worker(LPVOID) {
   InitLogging("bot.asi.log");
   LOG_INFO("bot.asi v{} starting", GTABOT_VERSION);
+  InstallCrashLogger();
 
   // Install before waiting for SA-MP: the hook needs no client, and having it
   // running early means the frame counter itself becomes a liveness signal.

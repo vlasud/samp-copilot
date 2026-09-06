@@ -59,6 +59,11 @@ json Bridge::GetWorld(std::int64_t* age_ms) {
   return g_world;
 }
 
+std::int64_t Bridge::world_age_ms() {
+  std::lock_guard<std::mutex> lock(g_world_mutex);
+  return g_world_ms ? NowMillis() - g_world_ms : -1;
+}
+
 std::size_t Bridge::pending_tasks() {
   std::lock_guard<std::mutex> lock(g_task_mutex);
   return g_tasks.size();

@@ -9,6 +9,7 @@
 #include <cstring>
 
 #include "log.hpp"
+#include "state/memory.hpp"
 #include "ui/overlay.hpp"
 
 namespace gtabot::asi {
@@ -80,6 +81,16 @@ void Tick() {
   t_in_callback = false;
 }
 
+// The overlay is a debugging aid living inside someone's running game. A fault
+// in it must cost the panel, not the session - and it must say so in the log.
+void RenderOverlayGuarded(IDirect3DDevice9* device) {
+  __try {
+    Overlay::Render(device);
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    Overlay::DisableAfterFault();
+  }
+}
+
 HRESULT APIENTRY HookedPresent(IDirect3DDevice9* device, const RECT* src,
                                const RECT* dest, HWND window,
                                const RGNDATA* dirty) {
@@ -97,11 +108,7 @@ HRESULT APIENTRY HookedEndScene(IDirect3DDevice9* device) {
   // The overlay draws here rather than in Present: this is the one place where
   // the device is still inside a BeginScene/EndScene pair and will take our
   // geometry.
-  try {
-    Overlay::Render(device);
-  } catch (...) {
-    // Never let the panel unwind through the game's render code.
-  }
+  RenderOverlayGuarded(device);
   return g_original_endscene(device);
 }
 
@@ -192,10 +199,15 @@ bool FrameHook::Install(FrameCallback on_frame) {
   void* endscene = nullptr;
   void* reset    = nullptr;
   if (!ResolveVTable(&present, &endscene, &reset)) return false;
-  LOG_INFO("d3d9 vtable resolved: Present=0x{:08X} EndScene=0x{:08X} Reset=0x{:08X}",
-           reinterpret_cast<unsigned int>(present),
-           reinterpret_cast<unsigned int>(endscene),
-           reinterpret_cast<unsigned int>(reset));
+  // Which module owns each slot matters: another overlay (NVIDIA, Steam,
+  // sampvoice) may already have replaced some of them with its own handlers,
+  // in which case we are chaining onto its hook rather than onto d3d9.
+  LOG_INFO("Present  -> {}", mem::DescribeAddress(
+                                 reinterpret_cast<std::uintptr_t>(present)));
+  LOG_INFO("EndScene -> {}", mem::DescribeAddress(
+                                 reinterpret_cast<std::uintptr_t>(endscene)));
+  LOG_INFO("Reset    -> {}", mem::DescribeAddress(
+                                 reinterpret_cast<std::uintptr_t>(reset)));
 
   if (MH_Initialize() != MH_OK) {
     LOG_ERROR("MH_Initialize failed");
