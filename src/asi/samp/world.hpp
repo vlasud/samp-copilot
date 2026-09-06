@@ -44,9 +44,17 @@ struct Layout {
   // never one of the remote slots, so a candidate that names an occupied slot
   // is the wrong field.
   std::uint32_t  local_id_at = 0;
-  // Ping inside CPlayerInfo, found by the shape of the values across players.
-  // Score is the field immediately before it. Zero means neither was located.
-  std::uint32_t  ping_at = 0;
+  // How many bytes this build's std::string occupies. Confirmed by a fact, not
+  // by a guess: the field right after the local player's name is a
+  // CLocalPlayer*, so the width that puts a heap pointer there is the width.
+  std::uint32_t  string_width = 0;
+  // Derived from string_width and the declaration order, not searched for.
+  // CPlayerInfo is { player*, isNPC, align, name, score, ping }.
+  std::uint32_t  score_at = 0;
+  std::uint32_t  ping_at  = 0;
+  // True when the local player's own ping read back as a plausible number,
+  // which is the end-to-end check that the offsets above are right.
+  bool           confirmed = false;
   // The host address read out of CNetGame - the proof the root pointer is real.
   std::string    host;
   std::string    note;
