@@ -1,0 +1,24 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "x86",
+      "displayName": "MSVC x86 (Visual Studio 2026)",
+      "description": "The only supported configuration: gta_sa.exe is 32-bit.",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build/x86"
+    },
+    {
+      "name": "x86-ninja",
+      "displayName": "MSVC x86 (Ninja, needs vcvars32)",
+      "description": "Faster, but you must configure from a 'x86 Native Tools' prompt.",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/x86-ninja"
+    }
+  ],
+  "buildPresets": [
+    { "name": "debug",   "configurePreset": "x86", "configuration": "Debug" },
+    { "name": "release", "configurePreset": "x86", "configuration": "RelWithDebInfo" }
+  ]
+}
