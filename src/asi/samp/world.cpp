@@ -1194,12 +1194,25 @@ json ReadWorld() {
   // after connecting.
   static std::uint32_t sync_at = 0;
   static unsigned long long next_sync_attempt_ms = 0;
+  // Re-checked on a slow clock rather than doubted by every value read
+  // through it, so one dead player cannot cost the field.
+  if (sync_at != 0 && GetTickCount64() >= next_sync_attempt_ms) {
+    next_sync_attempt_ms = GetTickCount64() + 30000;
+    std::size_t confirmed = 0;
+    const std::uint32_t again = FindReportedHealth(layout, &confirmed);
+    if (again != 0 && again != sync_at) {
+      LOG_WARN("health moved from +0x{:X} to +0x{:X}", sync_at, again);
+      sync_at = again;
+    }
+  }
   if (sync_at == 0 && GetTickCount64() >= next_sync_attempt_ms) {
     next_sync_attempt_ms = GetTickCount64() + 3000;
     std::size_t samples = 0;
     sync_at = FindReportedHealth(layout, &samples);
     if (sync_at != 0) {
-      LOG_INFO("reported health at CRemotePlayer+0x{:X}", sync_at);
+      LOG_INFO("reported health at CRemotePlayer+0x{:X}, from {} players",
+               sync_at, samples);
+      next_sync_attempt_ms = GetTickCount64() + 30000;
     } else if (samples < kHealthSamples) {
       // Not a failure to find it - nobody is close enough to look at. Saying
       // so beats writing an empty table, which is what a one-shot diagnostic
@@ -1282,16 +1295,17 @@ json ReadWorld() {
       if (sync_at != 0) {
         float health = 0.0f;
         float armour = 0.0f;
+        // The same test that identified the column, and no stricter. Reading
+        // it as "health must be above zero" threw the offset away the moment
+        // one player was dead - and threw it away for everyone else in the
+        // same pass, which is why no health appeared at all.
         if (asi::mem::Read<float>(remote + sync_at, &health) &&
             asi::mem::Read<float>(remote + sync_at - 4, &armour) &&
-            health > 0.0f && health <= 100.0f && armour >= 0.0f &&
-            armour <= 100.0f) {
+            health >= 0.0f && health <= 255.0f &&
+            health == static_cast<float>(static_cast<int>(health)) &&
+            armour >= 0.0f && armour <= 255.0f) {
           entry["health"] = health;
           entry["armour"] = armour;
-        } else {
-          // The offset stopped making sense, so it was never the right one.
-          // Better to drop it and look again than to keep publishing it.
-          sync_at = 0;
         }
       }
     } else {
