@@ -997,75 +997,8 @@ bool DumpPlayerRecords() {
   return true;
 }
 
-// Finds m_fReportedHealth: the value the server sent, and the one SA-MP draws
-// over a nametag.
-//
-// A previous attempt matched on four bytes each within a plausible range and
-// picked up something else entirely - living players read back as 0 hp. Ranges
-// are too weak a claim when the samples resemble each other.
-//
-// A float is a much narrower target, and health has a giveaway: most players
-// are on exactly 100. A coordinate is never exactly 100.0f for half a dozen
-// people at once, so that, and not a range, is what identifies the field.
-constexpr std::uint32_t kRemoteWindow = 0x400;
+constexpr std::uint32_t kRemoteWindow  = 0x400;
 constexpr int           kHealthSamples = 6;
-
-void CollectStreamedRemotes(const Layout& layout,
-                            std::vector<std::uintptr_t>* remotes,
-                            std::vector<int>* ids, std::size_t limit);
-
-// Prints every float column in CRemotePlayer that could be a health, across
-// the players streamed in right now.
-//
-// The search for it assumed most players sit on exactly 100 and found
-// nothing, so rather than loosen that guess and try again, this shows what the
-// columns actually contain and lets the health be recognised by eye.
-void DumpRemoteFloats(const Layout& layout) {
-  const std::string path = ModuleDirectory() + "bot.remote-floats.txt";
-  std::ofstream file(path, std::ios::trunc);
-  if (!file) return;
-
-  std::vector<std::uintptr_t> remotes;
-  std::vector<int> ids;
-  CollectStreamedRemotes(layout, &remotes, &ids, 8);
-
-  char line[256];
-  std::snprintf(line, sizeof(line),
-                "float columns in CRemotePlayer, %u players streamed\n"
-                "a column that is mostly 100 with the odd lower value is the\n"
-                "health the nametag bar is drawn from.\n\noffset  ",
-                static_cast<unsigned>(remotes.size()));
-  file << line;
-  for (std::size_t i = 0; i < ids.size(); ++i) {
-    std::snprintf(line, sizeof(line), "%-9d", ids[i]);
-    file << line;
-  }
-  file << "\n";
-
-  for (std::uint32_t offset = 0; offset + 4 <= kRemoteWindow; ++offset) {
-    bool interesting = !remotes.empty();
-    for (std::size_t i = 0; i < remotes.size() && interesting; ++i) {
-      float value = 0.0f;
-      std::memcpy(&value, reinterpret_cast<const void*>(remotes[i] + offset),
-                  sizeof(value));
-      // Anything that could be a health or an armour, and nothing else.
-      interesting = value == value && value >= 0.0f && value <= 300.0f;
-    }
-    if (!interesting) continue;
-
-    std::snprintf(line, sizeof(line), "+0x%03X  ", offset);
-    file << line;
-    for (std::size_t i = 0; i < remotes.size(); ++i) {
-      float value = 0.0f;
-      std::memcpy(&value, reinterpret_cast<const void*>(remotes[i] + offset),
-                  sizeof(value));
-      std::snprintf(line, sizeof(line), "%-9.2f", value);
-      file << line;
-    }
-    file << "\n";
-  }
-  LOG_INFO("wrote {}", path);
-}
 
 // The CRemotePlayer of everyone streamed in right now, with their ids.
 void CollectStreamedRemotes(const Layout& layout,
@@ -1090,15 +1023,83 @@ void CollectStreamedRemotes(const Layout& layout,
   }
 }
 
+// Prints every float column in CRemotePlayer that could be a health, across
+// the players streamed in right now, so the field can be recognised by eye
+// when a search for it comes up empty.
+void DumpRemoteFloats(const Layout& layout) {
+  const std::string path = ModuleDirectory() + "bot.remote-floats.txt";
+  std::ofstream file(path, std::ios::trunc);
+  if (!file) return;
+
+  std::vector<std::uintptr_t> remotes;
+  std::vector<int> ids;
+  CollectStreamedRemotes(layout, &remotes, &ids, 8);
+
+  char line[256];
+  std::snprintf(line, sizeof(line),
+                "float columns in CRemotePlayer, %u players streamed\n"
+                "whole numbers between 1 and 255 across every player is a\n"
+                "health; anything fractional is a coordinate or a speed.\n\n"
+                "offset  ",
+                static_cast<unsigned>(remotes.size()));
+  file << line;
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    std::snprintf(line, sizeof(line), "%-9d", ids[i]);
+    file << line;
+  }
+  file << "\n";
+
+  for (std::uint32_t offset = 0; offset + 4 <= kRemoteWindow; ++offset) {
+    bool interesting = !remotes.empty();
+    for (std::size_t i = 0; i < remotes.size() && interesting; ++i) {
+      float value = 0.0f;
+      std::memcpy(&value, reinterpret_cast<const void*>(remotes[i] + offset),
+                  sizeof(value));
+      interesting = value == value && value >= 0.0f && value <= 300.0f;
+    }
+    if (!interesting) continue;
+
+    std::snprintf(line, sizeof(line), "+0x%03X  ", offset);
+    file << line;
+    for (std::size_t i = 0; i < remotes.size(); ++i) {
+      float value = 0.0f;
+      std::memcpy(&value, reinterpret_cast<const void*>(remotes[i] + offset),
+                  sizeof(value));
+      std::snprintf(line, sizeof(line), "%-9.2f", value);
+      file << line;
+    }
+    file << "\n";
+  }
+  LOG_INFO("wrote {}", path);
+}
+
+// Finds m_fReportedHealth: the value the server sent, and the one SA-MP draws
+// over a nametag.
+//
+// Two earlier attempts got this wrong by describing the field loosely. Four
+// bytes within plausible ranges matched something that read living players as
+// 0 hp. Then "most players sit on exactly 100" matched nothing at all - of six
+// players streamed in, two were on 100 and the rest on 77, 84, 98 and 98.
+//
+// What actually distinguishes the column is structural rather than typical:
+// SA-MP receives health as a byte and stores it in a float, so every value is
+// a whole number. Six whole numbers in a row, all inside the range a health
+// can take, is not something a column of coordinates or speeds produces.
 std::uint32_t FindReportedHealth(const Layout& layout, std::size_t* samples) {
   std::vector<std::uintptr_t> remotes;
   CollectStreamedRemotes(layout, &remotes, nullptr, 16);
   *samples = remotes.size();
   if (static_cast<int>(remotes.size()) < kHealthSamples) return 0;
 
+  auto whole_number_in = [](float value, float low, float high) {
+    return value == value && value >= low && value <= high &&
+           value == static_cast<float>(static_cast<int>(value));
+  };
+
   for (std::uint32_t offset = 4; offset + 4 <= kRemoteWindow; ++offset) {
-    int at_full = 0;
     bool plausible = true;
+    float first = -1.0f;
+    bool varies = false;
 
     for (std::size_t i = 0; i < remotes.size() && plausible; ++i) {
       float health = 0.0f;
@@ -1109,16 +1110,20 @@ std::uint32_t FindReportedHealth(const Layout& layout, std::size_t* samples) {
                   reinterpret_cast<const void*>(remotes[i] + offset - 4),
                   sizeof(armour));
 
-      // Alive, within the server's usual ceiling, and armour right before it.
-      plausible = health == health && health > 0.0f && health <= 100.0f &&
-                  armour == armour && armour >= 0.0f && armour <= 100.0f;
-      if (health == 100.0f) ++at_full;
+      // A live player has some health; both arrive as bytes, so both are
+      // whole. Armour sits in the word before it, per the declaration.
+      plausible = whole_number_in(health, 1.0f, 255.0f) &&
+                  whole_number_in(armour, 0.0f, 255.0f);
+      if (first < 0.0f)
+        first = health;
+      else if (health != first)
+        varies = true;
     }
-    // Half the sample sitting on exactly full health is what a coordinate
-    // cannot imitate.
-    if (plausible && at_full * 2 >= static_cast<int>(remotes.size()))
-      return offset;
+    // All six on the same number would also be true of a constant, so the
+    // players have to differ before this counts as identified.
+    if (plausible && varies) return offset;
   }
+
   return 0;
 }
 
