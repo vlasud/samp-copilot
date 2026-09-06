@@ -135,8 +135,8 @@ const char* WeaponName(std::uint32_t id) {
 constexpr int kMaxVehicles = 2000;
 // m_nCount plus a hundred-entry waiting list put the arrays a little over
 // 0x1100 in; the window is generous because that is arithmetic, not fact.
-constexpr std::uint32_t kVehicleSearchFrom = 0x1000;
-constexpr std::uint32_t kVehicleSearchTo   = 0x1400;
+constexpr std::uint32_t kVehicleSearchFrom = 0x0800;
+constexpr std::uint32_t kVehicleSearchTo   = 0x2000;
 // CEntity::m_nModelIndex, from plugin-sdk. The same CPlaceable base as a ped,
 // so position comes from the matrix we already trust.
 constexpr std::uint32_t kEntityModel = 0x22;
@@ -516,28 +516,38 @@ bool LooksLikeVehicleArrays(std::uintptr_t pool, std::uint32_t offset) {
   const auto* flag_values   = reinterpret_cast<const std::uint32_t*>(flags);
   const auto* game_values   = reinterpret_cast<const std::uint32_t*>(game);
 
-  int occupied = 0;
+  // A cheap sample first: two thousand slots is a lot to walk for every
+  // candidate offset, and garbage fails on the first few.
+  for (int i = 0; i < kMaxVehicles; i += 128)
+    if (flag_values[i] > 1) return false;
+
+  auto plausible = [](std::uint32_t value) {
+    return value == 0 ||
+           (value >= 0x00010000u && value < 0xC0000000u && value % 4 == 0);
+  };
+
+  int flagged = 0;
+  int with_entity = 0;
   for (int i = 0; i < kMaxVehicles; ++i) {
-    const bool flagged = flag_values[i] != 0;
-    if (flagged != (object_values[i] != 0)) return false;
-    if (!flagged) continue;
-    // Cheap range checks for every slot; the costly one runs on a few.
-    if (object_values[i] < 0x00010000u || object_values[i] >= 0xC0000000u)
-      return false;
-    if (game_values[i] != 0 &&
-        (game_values[i] < 0x00010000u || game_values[i] >= 0xC0000000u))
-      return false;
-    ++occupied;
+    // The signature is an array of booleans flanked by two arrays of
+    // pointers. Requiring the flag and the wrapper to agree was an assumption
+    // too far: the server can know about a vehicle that is not streamed to us,
+    // and that is exactly the case this failed on.
+    if (flag_values[i] > 1) return false;
+    if (!plausible(object_values[i]) || !plausible(game_values[i])) return false;
+    if (flag_values[i] != 0) ++flagged;
+    if (game_values[i] != 0) ++with_entity;
   }
-  if (occupied == 0) return false;
+  if (flagged == 0 || flagged >= kMaxVehicles) return false;
+  if (with_entity == 0) return false;
 
   int checked = 0;
   for (int i = 0; i < kMaxVehicles && checked < 4; ++i) {
-    if (flag_values[i] == 0) continue;
-    if (!IsHeapPointer(object_values[i])) return false;
+    if (game_values[i] == 0) continue;
+    if (!IsHeapPointer(game_values[i])) return false;
     ++checked;
   }
-  return true;
+  return checked > 0;
 }
 
 std::string CommandLineHost() {
@@ -787,6 +797,27 @@ const Layout& ResolveLayout() {
       layout.local_id_at = offset;
       layout.local_id_occupied = present[value] != 0;
     }
+  }
+
+  // The vehicle pool lives in the same block of pointers as the player pool.
+  if (layout.pools != 0) {
+    for (int slot = 0; slot < kPoolSlotsToTry && layout.vehicle_pool == 0;
+         ++slot) {
+      std::uint32_t candidate = 0;
+      if (!asi::mem::Read<std::uint32_t>(layout.pools + slot * 4, &candidate))
+        continue;
+      if (!IsHeapPointer(candidate)) continue;
+      for (std::uint32_t inner = kVehicleSearchFrom; inner < kVehicleSearchTo;
+           ++inner) {
+        if (!LooksLikeVehicleArrays(candidate, inner)) continue;
+        layout.vehicle_pool    = candidate;
+        layout.vehicle_objects = inner;
+        LOG_INFO("vehicle pool at 0x{:08X}, objects +0x{:X}", candidate, inner);
+        break;
+      }
+    }
+    if (layout.vehicle_pool == 0)
+      LOG_WARN("no vehicle pool found in the block at 0x{:08X}", layout.pools);
   }
 
   layout.valid = true;
