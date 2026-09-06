@@ -97,7 +97,8 @@ def run_command(client, line):
                 marks.append("hp %d" % player["health"])
             if player.get("armour"):
                 marks.append("armour %d" % player["armour"])
-            if player.get("weapon_name") and player.get("weapon"):
+            # Weapon 0 is a fist, not an absent value - "if weapon" hid it.
+            if player.get("weapon_name") is not None:
                 marks.append(player["weapon_name"])
             if player.get("state") == 32:
                 marks.append("wasted")

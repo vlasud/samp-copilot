@@ -1010,6 +1010,75 @@ bool DumpPlayerRecords() {
 constexpr std::uint32_t kRemoteWindow = 0x400;
 constexpr int           kHealthSamples = 6;
 
+// Prints every float column in CRemotePlayer that could be a health, across
+// the players streamed in right now.
+//
+// The search for it assumed most players sit on exactly 100 and found
+// nothing, so rather than loosen that guess and try again, this shows what the
+// columns actually contain and lets the health be recognised by eye.
+void DumpRemoteFloats(const Layout& layout) {
+  const std::string path = ModuleDirectory() + "bot.remote-floats.txt";
+  std::ofstream file(path, std::ios::trunc);
+  if (!file) return;
+
+  const auto* objects = reinterpret_cast<const std::uint32_t*>(
+      layout.player_pool + layout.object_array);
+  const auto* present = reinterpret_cast<const std::uint32_t*>(
+      layout.player_pool + layout.not_empty_array);
+
+  std::vector<std::uintptr_t> remotes;
+  std::vector<int> ids;
+  for (int i = 0; i < kMaxPlayers && remotes.size() < 8; ++i) {
+    if (present[i] == 0) continue;
+    std::uint32_t remote = 0;
+    if (!asi::mem::Read<std::uint32_t>(objects[i], &remote)) continue;
+    if (!IsHeapPointer(remote)) continue;
+    std::uint32_t samp_ped = 0;
+    asi::mem::Read<std::uint32_t>(remote, &samp_ped);
+    if (GamePedOfSampPed(samp_ped) == 0) continue;
+    if (!asi::mem::IsReadable(remote, kRemoteWindow)) continue;
+    remotes.push_back(remote);
+    ids.push_back(i);
+  }
+
+  char line[256];
+  std::snprintf(line, sizeof(line),
+                "float columns in CRemotePlayer, %u players streamed\n"
+                "a column that is mostly 100 with the odd lower value is the\n"
+                "health the nametag bar is drawn from.\n\noffset  ",
+                static_cast<unsigned>(remotes.size()));
+  file << line;
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    std::snprintf(line, sizeof(line), "%-9d", ids[i]);
+    file << line;
+  }
+  file << "\n";
+
+  for (std::uint32_t offset = 0; offset + 4 <= kRemoteWindow; ++offset) {
+    bool interesting = !remotes.empty();
+    for (std::size_t i = 0; i < remotes.size() && interesting; ++i) {
+      float value = 0.0f;
+      std::memcpy(&value, reinterpret_cast<const void*>(remotes[i] + offset),
+                  sizeof(value));
+      // Anything that could be a health or an armour, and nothing else.
+      interesting = value == value && value >= 0.0f && value <= 300.0f;
+    }
+    if (!interesting) continue;
+
+    std::snprintf(line, sizeof(line), "+0x%03X  ", offset);
+    file << line;
+    for (std::size_t i = 0; i < remotes.size(); ++i) {
+      float value = 0.0f;
+      std::memcpy(&value, reinterpret_cast<const void*>(remotes[i] + offset),
+                  sizeof(value));
+      std::snprintf(line, sizeof(line), "%-9.2f", value);
+      file << line;
+    }
+    file << "\n";
+  }
+  LOG_INFO("wrote {}", path);
+}
+
 std::uint32_t FindReportedHealth(const Layout& layout) {
   const auto* objects = reinterpret_cast<const std::uint32_t*>(
       layout.player_pool + layout.object_array);
@@ -1086,8 +1155,15 @@ json ReadWorld() {
   if (sync_at == 0 && GetTickCount64() >= next_sync_attempt_ms) {
     next_sync_attempt_ms = GetTickCount64() + 3000;
     sync_at = FindReportedHealth(layout);
-    if (sync_at != 0)
+    if (sync_at != 0) {
       LOG_INFO("reported health at CRemotePlayer+0x{:X}", sync_at);
+    } else {
+      static bool described = false;
+      if (!described) {
+        described = true;
+        DumpRemoteFloats(layout);
+      }
+    }
   }
 
   std::size_t with_ping = 0;
