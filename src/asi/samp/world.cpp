@@ -626,22 +626,63 @@ bool IsVehicleEntity(std::uint32_t entity) {
   return ReadEntityPosition(entity).valid;
 }
 
-// Returns how many entries of the run are vehicles, and how long the run is.
-std::uint32_t CountVehicleRun(std::uintptr_t at, std::uint32_t max_entries,
-                              std::uint32_t* run_length) {
-  std::uint32_t found = 0;
-  std::uint32_t index = 0;
-  for (; index < max_entries; ++index) {
-    std::uint32_t value = 0;
-    if (!asi::mem::Read<std::uint32_t>(at + index * 4, &value)) break;
-    const bool pointerish =
-        value == 0 || (value >= 0x00010000u && value < 0xC0000000u &&
-                       value % 4 == 0);
-    if (!pointerish) break;
-    if (value != 0 && IsVehicleEntity(value)) ++found;
+// One linear pass per pool, with a hard ceiling on the expensive checks.
+//
+// The previous attempt walked up to two thousand entries at every one of
+// thirty-odd thousand offsets in every pool, and treated a null as a valid
+// entry - so a region of zeroes cost the full walk each time. That is
+// hundreds of millions of iterations on the render thread, which is not a
+// crash but a game that never finishes its first frame.
+//
+// Instead: sweep each pool once per alignment, marking which words point at a
+// vehicle, and keep the longest stretch of vehicles-and-nulls found. Cheap
+// range tests come first so that a pool full of zeroes costs almost nothing,
+// and the budget bounds the rest whatever the memory looks like.
+struct VehicleRun {
+  std::uint32_t offset = 0;
+  std::uint32_t length = 0;
+  std::uint32_t found  = 0;
+};
+
+bool CheapPointer(std::uint32_t value) {
+  return value >= 0x00010000u && value < 0xC0000000u && value % 4 == 0;
+}
+
+VehicleRun FindVehicleRun(std::uintptr_t pool, std::uint32_t window_bytes,
+                          std::uint32_t* budget) {
+  VehicleRun best;
+  const std::uint32_t words = window_bytes / 4;
+
+  for (std::uint32_t align = 0; align < 4; ++align) {
+    VehicleRun current;
+    bool open = false;
+
+    for (std::uint32_t i = 0; i < words; ++i) {
+      const std::uintptr_t at = pool + align + i * 4;
+      std::uint32_t value = 0;
+      if (!asi::mem::Read<std::uint32_t>(at, &value)) break;
+
+      bool belongs = value == 0;
+      if (!belongs && CheapPointer(value) && *budget > 0) {
+        --*budget;
+        if (IsVehicleEntity(value)) belongs = true;
+      }
+
+      if (belongs) {
+        if (!open) {
+          open = true;
+          current = VehicleRun{align + i * 4, 0, 0};
+        }
+        ++current.length;
+        if (value != 0) ++current.found;
+      } else if (open) {
+        if (current.found > best.found) best = current;
+        open = false;
+      }
+    }
+    if (open && current.found > best.found) best = current;
   }
-  *run_length = index;
-  return found;
+  return best;
 }
 
 std::string CommandLineHost() {
@@ -895,31 +936,36 @@ const Layout& ResolveLayout() {
 
   // The vehicle pool lives in the same block of pointers as the player pool.
   if (layout.pools != 0) {
-    std::uint32_t best_found = 0;
+    // Enough to recognise the array without letting the search off its lead.
+    std::uint32_t budget = 60000;
+    const ULONGLONG started = GetTickCount64();
+
     for (int slot = 0; slot < kPoolSlotsToTry; ++slot) {
       std::uint32_t pool = 0;
       if (!asi::mem::Read<std::uint32_t>(layout.pools + slot * 4, &pool))
         continue;
       if (!IsHeapPointer(pool)) continue;
 
-      for (std::uint32_t offset = 0; offset < kVehicleSearchTo; ++offset) {
-        std::uint32_t run = 0;
-        const std::uint32_t found =
-            CountVehicleRun(pool + offset, kMaxVehicles, &run);
-        if (found < kMinVehiclesFound || found <= best_found) continue;
-        best_found             = found;
-        layout.vehicle_pool    = pool;
-        layout.vehicle_objects = offset;
-        layout.vehicle_count   = run;
-      }
+      std::uint32_t window = kVehicleSearchTo;
+      while (window > 0x1000 && !asi::mem::IsReadable(pool, window)) window /= 2;
+
+      const VehicleRun run = FindVehicleRun(pool, window, &budget);
+      if (run.found < kMinVehiclesFound || run.found <= layout.vehicles_found)
+        continue;
+      layout.vehicle_pool    = pool;
+      layout.vehicle_objects = run.offset;
+      layout.vehicle_count   = run.length;
+      layout.vehicles_found  = run.found;
     }
+
     if (layout.vehicle_pool != 0)
-      LOG_INFO("vehicle entities at 0x{:08X}+0x{:X}, {} slots, {} of them cars",
+      LOG_INFO("vehicles at 0x{:08X}+0x{:X}: {} slots, {} of them cars, {} ms",
                layout.vehicle_pool, layout.vehicle_objects, layout.vehicle_count,
-               best_found);
+               layout.vehicles_found, GetTickCount64() - started);
     else
-      LOG_WARN("no run of vehicle entities found in the block at 0x{:08X}",
-               layout.pools);
+      LOG_WARN("no run of vehicle entities in the block at 0x{:08X} ({} ms, "
+               "budget left {})", layout.pools, GetTickCount64() - started,
+               budget);
   }
 
   layout.valid = true;

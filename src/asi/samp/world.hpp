@@ -62,6 +62,7 @@ struct Layout {
   std::uintptr_t vehicle_pool    = 0;
   std::uint32_t  vehicle_objects = 0;
   std::uint32_t  vehicle_count   = 0;
+  std::uint32_t  vehicles_found  = 0;
   // The host address read out of CNetGame - the proof the root pointer is real.
   std::string    host;
   std::string    note;
