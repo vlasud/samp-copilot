@@ -606,6 +606,22 @@ void DumpPools(const Layout& layout) {
   LOG_INFO("wrote {}", path);
 }
 
+// Synchronization::OnfootData carries four bytes in a row that the server sent
+// about a player: health, armour, current weapon, special action. SA-MP draws
+// the health bar over a nametag from this, so it is in memory and visible on
+// screen - which is the whole argument for it being findable.
+//
+// Computing where it sits inside CRemotePlayer means summing several nested
+// structures of unstated size, which is the arithmetic that has produced a
+// wrong answer every time it has been tried here. So it is searched for
+// instead, and four bytes each confined to a narrow range, agreeing across
+// half a dozen unrelated players, is a signature arbitrary memory does not
+// meet.
+constexpr std::uint32_t kSyncSearchTo   = 0x300;
+constexpr std::uint8_t  kMaxWeaponId    = 46;
+constexpr std::uint8_t  kMaxSpecialAction = 68;
+constexpr int           kSyncSamples    = 6;
+
 // The range the game reserves for vehicle models.
 constexpr std::int16_t kFirstVehicleModel = 400;
 constexpr std::int16_t kLastVehicleModel  = 611;
@@ -984,6 +1000,55 @@ bool DumpPlayerRecords() {
   return true;
 }
 
+// Collects the CRemotePlayer of every streamed player, then looks for the
+// offset where all of them read as a plausible health, armour, weapon and
+// special action - and where they are not all identical, since a row of
+// identical bytes proves nothing about what they mean.
+std::uint32_t FindSyncBlock(const Layout& layout) {
+  const auto* objects = reinterpret_cast<const std::uint32_t*>(
+      layout.player_pool + layout.object_array);
+  const auto* present = reinterpret_cast<const std::uint32_t*>(
+      layout.player_pool + layout.not_empty_array);
+
+  std::vector<std::uintptr_t> remotes;
+  for (int i = 0; i < kMaxPlayers && remotes.size() < 16; ++i) {
+    if (present[i] == 0) continue;
+    std::uint32_t remote = 0;
+    if (!asi::mem::Read<std::uint32_t>(objects[i], &remote)) continue;
+    if (!IsHeapPointer(remote)) continue;
+    std::uint32_t samp_ped = 0;
+    asi::mem::Read<std::uint32_t>(remote, &samp_ped);
+    if (GamePedOfSampPed(samp_ped) == 0) continue;  // not streamed
+    remotes.push_back(remote);
+  }
+  if (static_cast<int>(remotes.size()) < kSyncSamples) return 0;
+
+  for (std::uint32_t offset = 0; offset < kSyncSearchTo; ++offset) {
+    bool plausible = true;
+    bool varies = false;
+    std::uint8_t first[4] = {};
+
+    for (std::size_t i = 0; i < remotes.size() && plausible; ++i) {
+      std::uint8_t values[4] = {};
+      for (int b = 0; b < 4 && plausible; ++b)
+        plausible = asi::mem::Read<std::uint8_t>(remotes[i] + offset + b,
+                                                 &values[b]);
+      if (!plausible) break;
+      // A living player has some health; armour and weapon have hard ceilings.
+      plausible = values[0] >= 1 && values[0] <= 100 && values[1] <= 100 &&
+                  values[2] <= kMaxWeaponId && values[3] <= kMaxSpecialAction;
+      if (i == 0) {
+        for (int b = 0; b < 4; ++b) first[b] = values[b];
+      } else {
+        for (int b = 0; b < 4; ++b)
+          if (values[b] != first[b]) varies = true;
+      }
+    }
+    if (plausible && varies) return offset;
+  }
+  return 0;
+}
+
 json ReadWorld() {
   const Layout& layout = ResolveLayout();
   if (!layout.valid)
@@ -1006,6 +1071,18 @@ json ReadWorld() {
   // layout: the server sends scores and pings periodically, so seconds after
   // joining they are all legitimately zero. Deciding it once, at resolve time,
   // meant a correct read looked broken for the rest of the session.
+  // Found lazily and retried: it needs several players streamed in, and
+  // needs them to differ from one another, neither of which is true a second
+  // after connecting.
+  static std::uint32_t sync_at = 0;
+  static unsigned long long next_sync_attempt_ms = 0;
+  if (sync_at == 0 && GetTickCount64() >= next_sync_attempt_ms) {
+    next_sync_attempt_ms = GetTickCount64() + 3000;
+    sync_at = FindSyncBlock(layout);
+    if (sync_at != 0)
+      LOG_INFO("player sync block at CRemotePlayer+0x{:X}", sync_at);
+  }
+
   std::size_t with_ping = 0;
   std::size_t streamed = 0;
   int largest_id = -1;
@@ -1053,13 +1130,22 @@ json ReadWorld() {
         ++streamed;
       }
 
-      // No health, armour or weapon here, and not because they are hard to
-      // reach. The game ped of a remote player is a local puppet: SA-MP gives
-      // it a large health value so it cannot die on our machine, since damage
-      // is the server's to decide - which is why every player read back as
-      // 1000 hp holding a fist. What is true is m_fReportedHealth, sent by the
-      // server, and that arrives in the sync packets along with score and
-      // ping. It belongs to that work, not to this.
+      // Health, armour and weapon as the server reported them. Not from the
+      // game ped: that one is a local puppet SA-MP keeps at a large health so
+      // it cannot die on our machine.
+      if (sync_at != 0) {
+        std::uint8_t values[4] = {};
+        bool ok = true;
+        for (int b = 0; b < 4 && ok; ++b)
+          ok = asi::mem::Read<std::uint8_t>(remote + sync_at + b, &values[b]);
+        if (ok) {
+          entry["health"] = values[0];
+          entry["armour"] = values[1];
+          entry["weapon"] = values[2];
+          if (const char* name = WeaponName(values[2]))
+            entry["weapon_name"] = name;
+        }
+      }
     } else {
       entry["streamed"] = false;
     }
