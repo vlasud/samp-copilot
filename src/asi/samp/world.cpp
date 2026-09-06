@@ -42,6 +42,80 @@ constexpr std::uint32_t kArraySearchTo = 0x100;
 // shift nothing while a miscount would move everything.
 constexpr int kPoolSlotsToTry = 12;
 
+bool IsHeapPointer(std::uintptr_t value);
+
+// From CRemotePlayer / CLocalPlayer to a position on the map.
+//
+// Both start with a pointer to SA-MP's own CPed wrapper, and that wrapper
+// holds the game's ped at +0x2A4 - an offset the header gives away by naming
+// the padding after it pad_2a8. The game's entity is a CPlaceable: a matrix
+// pointer at +0x14, and a position inline at +0x04 for entities that have no
+// matrix built yet.
+constexpr std::uint32_t kSampPedToGamePed = 0x2A4;
+constexpr std::uint32_t kEntityMatrix     = 0x14;
+constexpr std::uint32_t kEntityPosition   = 0x04;
+constexpr std::uint32_t kMatrixPosition   = 0x30;
+
+// CRemotePlayer, whose front we already confirmed: a null ped here means the
+// player is not streamed in, which is true of most of a 650-player server.
+constexpr std::uint32_t kRemotePed   = 0x00;
+constexpr std::uint32_t kRemoteVeh   = 0x04;
+constexpr std::uint32_t kRemoteTeam  = 0x08;
+constexpr std::uint32_t kRemoteState = 0x09;
+
+struct Position {
+  float x = 0.0f;
+  float y = 0.0f;
+  float z = 0.0f;
+  bool  valid = false;
+};
+
+// San Andreas is about 6000 units across and its tallest point is under 1500.
+// Anything outside that is not a position, whatever it is.
+bool PlausiblePosition(float x, float y, float z) {
+  const bool finite = x == x && y == y && z == z;
+  return finite && x > -4000.0f && x < 4000.0f && y > -4000.0f && y < 4000.0f &&
+         z > -300.0f && z < 2000.0f;
+}
+
+// The ped's own matrix is authoritative once the game has built one; until
+// then the inline placement is what the entity has.
+Position ReadEntityPosition(std::uintptr_t entity) {
+  Position out;
+  if (entity == 0) return out;
+
+  std::uint32_t matrix = 0;
+  if (asi::mem::Read<std::uint32_t>(entity + kEntityMatrix, &matrix) &&
+      IsHeapPointer(matrix)) {
+    float values[3] = {};
+    if (asi::mem::Read<float>(matrix + kMatrixPosition, &values[0]) &&
+        asi::mem::Read<float>(matrix + kMatrixPosition + 4, &values[1]) &&
+        asi::mem::Read<float>(matrix + kMatrixPosition + 8, &values[2]) &&
+        PlausiblePosition(values[0], values[1], values[2])) {
+      out = {values[0], values[1], values[2], true};
+      return out;
+    }
+  }
+
+  float values[3] = {};
+  if (asi::mem::Read<float>(entity + kEntityPosition, &values[0]) &&
+      asi::mem::Read<float>(entity + kEntityPosition + 4, &values[1]) &&
+      asi::mem::Read<float>(entity + kEntityPosition + 8, &values[2]) &&
+      PlausiblePosition(values[0], values[1], values[2]))
+    out = {values[0], values[1], values[2], true};
+  return out;
+}
+
+// samp_ped is SA-MP's wrapper; the game's entity hangs off it.
+Position PositionOfSampPed(std::uint32_t samp_ped) {
+  if (!IsHeapPointer(samp_ped)) return {};
+  std::uint32_t game_ped = 0;
+  if (!asi::mem::Read<std::uint32_t>(samp_ped + kSampPedToGamePed, &game_ped))
+    return {};
+  if (!IsHeapPointer(game_ped)) return {};
+  return ReadEntityPosition(game_ped);
+}
+
 Layout g_layout;
 bool   g_resolved = false;
 // Resolution sweeps a few thousand slots looking for the arrays. Until it
@@ -601,6 +675,7 @@ json ReadWorld() {
   // joining they are all legitimately zero. Deciding it once, at resolve time,
   // meant a correct read looked broken for the rest of the session.
   std::size_t with_ping = 0;
+  std::size_t streamed = 0;
   int largest_id = -1;
   for (int id = 0; id < kMaxPlayers; ++id) {
     if (present[id] == 0) continue;
@@ -614,6 +689,35 @@ json ReadWorld() {
     if (!ReadStdString(info + 0x0C, layout.string_variant, &name)) continue;
 
     json entry{{"id", id}, {"name", name}, {"npc", is_npc != 0}};
+
+    // Most of a busy server is not streamed in, and saying so is more useful
+    // than a position of zero.
+    std::uint32_t remote = 0;
+    if (asi::mem::Read<std::uint32_t>(info, &remote) && IsHeapPointer(remote)) {
+      std::uint8_t team = 0;
+      std::uint8_t state = 0;
+      if (asi::mem::Read<std::uint8_t>(remote + kRemoteTeam, &team) &&
+          team != 255)
+        entry["team"] = team;
+      if (asi::mem::Read<std::uint8_t>(remote + kRemoteState, &state))
+        entry["state"] = state;
+
+      std::uint32_t samp_ped = 0;
+      asi::mem::Read<std::uint32_t>(remote + kRemotePed, &samp_ped);
+      const Position position = PositionOfSampPed(samp_ped);
+      entry["streamed"] = position.valid;
+      if (position.valid) {
+        entry["pos"] = {position.x, position.y, position.z};
+        ++streamed;
+      }
+
+      std::uint32_t vehicle = 0;
+      if (asi::mem::Read<std::uint32_t>(remote + kRemoteVeh, &vehicle) &&
+          IsHeapPointer(vehicle))
+        entry["in_vehicle"] = true;
+    } else {
+      entry["streamed"] = false;
+    }
 
     if (layout.ping_at != 0) {
       std::uint32_t ping = 0;
@@ -641,6 +745,21 @@ json ReadWorld() {
     if (asi::mem::Read<std::uint32_t>(after + 4, &ping)) self["ping"] = ping;
     if (asi::mem::Read<std::int32_t>(after + 8, &score)) self["score"] = score;
   }
+  // CPlayerPool::m_localInfo holds a CLocalPlayer*, and that starts with the
+  // same CPed wrapper the remote players use.
+  if (layout.string_width != 0) {
+    std::uint32_t local_player = 0;
+    if (asi::mem::Read<std::uint32_t>(
+            layout.player_pool + layout.local_name + layout.string_width,
+            &local_player) &&
+        IsHeapPointer(local_player)) {
+      std::uint32_t samp_ped = 0;
+      asi::mem::Read<std::uint32_t>(local_player, &samp_ped);
+      const Position position = PositionOfSampPed(samp_ped);
+      if (position.valid) self["pos"] = {position.x, position.y, position.z};
+    }
+  }
+
   if (layout.local_id_at != 0) {
     std::uint16_t local_id = 0;
     if (asi::mem::Read<std::uint16_t>(layout.player_pool + layout.local_id_at,
@@ -674,6 +793,7 @@ json ReadWorld() {
         {"ping_at", layout.ping_at},
         {"ping_populated", with_ping > 0},
         {"players_with_ping", with_ping},
+        {"players_streamed", streamed},
         {"local_id_occupied", layout.local_id_occupied}}},
       {"self", std::move(self)},
       {"player_count", player_count},

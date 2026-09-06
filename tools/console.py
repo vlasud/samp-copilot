@@ -11,6 +11,7 @@ Commands:
                         frame counter is not moving
     world               summary of the world: self, counts, staleness
     players [n]         the first n players in the pool, in full
+    near [n]            the n nearest streamed players, with distances
     probe [text]        search samp.dll for text; with no text, the nickname
                         from the launcher command line
     scan <text>         search the whole process (stutters the game once)
@@ -72,6 +73,27 @@ def run_command(client, line):
         summary = {k: v for k, v in world.items() if k != "players"}
         summary["world_age_ms"] = result.get("world_age_ms")
         show(summary)
+    elif command == "near":
+        # The point of positions: not 650 names, but who is actually around.
+        world = client.tool("get_world").get("world", {})
+        self_pos = (world.get("self") or {}).get("pos")
+        if not self_pos:
+            print("  no position for the local player yet", flush=True)
+            return
+        rows = []
+        for player in world.get("players", []):
+            pos = player.get("pos")
+            if not pos:
+                continue
+            distance = sum((a - b) ** 2 for a, b in zip(pos, self_pos)) ** 0.5
+            rows.append((distance, player))
+        rows.sort(key=lambda row: row[0])
+        for distance, player in rows[:int(argument or 10)]:
+            print("  %6.1f m  id %-4d %-22s %s" % (
+                distance, player["id"], player["name"],
+                "in a vehicle" if player.get("in_vehicle") else ""), flush=True)
+        print("  (%d streamed of %d in the pool)" % (
+            len(rows), world.get("player_count", 0)), flush=True)
     elif command == "players":
         world = client.tool("get_world").get("world", {})
         limit = int(argument or 15)
