@@ -21,9 +21,15 @@ namespace gtabot::samp {
 
 struct ReportOutcome {
   bool        written = false;
-  // Occurrences found outside samp.dll's own image, i.e. in live structures.
+  // Occurrences found outside samp.dll's own image.
   std::size_t heap_hits = 0;
   std::size_t module_hits = 0;
+  // Of those, the ones that are just another copy of the process command line.
+  // The launcher passes the nickname there, so the process is littered with
+  // them and none of them is a SA-MP structure.
+  std::size_t command_line_hits = 0;
+  // What is left: occurrences worth looking at.
+  std::size_t structure_hits = 0;
   std::string path;
   std::string error;
 };

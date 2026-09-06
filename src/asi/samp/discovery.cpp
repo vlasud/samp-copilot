@@ -75,6 +75,28 @@ std::string Classify(std::uint32_t value, const asi::mem::Module& samp,
   return "";
 }
 
+// The launcher puts the nickname on the command line, and Windows and the CRT
+// leave copies of that string all over the process. Every one of them will
+// match the needle and none of them is a SA-MP structure, so they are worth
+// naming rather than analysing.
+bool LooksLikeCommandLine(std::uintptr_t hit) {
+  constexpr std::ptrdiff_t kWindow = 0x100;
+  const char* marker = "gta_sa.exe";
+  const std::size_t marker_length = 10;
+
+  for (std::ptrdiff_t offset = -kWindow; offset < kWindow; ++offset) {
+    bool matched = true;
+    for (std::size_t i = 0; i < marker_length && matched; ++i) {
+      char byte = 0;
+      if (!asi::mem::Read<char>(hit + offset + i, &byte)) return false;
+      // The copies alternate between narrow and wide, so compare loosely.
+      matched = byte == marker[i];
+    }
+    if (matched) return true;
+  }
+  return false;
+}
+
 std::string AsciiOf(std::uintptr_t address, std::size_t count) {
   std::string out;
   for (std::size_t i = 0; i < count; ++i) {
@@ -182,20 +204,34 @@ ReportOutcome WriteStructureReport(const std::string& requested_needle) {
   const std::vector<asi::mem::Hit> hits =
       asi::mem::Scan(everything, needle, kMaxNeedleHits, kScanBudget);
 
-  for (const asi::mem::Hit& hit : hits) {
-    if (samp.contains(hit.address))
+  std::vector<bool> is_command_line(hits.size(), false);
+  for (std::size_t i = 0; i < hits.size(); ++i) {
+    if (samp.contains(hits[i].address)) {
       ++outcome.module_hits;
+      continue;
+    }
+    ++outcome.heap_hits;
+    is_command_line[i] = LooksLikeCommandLine(hits[i].address);
+    if (is_command_line[i])
+      ++outcome.command_line_hits;
     else
-      ++outcome.heap_hits;
+      ++outcome.structure_hits;
   }
 
-  // Only a copy living outside samp.dll's image can be part of a live
-  // structure; the one inside the image is the buffer the client filled in at
-  // startup and says nothing about the pool.
   if (outcome.heap_hits == 0) {
     outcome.error =
-        "the nickname is only in samp.dll's own image, not in any live "
-        "structure yet - connect to a server and in-game before asking";
+        "'" + needle +
+        "' is only in samp.dll's own image, not in any live structure - "
+        "connect to a server and get in-game before asking";
+    return outcome;
+  }
+  if (outcome.structure_hits == 0) {
+    outcome.error =
+        "every live copy of '" + needle +
+        "' is just another copy of the process command line, so none of them "
+        "is a SA-MP structure. On a roleplay server the name above your "
+        "character is not the launcher nickname - type that name into the "
+        "panel and dump again";
     return outcome;
   }
 

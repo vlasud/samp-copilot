@@ -280,17 +280,28 @@ void DrawPanel() {
       ImGui::TextColored(kGrey, "%s", probe_summary.c_str());
     }
 
+    // The launcher nickname is useless as an anchor on a roleplay server,
+    // where the name above the character is a different string entirely. It
+    // has to be typed, and typing it here beats alt-tabbing to do it.
+    static char        needle[64] = "";
     static std::string report_summary;
+    ImGui::SetNextItemWidth(220.0f);
+    ImGui::InputTextWithHint("##needle", "name shown above your character",
+                             needle, sizeof(needle));
+    ImGui::SameLine();
     if (ImGui::Button("Dump SA-MP structures")) {
-      const samp::ReportOutcome outcome = samp::WriteStructureReport();
-      report_summary = outcome.written
-                           ? "wrote " + outcome.path + " (" +
-                                 std::to_string(outcome.heap_hits) +
-                                 " live hits)"
-                           : outcome.error;
+      const samp::ReportOutcome outcome = samp::WriteStructureReport(needle);
+      report_summary =
+          outcome.written
+              ? "wrote " + outcome.path + " - " +
+                    std::to_string(outcome.structure_hits) +
+                    " worth looking at, " +
+                    std::to_string(outcome.command_line_hits) +
+                    " command-line copies skipped"
+              : outcome.error;
     }
     if (!report_summary.empty())
-      ImGui::TextColored(kGrey, "%s", report_summary.c_str());
+      ImGui::TextWrapped("%s", report_summary.c_str());
   }
 
   ImGui::Separator();
