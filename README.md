@@ -127,6 +127,23 @@ soon as the game window stops being the foreground window, checked in both the
 EndScene and the Present hook. The Reset hook stays as a backstop and logs
 every call it does see.
 
+## Establishing the player pool's layout
+
+Every offset inside the SA-MP client is build-specific, and copying a table of
+them off a forum means the mod either works or quietly reports nonsense, with
+no way to tell which. So the layout is derived from evidence instead.
+
+The one fact that did not come from memory is the nickname the launcher passed
+on the command line. Every live copy of that string sits inside a real SA-MP
+structure, so `dump_samp_structures` (also a button on the panel, also
+attempted automatically every 20s until it succeeds) writes
+`bot.samp-report.txt` next to the module: each occurrence, what points at it,
+and the words around it with each one classified - a pointer into samp.dll, a
+pointer into the heap, a small integer, a float, or text.
+
+That report is what the offsets get written from. Until it exists, the world
+snapshot stays a set of empty placeholders rather than a guess.
+
 ## SA-MP versions
 
 Every client structure offset is version-specific, so the mod refuses to read

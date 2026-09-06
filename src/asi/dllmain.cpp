@@ -21,6 +21,7 @@
 #include "mcp/http.hpp"
 #include "mcp/server.hpp"
 #include "mcp/tools.hpp"
+#include "samp/discovery.hpp"
 #include "samp/version.hpp"
 #include "state/probe.hpp"
 #include "types.hpp"
@@ -37,6 +38,11 @@ constexpr std::uint16_t kMcpPort = 8765;
 constexpr unsigned long long kFramesPerWorldBuild = 15;
 // Bounded so a burst of queued work cannot turn into a frame spike.
 constexpr std::size_t kTasksPerFrame = 4;
+// The player pool only exists once the client is in a server, so the structure
+// report has to keep asking. Each attempt sweeps memory and costs a hitch, so
+// they are spaced out and give up rather than nagging forever.
+constexpr int kReportIntervalTicks = 80;   // worker ticks of 250 ms
+constexpr int kReportMaxAttempts   = 24;
 
 std::atomic<bool> g_running{false};
 
@@ -106,8 +112,22 @@ DWORD WINAPI Worker(LPVOID) {
   // The HTTP transport and the frame hook each run on their own; this loop
   // keeps the overlay's request counter fresh and gives the frame hook a
   // chance to re-point Reset once the game's device exists.
+  int report_countdown = kReportIntervalTicks;
+  int report_attempts  = 0;
+
   while (g_running.load(std::memory_order_acquire)) {
     FrameHook::AdoptGameDevice();
+
+    if (!samp::report_written() && report_attempts < kReportMaxAttempts &&
+        --report_countdown <= 0) {
+      report_countdown = kReportIntervalTicks;
+      ++report_attempts;
+      Bridge::PostToGameThread([]() {
+        const samp::ReportOutcome outcome = samp::WriteStructureReport();
+        if (!outcome.written && !outcome.error.empty())
+          LOG_INFO("structure report not ready: {}", outcome.error);
+      });
+    }
     StatusSource::Mcp current = StatusSource::mcp();
     current.requests = transport.requests();
     StatusSource::SetMcp(current);

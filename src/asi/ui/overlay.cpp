@@ -16,6 +16,7 @@
 #include "hooks/frame.hpp"
 #include "log.hpp"
 #include "mcp/rpc.hpp"
+#include "samp/discovery.hpp"
 #include "samp/version.hpp"
 #include "state/probe.hpp"
 #include "ui/status_source.hpp"
@@ -278,6 +279,18 @@ void DrawPanel() {
       ImGui::SameLine();
       ImGui::TextColored(kGrey, "%s", probe_summary.c_str());
     }
+
+    static std::string report_summary;
+    if (ImGui::Button("Dump SA-MP structures")) {
+      const samp::ReportOutcome outcome = samp::WriteStructureReport();
+      report_summary = outcome.written
+                           ? "wrote " + outcome.path + " (" +
+                                 std::to_string(outcome.heap_hits) +
+                                 " live hits)"
+                           : outcome.error;
+    }
+    if (!report_summary.empty())
+      ImGui::TextColored(kGrey, "%s", report_summary.c_str());
   }
 
   ImGui::Separator();

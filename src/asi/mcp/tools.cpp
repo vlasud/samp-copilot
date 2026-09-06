@@ -7,6 +7,7 @@
 #include "log.hpp"
 #include "mcp/rpc.hpp"
 #include "mcp/server.hpp"
+#include "samp/discovery.hpp"
 #include "state/probe.hpp"
 #include "types.hpp"
 
@@ -81,6 +82,33 @@ void RegisterTools(Server* server) {
         return Rpc::RunOnGameThread(
             [args] { return asi::ProbeMemory(args); },
             whole_process ? kScanTimeoutMs : kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "dump_samp_structures",
+      "Writes bot.samp-report.txt next to the module: every live copy of the "
+      "player nickname in memory, annotated with what points at it and what "
+      "surrounds it. This is how the player pool's layout gets established for "
+      "a build instead of guessed. Needs the client to be in a server.",
+      {{"type", "object"},
+       {"properties",
+        {{"needle",
+          {{"type", "string"},
+           {"description",
+            "Search for this instead of the launcher's nickname."}}}}}},
+      [](const json& args) {
+        const std::string needle = args.value("needle", std::string{});
+        return Rpc::RunOnGameThread(
+            [needle]() -> json {
+              const samp::ReportOutcome outcome =
+                  samp::WriteStructureReport(needle);
+              if (!outcome.written) throw std::runtime_error(outcome.error);
+              return json{{"path", outcome.path},
+                          {"live_occurrences", outcome.heap_hits},
+                          {"image_occurrences", outcome.module_hits}};
+            },
+            kScanTimeoutMs);
       },
   });
 

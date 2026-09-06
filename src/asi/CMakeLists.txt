@@ -6,6 +6,7 @@ add_library(bot MODULE
   bridge.cpp
   hooks/frame.cpp
   samp/version.cpp
+  samp/discovery.cpp
   state/memory.cpp
   state/probe.cpp
   mcp/server.cpp
