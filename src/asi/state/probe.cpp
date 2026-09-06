@@ -1,5 +1,7 @@
 #include "state/probe.hpp"
 
+#include "log.hpp"
+
 #include <windows.h>
 
 #include <cstdio>
@@ -71,12 +73,7 @@ json HitsToJson(const std::vector<mem::Hit>& hits, bool with_context) {
 }  // namespace
 
 json BuildWorldSnapshot() {
-  const samp::Client client = samp::Detect();
   return json{
-      {"samp",
-       {{"loaded", client.base != 0},
-        {"version", samp::ToString(client.version)},
-        {"base", client.base}}},
       // Placeholders until the pools are read. Named now so the shape the
       // agent consumes does not change under it later.
       {"self", nullptr},
@@ -103,7 +100,16 @@ json BuildStatusSnapshot() {
               "(alt-tabbed out of exclusive fullscreen does this)";
   }
 
+  // Reading the module list is safe from any thread, and it has to live here
+  // rather than in the world snapshot: the world stops being rebuilt the
+  // moment the game stops rendering, which is exactly when someone is asking.
+  const samp::Client client = samp::Detect();
+
   return json{
+      {"samp",
+       {{"loaded", client.base != 0},
+        {"version", samp::ToString(client.version)},
+        {"base", client.base}}},
       {"frame",
        {{"hook_installed", FrameHook::installed()},
         {"driver", FrameHook::driver()},
@@ -199,6 +205,27 @@ json ProbeMemory(const json& args) {
   }
 
   return out;
+}
+
+}  // namespace gtabot::asi
+
+namespace gtabot::asi {
+
+void LogProbeSummary(const json& result) {
+  const json search = result.value("search", json::object());
+  const std::string needle = search.value("needle", std::string{"<none>"});
+  const std::size_t found = search.value("found", std::size_t{0});
+
+  if (found == 0) {
+    LOG_WARN("probe: '{}' was not found in samp.dll memory", needle);
+    return;
+  }
+  LOG_INFO("probe: '{}' found {} time(s) in samp.dll", needle, found);
+  const json hits = search.value("hits", json::array());
+  for (std::size_t i = 0; i < hits.size() && i < 4; ++i) {
+    LOG_INFO("       samp.dll+0x{:X}  {}", hits[i].value("rva", 0u),
+             hits[i].value("context", std::string{}));
+  }
 }
 
 }  // namespace gtabot::asi

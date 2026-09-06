@@ -257,6 +257,30 @@ void DrawPanel() {
                           std::to_string(Bridge::dropped_tasks()) + " dropped");
 
   ImGui::Separator();
+  // The panel draws on the game thread, so a probe can simply be run here -
+  // no round trip, and no need to be alt-tabbed away to ask for one.
+  static std::string probe_summary;
+  if (g_mode == Mode::kInteractive) {
+    if (ImGui::Button("Run memory probe")) {
+      try {
+        const json result = ProbeMemory(json::object());
+        LogProbeSummary(result);
+        const json search = result.value("search", json::object());
+        probe_summary = "'" + search.value("needle", std::string{"<none>"}) +
+                        "' found " +
+                        std::to_string(search.value("found", std::size_t{0})) +
+                        " time(s)";
+      } catch (const std::exception& e) {
+        probe_summary = std::string("failed: ") + e.what();
+      }
+    }
+    if (!probe_summary.empty()) {
+      ImGui::SameLine();
+      ImGui::TextColored(kGrey, "%s", probe_summary.c_str());
+    }
+  }
+
+  ImGui::Separator();
   ImGui::TextColored(kGrey, "log");
   ImGui::BeginChild("log", ImVec2(0, kLogLines * ImGui::GetTextLineHeight()),
                     false, ImGuiWindowFlags_NoInputs);

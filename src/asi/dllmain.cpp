@@ -90,6 +90,17 @@ DWORD WINAPI Worker(LPVOID) {
           "unrecognised SA-MP build - refusing to read client structures. "
           "Add its fingerprint to src/asi/samp/version.cpp first.");
     }
+
+    // Probe once, unprompted, and write the result to the log. Asking for it
+    // from a terminal means alt-tabbing, which parks the game thread that has
+    // to run it - so the question would never get answered that way.
+    Bridge::PostToGameThread([]() {
+      try {
+        LogProbeSummary(ProbeMemory(json::object()));
+      } catch (const std::exception& e) {
+        LOG_ERROR("automatic probe failed: {}", e.what());
+      }
+    });
   }
 
   // The HTTP transport and the frame hook each run on their own; this loop

@@ -55,6 +55,18 @@ python tools/console.py     # interactive, stands in for the agent loop
 python tools/selftest.py    # checks the endpoint end to end
 ```
 
+Both of those have a limit worth knowing: to type in a terminal you have to
+leave the game, and the render thread parks when the window is not in the
+foreground. Anything that needs the game thread - `probe_memory`, and later
+every action - times out while you are there. So the module probes its own
+memory access once at startup and writes the result to the log, and the panel
+has a **Run memory probe** button in its interactive state. Both work without
+alt-tabbing anywhere.
+
+```
+Get-Content D:\SAMPot.asi.log | Select-String probe
+```
+
 Both talk plain JSON-RPC over HTTP; `tools/mcp_http.py` is the whole client and
 is short enough to paste into an agent loop.
 

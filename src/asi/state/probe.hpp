@@ -24,4 +24,8 @@ json BuildStatusSnapshot();
 // process, which is why it only ever runs when asked for.
 json ProbeMemory(const json& args);
 
+// Writes the outcome of a probe to the log in a couple of lines. The log is
+// the one place a result survives being alt-tabbed away from.
+void LogProbeSummary(const json& result);
+
 }  // namespace gtabot::asi
