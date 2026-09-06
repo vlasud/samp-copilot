@@ -506,6 +506,98 @@ void DumpPlayerInfo(const Layout& layout) {
   LOG_INFO("wrote {} - pool resolved but no player has a ping", path);
 }
 
+// Describes every pool in the block by the shape of its contents: where runs
+// of booleans start and how long they are, and where runs of pointers do.
+// Guessing which slot is the vehicle pool and where its arrays sit has now
+// failed twice, and this replaces the guessing with a description.
+void DumpPools(const Layout& layout) {
+  const std::string path = ModuleDirectory() + "bot.pools-dump.txt";
+  std::ofstream file(path, std::ios::trunc);
+  if (!file) return;
+
+  constexpr std::uint32_t kWindow = 0x8000;
+  constexpr int kMinRun = 200;
+
+  char line[200];
+  std::snprintf(line, sizeof(line),
+                "pool block at 0x%08X\nplayer pool 0x%08X, its slots at +0x%X\n\n",
+                static_cast<unsigned>(layout.pools),
+                static_cast<unsigned>(layout.player_pool),
+                static_cast<unsigned>(layout.object_array));
+  file << line;
+
+  for (int slot = 0; slot < kPoolSlotsToTry; ++slot) {
+    std::uint32_t pool = 0;
+    if (!asi::mem::Read<std::uint32_t>(layout.pools + slot * 4, &pool)) break;
+
+    std::snprintf(line, sizeof(line), "--- slot %d -> 0x%08X%s\n", slot,
+                  static_cast<unsigned>(pool),
+                  pool == layout.player_pool ? "   (the player pool)" : "");
+    file << line;
+    if (!IsHeapPointer(pool)) {
+      file << "    not a heap pointer\n";
+      continue;
+    }
+
+    std::uint32_t readable = kWindow;
+    while (readable > 0x400 && !asi::mem::IsReadable(pool, readable))
+      readable /= 2;
+    if (readable <= 0x400) {
+      file << "    too small to describe\n";
+      continue;
+    }
+    std::snprintf(line, sizeof(line), "    %u bytes readable\n", readable);
+    file << line;
+
+    const auto* words = reinterpret_cast<const std::uint32_t*>(pool);
+    const std::uint32_t count = readable / 4;
+
+    for (std::uint32_t i = 0; i < count;) {
+      // A run of values that are only ever 0 or 1 is an array of BOOL, which
+      // is what marks the occupied slots of a pool.
+      std::uint32_t run = 0;
+      std::uint32_t ones = 0;
+      while (i + run < count && words[i + run] <= 1) {
+        if (words[i + run] == 1) ++ones;
+        ++run;
+      }
+      if (run >= kMinRun && ones > 0) {
+        std::snprintf(line, sizeof(line),
+                      "    booleans at +0x%04X  length %-6u  set %u\n", i * 4,
+                      run, ones);
+        file << line;
+      }
+      i += run > 0 ? run : 1;
+    }
+
+    for (std::uint32_t i = 0; i < count;) {
+      // And a run of things that are each either null or a heap address is an
+      // array of objects.
+      std::uint32_t run = 0;
+      std::uint32_t filled = 0;
+      while (i + run < count) {
+        const std::uint32_t value = words[i + run];
+        const bool pointerish =
+            value == 0 || (value >= 0x00010000u && value < 0xC0000000u &&
+                           value % 4 == 0 && value > 1);
+        if (!pointerish) break;
+        if (value != 0) ++filled;
+        ++run;
+      }
+      if (run >= kMinRun && filled >= 4) {
+        std::snprintf(line, sizeof(line),
+                      "    pointers at +0x%04X  length %-6u  filled %u\n",
+                      i * 4, run, filled);
+        file << line;
+      }
+      i += run > 0 ? run : 1;
+    }
+    file << "\n";
+  }
+
+  LOG_INFO("wrote {}", path);
+}
+
 bool LooksLikeVehicleArrays(std::uintptr_t pool, std::uint32_t offset) {
   const std::uintptr_t objects = pool + offset;
   const std::uintptr_t flags   = objects + kMaxVehicles * 4;
@@ -816,8 +908,10 @@ const Layout& ResolveLayout() {
         break;
       }
     }
-    if (layout.vehicle_pool == 0)
+    if (layout.vehicle_pool == 0) {
       LOG_WARN("no vehicle pool found in the block at 0x{:08X}", layout.pools);
+      DumpPools(layout);
+    }
   }
 
   layout.valid = true;
