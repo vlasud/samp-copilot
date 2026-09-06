@@ -20,6 +20,12 @@
 #include "state/probe.hpp"
 #include "ui/status_source.hpp"
 
+// imgui_impl_win32.h keeps this declaration inside an `#if 0` so the header
+// does not have to pull in <windows.h>; upstream asks callers to copy it.
+extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg,
+                                                             WPARAM wparam,
+                                                             LPARAM lparam);
+
 namespace gtabot::asi {
 namespace {
 
@@ -30,13 +36,19 @@ constexpr int kLogLines  = 14;
 // for numbers a human reads. Refresh it four times a second instead.
 constexpr unsigned long long kRefreshMs = 250;
 
+// Hidden -> passive -> interactive, cycled with one key so no second binding
+// has to be found that GTA and SA-MP have both left alone.
+enum class Mode { kHidden, kPassive, kInteractive };
+
+Mode               g_mode        = Mode::kPassive;
 bool               g_initialised = false;
-bool               g_visible     = true;
 bool               g_disabled    = false;
 IDirect3DDevice9*  g_device      = nullptr;
 HWND               g_window      = nullptr;
 bool               g_toggle_down = false;
 bool               g_resources_live = false;
+WNDPROC            g_previous_wndproc = nullptr;
+std::string        g_ini_path;
 
 const ImVec4 kGreen{0.45f, 0.85f, 0.45f, 1.0f};
 const ImVec4 kAmber{0.95f, 0.75f, 0.30f, 1.0f};
@@ -58,12 +70,57 @@ const ImVec4& LevelColour(int level) {
 
 void Teardown() {
   if (!g_initialised) return;
+  if (g_previous_wndproc && g_window) {
+    SetWindowLongPtrW(g_window, GWLP_WNDPROC,
+                      reinterpret_cast<LONG_PTR>(g_previous_wndproc));
+    g_previous_wndproc = nullptr;
+  }
   ImGui_ImplDX9_Shutdown();
   ImGui_ImplWin32_Shutdown();
   ImGui::DestroyContext();
   g_initialised = false;
   g_device      = nullptr;
   g_window      = nullptr;
+}
+
+bool IsMouseMessage(UINT message) {
+  return (message >= WM_MOUSEFIRST && message <= WM_MOUSELAST) ||
+         message == WM_MOUSEHOVER || message == WM_MOUSELEAVE ||
+         message == WM_NCMOUSEMOVE;
+}
+
+bool IsKeyboardMessage(UINT message) {
+  return message == WM_KEYDOWN || message == WM_KEYUP ||
+         message == WM_SYSKEYDOWN || message == WM_SYSKEYUP ||
+         message == WM_CHAR;
+}
+
+// Window messages only reach ImGui while the panel is interactive, so the game
+// keeps its input in every other state.
+LRESULT CALLBACK HookedWndProc(HWND window, UINT message, WPARAM wparam,
+                               LPARAM lparam) {
+  if (g_mode == Mode::kInteractive && ImGui::GetCurrentContext()) {
+    ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.WantCaptureMouse && IsMouseMessage(message)) return TRUE;
+    if (io.WantCaptureKeyboard && IsKeyboardMessage(message)) return TRUE;
+  }
+  return CallWindowProcW(g_previous_wndproc, window, message, wparam, lparam);
+}
+
+std::string IniPathBesideModule() {
+  HMODULE self = nullptr;
+  GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                     reinterpret_cast<LPCWSTR>(&IniPathBesideModule), &self);
+  char path[MAX_PATH] = {};
+  GetModuleFileNameA(self, path, MAX_PATH);
+  std::string full(path);
+  const std::size_t slash = full.find_last_of("/\\");
+  full = slash == std::string::npos ? std::string{} : full.substr(0, slash + 1);
+  // Not plain "imgui.ini": vc.asi has an ImGui of its own and writes that file
+  // in the same directory.
+  return full + "bot.imgui.ini";
 }
 
 bool Initialise(IDirect3DDevice9* device) {
@@ -74,11 +131,9 @@ bool Initialise(IDirect3DDevice9* device) {
 
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
-  io.IniFilename  = nullptr;  // no imgui.ini dropped into the game folder
+  g_ini_path      = IniPathBesideModule();
+  io.IniFilename  = g_ini_path.c_str();  // remembers where the panel was put
   io.LogFilename  = nullptr;
-  // The panel is read-only, so ImGui must never believe it owns the cursor.
-  io.MouseDrawCursor = false;
-  io.ConfigFlags |= ImGuiConfigFlags_NoMouse;
   ImGui::StyleColorsDark();
   ImGui::GetStyle().WindowRounding = 4.0f;
   ImGui::GetStyle().Alpha          = 0.92f;
@@ -89,10 +144,16 @@ bool Initialise(IDirect3DDevice9* device) {
     return false;
   }
 
+  g_previous_wndproc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+      g_window, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&HookedWndProc)));
+  if (!g_previous_wndproc)
+    LOG_WARN("could not chain the window procedure - the panel will not take "
+             "the mouse");
+
   g_device      = device;
   g_initialised = true;
-  LOG_INFO("overlay initialised on hwnd 0x{:08X} (F11 toggles it)",
-           reinterpret_cast<std::uintptr_t>(g_window));
+  LOG_INFO("overlay initialised on hwnd 0x{:08X}, settings in {}",
+           reinterpret_cast<std::uintptr_t>(g_window), g_ini_path);
   return true;
 }
 
@@ -114,7 +175,16 @@ bool IsBackBufferBound(IDirect3DDevice9* device) {
 
 void PollToggle() {
   const bool down = (GetAsyncKeyState(kToggleKey) & 0x8000) != 0;
-  if (down && !g_toggle_down) g_visible = !g_visible;
+  if (down && !g_toggle_down) {
+    switch (g_mode) {
+      case Mode::kPassive:     g_mode = Mode::kInteractive; break;
+      case Mode::kInteractive: g_mode = Mode::kHidden;      break;
+      case Mode::kHidden:      g_mode = Mode::kPassive;     break;
+    }
+    // ImGui draws the cursor itself: the game hides the system one, so there
+    // would otherwise be nothing to aim with.
+    ImGui::GetIO().MouseDrawCursor = g_mode == Mode::kInteractive;
+  }
   g_toggle_down = down;
 }
 
@@ -132,13 +202,21 @@ void DrawPanel() {
   const json hook   = status.value("hook", json::object());
   const std::string verdict = status.value("verdict", std::string{"?"});
 
-  ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_Always);
-  ImGui::SetNextWindowSize(ImVec2(520, 0), ImGuiCond_Always);
-  ImGui::Begin("gtabot", nullptr,
-               ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
-                   ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoInputs |
-                   ImGuiWindowFlags_NoSavedSettings |
-                   ImGuiWindowFlags_AlwaysAutoResize);
+  // FirstUseEver, not Always: past the first run the position comes from
+  // bot.imgui.ini, which is the point of being able to drag it.
+  ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(520, 430), ImGuiCond_FirstUseEver);
+
+  ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
+  if (g_mode != Mode::kInteractive)
+    flags |= ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
+             ImGuiWindowFlags_NoInputs;
+  ImGui::Begin("gtabot", nullptr, flags);
+
+  if (g_mode == Mode::kInteractive)
+    ImGui::TextColored(kAmber, "interactive - drag to move, F11 to hide");
+  else
+    ImGui::TextColored(kGrey, "F11 to grab the mouse");
 
   const bool healthy = verdict == "ok";
   Label("verdict", verdict, healthy ? kGreen : kAmber);
@@ -216,7 +294,7 @@ void Overlay::Render(IDirect3DDevice9* device) {
   if (!g_initialised && !Initialise(device)) return;
 
   PollToggle();
-  if (!g_visible) return;
+  if (g_mode == Mode::kHidden) return;
 
   // Only the back buffer. GTA ends a scene for every off-screen target it
   // renders - the radar, mirrors, the text baked onto signs - and drawing into
@@ -260,15 +338,18 @@ void Overlay::DisableAfterFault() {
   // Deliberately does not tear ImGui down: whatever faulted may be mid-way
   // through its own state, and unwinding it now is another chance to crash.
   g_disabled = true;
-  g_visible  = false;
+  g_mode     = Mode::kHidden;
   LOG_ERROR("overlay faulted while drawing - switched off for this session, "
             "the rest of the module keeps running");
 }
 
 bool Overlay::disabled() { return g_disabled; }
 
-bool Overlay::visible() { return g_visible; }
+bool Overlay::visible() { return g_mode != Mode::kHidden; }
 
-void Overlay::SetVisible(bool visible) { g_visible = visible; }
+void Overlay::SetVisible(bool visible) {
+  g_mode = visible ? Mode::kPassive : Mode::kHidden;
+  if (ImGui::GetCurrentContext()) ImGui::GetIO().MouseDrawCursor = false;
+}
 
 }  // namespace gtabot::asi
