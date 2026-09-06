@@ -998,7 +998,13 @@ bool DumpPlayerRecords() {
 }
 
 constexpr std::uint32_t kRemoteWindow  = 0x400;
-constexpr int           kHealthSamples = 6;
+// Enough players to make a search over hundreds of offsets mean something.
+constexpr int kHealthSamples = 5;
+// Checking one known offset is a far weaker claim than searching, so it needs
+// far less evidence - and it is what runs first, since the answer for this
+// build is already known.
+constexpr int           kHealthHintSamples = 3;
+constexpr std::uint32_t kKnownHealthOffset = 0x1BC;
 
 // The CRemotePlayer of everyone streamed in right now, with their ids.
 void CollectStreamedRemotes(const Layout& layout,
@@ -1089,12 +1095,46 @@ std::uint32_t FindReportedHealth(const Layout& layout, std::size_t* samples) {
   std::vector<std::uintptr_t> remotes;
   CollectStreamedRemotes(layout, &remotes, nullptr, 16);
   *samples = remotes.size();
-  if (static_cast<int>(remotes.size()) < kHealthSamples) return 0;
+  if (static_cast<int>(remotes.size()) < kHealthHintSamples) return 0;
 
+  // Health and armour both arrive as bytes and are kept in floats, so both
+  // are whole numbers. That is a property of how SA-MP stores them rather
+  // than of how a particular server looks, which is what makes it usable as
+  // identification.
   auto whole_number_in = [](float value, float low, float high) {
     return value == value && value >= low && value <= high &&
            value == static_cast<float>(static_cast<int>(value));
   };
+
+  auto column_reads_as_health = [&](std::uint32_t offset, bool need_variety) {
+    bool plausible = true;
+    float first = -1.0f;
+    bool varies = false;
+
+    for (std::size_t i = 0; i < remotes.size() && plausible; ++i) {
+      float health = 0.0f;
+      float armour = 0.0f;
+      std::memcpy(&health, reinterpret_cast<const void*>(remotes[i] + offset),
+                  sizeof(health));
+      std::memcpy(&armour,
+                  reinterpret_cast<const void*>(remotes[i] + offset - 4),
+                  sizeof(armour));
+      plausible = whole_number_in(health, 1.0f, 255.0f) &&
+                  whole_number_in(armour, 0.0f, 255.0f);
+      if (first < 0.0f)
+        first = health;
+      else if (health != first)
+        varies = true;
+    }
+    return plausible && (varies || !need_variety);
+  };
+
+  // The offset this build uses, checked rather than trusted. It needs only a
+  // handful of players, so it answers long before a search could.
+  if (column_reads_as_health(kKnownHealthOffset, /*need_variety=*/false))
+    return kKnownHealthOffset;
+
+  if (static_cast<int>(remotes.size()) < kHealthSamples) return 0;
 
   for (std::uint32_t offset = 4; offset + 4 <= kRemoteWindow; ++offset) {
     bool plausible = true;
