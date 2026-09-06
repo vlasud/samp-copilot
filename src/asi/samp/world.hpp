@@ -56,9 +56,6 @@ struct Layout {
   // remote player belongs and a 0/1 flag where the NPC bit belongs. That says
   // the offsets are right; whether the server fills them in is separate.
   bool           confirmed = false;
-  // Whether anyone at all has a non-zero ping. Some servers never send them,
-  // and that is a different thing from reading the wrong place.
-  bool           ping_populated = false;
   // Whether the local id names a slot that is also in the remote pool.
   bool           local_id_occupied = false;
   // The host address read out of CNetGame - the proof the root pointer is real.

@@ -481,19 +481,14 @@ const Layout& ResolveLayout() {
 
     int checked = 0;
     int well_formed = 0;
-    int with_ping = 0;
     for (int i = 0; i < kMaxPlayers && checked < 16; ++i) {
       if (present[i] == 0) continue;
       ++checked;
 
       std::uint32_t remote = 0;
       std::uint32_t is_npc = 0;
-      std::uint32_t ping = 0;
       asi::mem::Read<std::uint32_t>(objects[i], &remote);
       asi::mem::Read<std::uint32_t>(objects[i] + 0x04, &is_npc);
-      if (asi::mem::Read<std::uint32_t>(objects[i] + layout.ping_at, &ping) &&
-          ping > 0 && ping < 1500)
-        ++with_ping;
 
       // A remote player pointer that is null or a heap address, and an NPC
       // flag that is a flag. Anything else means we are not looking at a
@@ -501,7 +496,6 @@ const Layout& ResolveLayout() {
       if (is_npc <= 1 && (remote == 0 || IsHeapPointer(remote))) ++well_formed;
     }
     layout.confirmed = checked >= 4 && well_formed == checked;
-    layout.ping_populated = with_ping > 0;
   }
 
   // The local id is the field before the local name, not the first plausible
@@ -528,10 +522,6 @@ const Layout& ResolveLayout() {
       layout.local_id_occupied = present[value] != 0;
     }
   }
-
-  // Reading the right place and finding zeros is a legitimate outcome, but so
-  // is reading the wrong place, and only the bytes tell the two apart.
-  if (!layout.ping_populated && layout.string_width != 0) DumpPlayerInfo(layout);
 
   layout.valid = true;
   layout.note  = "resolved";
@@ -564,6 +554,11 @@ json ReadWorld() {
     return json{{"resolved", false},
                 {"note", "the pool moved - re-resolving next time"}};
 
+  // Whether anyone has a ping is a property of this moment, not of the
+  // layout: the server sends scores and pings periodically, so seconds after
+  // joining they are all legitimately zero. Deciding it once, at resolve time,
+  // meant a correct read looked broken for the rest of the session.
+  std::size_t with_ping = 0;
   int largest_id = -1;
   for (int id = 0; id < kMaxPlayers; ++id) {
     if (present[id] == 0) continue;
@@ -581,8 +576,10 @@ json ReadWorld() {
     if (layout.ping_at != 0) {
       std::uint32_t ping = 0;
       std::int32_t  score = 0;
-      if (asi::mem::Read<std::uint32_t>(info + layout.ping_at, &ping))
+      if (asi::mem::Read<std::uint32_t>(info + layout.ping_at, &ping)) {
         entry["ping"] = ping;
+        if (ping > 0 && ping < 1500) ++with_ping;
+      }
       if (asi::mem::Read<std::int32_t>(info + layout.score_at, &score))
         entry["score"] = score;
     }
@@ -633,7 +630,8 @@ json ReadWorld() {
         {"local_id_at", layout.local_id_at},
         {"score_at", layout.score_at},
         {"ping_at", layout.ping_at},
-        {"ping_populated", layout.ping_populated},
+        {"ping_populated", with_ping > 0},
+        {"players_with_ping", with_ping},
         {"local_id_occupied", layout.local_id_occupied}}},
       {"self", std::move(self)},
       {"player_count", player_count},
