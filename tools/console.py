@@ -12,6 +12,7 @@ Commands:
     world               summary of the world: self, counts, staleness
     players [n]         the first n players in the pool, in full
     near [n]            the n nearest streamed players, with distances
+    cars [n]            the n nearest vehicles, with distances
     probe [text]        search samp.dll for text; with no text, the nickname
                         from the launcher command line
     scan <text>         search the whole process (stutters the game once)
@@ -102,6 +103,22 @@ def run_command(client, line):
                 ", ".join(marks)), flush=True)
         print("  (%d streamed of %d in the pool)" % (
             len(rows), world.get("player_count", 0)), flush=True)
+    elif command == "cars":
+        world = client.tool("get_world").get("world", {})
+        self_pos = (world.get("self") or {}).get("pos")
+        if not self_pos:
+            print("  no position for the local player yet", flush=True)
+            return
+        rows = []
+        for car in world.get("vehicles", []):
+            distance = sum((a - b) ** 2
+                           for a, b in zip(car["pos"], self_pos)) ** 0.5
+            rows.append((distance, car))
+        rows.sort(key=lambda row: row[0])
+        for distance, car in rows[:int(argument or 10)]:
+            print("  %6.1f m  id %-5d model %s" % (
+                distance, car["id"], car.get("model", "?")), flush=True)
+        print("  (%d vehicles streamed)" % len(rows), flush=True)
     elif command == "players":
         world = client.tool("get_world").get("world", {})
         limit = int(argument or 15)

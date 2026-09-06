@@ -128,6 +128,19 @@ const char* WeaponName(std::uint32_t id) {
   }
 }
 
+// CVehiclePool holds three arrays back to back: SA-MP's own wrapper, the
+// in-use flags, and - the useful one - the game's vehicle. Three arrays that
+// have to agree is a far stronger signature than the player pool's two, and it
+// cannot be satisfied by a run of zeroes.
+constexpr int kMaxVehicles = 2000;
+// m_nCount plus a hundred-entry waiting list put the arrays a little over
+// 0x1100 in; the window is generous because that is arithmetic, not fact.
+constexpr std::uint32_t kVehicleSearchFrom = 0x1000;
+constexpr std::uint32_t kVehicleSearchTo   = 0x1400;
+// CEntity::m_nModelIndex, from plugin-sdk. The same CPlaceable base as a ped,
+// so position comes from the matrix we already trust.
+constexpr std::uint32_t kEntityModel = 0x22;
+
 struct Position {
   float x = 0.0f;
   float y = 0.0f;
@@ -491,6 +504,40 @@ void DumpPlayerInfo(const Layout& layout) {
   }
 
   LOG_INFO("wrote {} - pool resolved but no player has a ping", path);
+}
+
+bool LooksLikeVehicleArrays(std::uintptr_t pool, std::uint32_t offset) {
+  const std::uintptr_t objects = pool + offset;
+  const std::uintptr_t flags   = objects + kMaxVehicles * 4;
+  const std::uintptr_t game    = flags + kMaxVehicles * 4;
+  if (!asi::mem::IsReadable(objects, kMaxVehicles * 4 * 3)) return false;
+
+  const auto* object_values = reinterpret_cast<const std::uint32_t*>(objects);
+  const auto* flag_values   = reinterpret_cast<const std::uint32_t*>(flags);
+  const auto* game_values   = reinterpret_cast<const std::uint32_t*>(game);
+
+  int occupied = 0;
+  for (int i = 0; i < kMaxVehicles; ++i) {
+    const bool flagged = flag_values[i] != 0;
+    if (flagged != (object_values[i] != 0)) return false;
+    if (!flagged) continue;
+    // Cheap range checks for every slot; the costly one runs on a few.
+    if (object_values[i] < 0x00010000u || object_values[i] >= 0xC0000000u)
+      return false;
+    if (game_values[i] != 0 &&
+        (game_values[i] < 0x00010000u || game_values[i] >= 0xC0000000u))
+      return false;
+    ++occupied;
+  }
+  if (occupied == 0) return false;
+
+  int checked = 0;
+  for (int i = 0; i < kMaxVehicles && checked < 4; ++i) {
+    if (flag_values[i] == 0) continue;
+    if (!IsHeapPointer(object_values[i])) return false;
+    ++checked;
+  }
+  return true;
 }
 
 std::string CommandLineHost() {
@@ -859,6 +906,35 @@ json ReadWorld() {
   if (layout.local_name != 0)
     ReadStdString(layout.player_pool + layout.local_name, layout.string_variant,
                   &local_name);
+  json vehicles = json::array();
+  if (layout.vehicle_pool != 0) {
+    const std::uintptr_t objects = layout.vehicle_pool + layout.vehicle_objects;
+    const std::uintptr_t flags   = objects + kMaxVehicles * 4;
+    const std::uintptr_t game    = flags + kMaxVehicles * 4;
+    if (asi::mem::IsReadable(objects, kMaxVehicles * 4 * 3)) {
+      const auto* flag_values = reinterpret_cast<const std::uint32_t*>(flags);
+      const auto* game_values = reinterpret_cast<const std::uint32_t*>(game);
+
+      for (int id = 0; id < kMaxVehicles; ++id) {
+        if (flag_values[id] == 0) continue;
+        const std::uint32_t entity = game_values[id];
+        if (!IsHeapPointer(entity)) continue;
+
+        const Position position = ReadEntityPosition(entity);
+        if (!position.valid) continue;
+
+        json entry{{"id", id}, {"pos", {position.x, position.y, position.z}}};
+        std::int16_t model = 0;
+        // Model ids are reported as the game stores them; naming two hundred
+        // of them from memory is exactly the sort of guess to avoid.
+        if (asi::mem::Read<std::int16_t>(entity + kEntityModel, &model) &&
+            model > 0)
+          entry["model"] = model;
+        vehicles.push_back(std::move(entry));
+      }
+    }
+  }
+
   json self{{"name", local_name}};
   if (layout.string_width != 0) {
     const std::uintptr_t after =
@@ -925,6 +1001,8 @@ json ReadWorld() {
       {"self", std::move(self)},
       {"player_count", player_count},
       {"players", std::move(players)},
+      {"vehicle_count", vehicles.size()},
+      {"vehicles", std::move(vehicles)},
   };
 }
 

@@ -74,11 +74,7 @@ json HitsToJson(const std::vector<mem::Hit>& hits, bool with_context) {
 }  // namespace
 
 json BuildWorldSnapshot() {
-  json world = samp::ReadWorld();
-  // Vehicles are the next pool along; the key exists now so the shape the
-  // agent consumes does not change under it later.
-  world["vehicles"] = json::array();
-  return world;
+  return samp::ReadWorld();
 }
 
 json BuildStatusSnapshot() {
