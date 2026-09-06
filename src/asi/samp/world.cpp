@@ -192,6 +192,74 @@ void DumpNetGame(std::uintptr_t net_game, const std::string& host) {
            path);
 }
 
+// Written once when the pool resolves but nobody has a ping, which means the
+// scoreboard is getting those numbers from somewhere we are not looking. Rather
+// than guess at another offset, this puts the bytes on the table.
+void DumpPlayerInfo(const Layout& layout) {
+  const std::string path = ModuleDirectory() + "bot.playerinfo-dump.txt";
+  std::ofstream file(path, std::ios::trunc);
+  if (!file) return;
+
+  const auto* objects = reinterpret_cast<const std::uint32_t*>(
+      layout.player_pool + layout.object_array);
+  const auto* present = reinterpret_cast<const std::uint32_t*>(
+      layout.player_pool + layout.not_empty_array);
+
+  char line[200];
+  std::snprintf(line, sizeof(line),
+                "CPlayerInfo dump\n"
+                "pool 0x%08X  objects +0x%X  name at +0x0C  width %u\n"
+                "score was read at +0x%X, ping at +0x%X, and both came back 0\n"
+                "while the in-game scoreboard shows real numbers.\n\n",
+                static_cast<unsigned>(layout.player_pool),
+                static_cast<unsigned>(layout.object_array),
+                static_cast<unsigned>(layout.string_width),
+                static_cast<unsigned>(layout.score_at),
+                static_cast<unsigned>(layout.ping_at));
+  file << line;
+
+  int dumped = 0;
+  for (int id = 0; id < kMaxPlayers && dumped < 12; ++id) {
+    if (present[id] == 0) continue;
+    const std::uintptr_t info = objects[id];
+
+    std::string name;
+    ReadStdString(info + 0x0C, layout.string_variant, &name);
+    std::snprintf(line, sizeof(line), "\n--- id %d  \"%s\"  at 0x%08X\n", id,
+                  name.c_str(), static_cast<unsigned>(info));
+    file << line;
+    ++dumped;
+
+    for (std::uint32_t offset = 0; offset < 0x60; offset += 4) {
+      std::uint32_t value = 0;
+      if (!asi::mem::Read<std::uint32_t>(info + offset, &value)) break;
+
+      std::string note;
+      if (value == 0) {
+        note = "0";
+      } else if (IsHeapPointer(value)) {
+        note = "-> heap";
+      } else if (value < 100000) {
+        note = "int " + std::to_string(value);
+      }
+      if (offset >= 0x0C && offset < 0x0C + layout.string_width)
+        note += "  (inside the name)";
+
+      char text[6] = {};
+      for (int b = 0; b < 4; ++b) {
+        const unsigned char byte =
+            static_cast<unsigned char>((value >> (b * 8)) & 0xFF);
+        text[b] = (byte >= 0x20 && byte < 0x7F) ? static_cast<char>(byte) : '.';
+      }
+      std::snprintf(line, sizeof(line), "  +0x%02X  %08X  %-28s |%s|\n", offset,
+                    value, note.c_str(), text);
+      file << line;
+    }
+  }
+
+  LOG_INFO("wrote {} - pool resolved but no player has a ping", path);
+}
+
 std::string CommandLineHost() {
   const std::string line = GetCommandLineA();
   const std::size_t at = line.find("-h ");
@@ -430,6 +498,10 @@ const Layout& ResolveLayout() {
       layout.local_id_occupied = present[value] != 0;
     }
   }
+
+  // Reading the right place and finding zeros is a legitimate outcome, but so
+  // is reading the wrong place, and only the bytes tell the two apart.
+  if (!layout.ping_populated && layout.string_width != 0) DumpPlayerInfo(layout);
 
   layout.valid = true;
   layout.note  = "resolved";
