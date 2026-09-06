@@ -26,6 +26,15 @@ class Overlay {
   static void OnLostDevice();
   static void OnResetDevice();
 
+  // Drops our D3D resources as soon as the game window stops being the
+  // foreground one.
+  //
+  // Another module in this process (vc.asi) owns the device across an alt-tab
+  // and calls Reset itself, without going through any hook of ours. Waiting to
+  // be told is therefore not an option: focus loss happens before the device
+  // does, and it is a signal we can read ourselves.
+  static void ReleaseIfUnfocused();
+
   static void Shutdown();
 
   // Called by the frame hook when drawing faulted. The panel is a debugging

@@ -101,6 +101,12 @@ HRESULT APIENTRY HookedPresent(IDirect3DDevice9* device, const RECT* src,
   g_present_seen.store(true, std::memory_order_relaxed);
   g_game_device.store(device, std::memory_order_relaxed);
   Tick();
+
+  // Present keeps being called when EndScene has stopped, so the focus check
+  // belongs here too - this is the last place we are guaranteed to run before
+  // whoever owns the device decides to reset it.
+  Overlay::ReleaseIfUnfocused();
+
   const HRESULT hr = g_original_present(device, src, dest, window, dirty);
 
   // The reliable signal that the device just went away - alt-tabbing out of
@@ -130,19 +136,16 @@ HRESULT APIENTRY HookedReset(IDirect3DDevice9* device,
   // Logged once so the log answers whether this hook fires at all - slot 16 is
   // owned by apphelp.dll here, not d3d9, and a shim is not guaranteed to route
   // the game's own device through the same function.
-  static bool announced = false;
-  if (!announced) {
-    announced = true;
-    LOG_INFO("Reset hook fired for the first time");
-  }
+  // Logged every time, not just once: whether this hook runs at all during a
+  // failing reset is the whole question, and another module here resets the
+  // device without going through it.
+  LOG_INFO("Reset hook entered");
   // Alt-tabbing out of exclusive fullscreen loses the device; coming back
   // resets it. Anything holding D3D resources has to let go first, or the
   // reset fails and the next frame draws with dead handles.
   Overlay::OnLostDevice();
   const HRESULT hr = g_original_reset(device, params);
-  if (FAILED(hr))
-    LOG_ERROR("Device::Reset failed, hr=0x{:08X} - something still holds a "
-              "D3DPOOL_DEFAULT resource", static_cast<unsigned int>(hr));
+  LOG_INFO("Reset returned 0x{:08X}", static_cast<unsigned int>(hr));
   return hr;
 }
 

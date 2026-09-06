@@ -195,12 +195,17 @@ void DrawPanel() {
 void Overlay::Render(IDirect3DDevice9* device) {
   if (!device || g_disabled) return;
 
-  // A lost device cannot be drawn on, and the game is about to Reset it. Let
-  // go of everything now rather than waiting to be told.
+  // Focus is the earliest warning that a reset is coming, and unlike the
+  // device state it is readable before anything has gone wrong yet.
+  ReleaseIfUnfocused();
+
+  // A lost device cannot be drawn on, and a reset is imminent. Let go of
+  // everything now rather than waiting to be told.
   if (device->TestCooperativeLevel() != D3D_OK) {
     OnLostDevice();
     return;
   }
+  if (g_window && GetForegroundWindow() != g_window) return;
 
   // The game can recreate its device outright rather than resetting it, which
   // leaves the backend pointing at a dead object.
@@ -241,6 +246,12 @@ void Overlay::OnResetDevice() {
   // rebuilds the font texture on its own once the device is usable again, and
   // doing it early - while the game may still be mid-reset - is how the
   // recreate ends up on a device that is not ready.
+}
+
+void Overlay::ReleaseIfUnfocused() {
+  if (!g_initialised || !g_resources_live || !g_window) return;
+  if (GetForegroundWindow() == g_window) return;
+  OnLostDevice();
 }
 
 void Overlay::Shutdown() { Teardown(); }

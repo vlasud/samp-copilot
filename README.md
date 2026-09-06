@@ -98,11 +98,14 @@ alive, and the game gives up with its own error box. Resources are released on
 the first of three signals: `Present` returning `D3DERR_DEVICELOST`,
 `TestCooperativeLevel` reporting anything but `D3D_OK`, or the Reset hook.
 
-Releasing is only half of it - the release has to happen *before* the game's
-Reset, which means intercepting the Reset the game actually calls. Resolving
-that address from a throwaway device is not enough when a shim owns the slot,
-so the hook re-points itself onto the game device's own vtable entry once that
-device exists.
+Releasing is only half of it - the release has to happen *before* somebody
+calls Reset, and here that somebody is not the game. The "Device::Reset()
+result 8876086C" box comes from `vc.asi`, a Rust client that wraps the device
+and resets it itself across an alt-tab, without passing through any hook of
+ours. So the trigger cannot be a Reset hook at all: resources are dropped as
+soon as the game window stops being the foreground window, checked in both the
+EndScene and the Present hook. The Reset hook stays as a backstop and logs
+every call it does see.
 
 ## SA-MP versions
 
