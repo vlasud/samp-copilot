@@ -218,6 +218,20 @@ void DumpPlayerInfo(const Layout& layout) {
                 static_cast<unsigned>(layout.ping_at));
   file << line;
 
+  file << "CPlayerPool header - the local row on the scoreboard pins this\n";
+  for (std::uint32_t offset = 0; offset < 0x60; offset += 4) {
+    std::uint32_t value = 0;
+    if (!asi::mem::Read<std::uint32_t>(layout.player_pool + offset, &value))
+      break;
+    // Both halves are printed because the id is sixteen bits and lands
+    // wherever the packing puts it.
+    std::snprintf(line, sizeof(line),
+                  "  +0x%02X  %08X   u32 %-10u  lo %-6u hi %-6u\n", offset,
+                  value, value, value & 0xFFFF, value >> 16);
+    file << line;
+  }
+  file << "\n";
+
   int dumped = 0;
   for (int id = 0; id < kMaxPlayers && dumped < 12; ++id) {
     if (present[id] == 0) continue;
@@ -432,6 +446,22 @@ const Layout& ResolveLayout() {
       if (!IsHeapPointer(object)) continue;
       layout.string_width = width;
       break;
+    }
+  }
+
+  // The shape search can land a few slots early and still pass: shifting both
+  // arrays by the same amount keeps them correlated, and the fields it slides
+  // onto are zero here. The local record gives the true base - m_localInfo is
+  // { id, align, name, CLocalPlayer*, ping, score }, so the arrays start
+  // twelve bytes after the name ends.
+  if (layout.local_name != 0 && layout.string_width != 0) {
+    const std::uint32_t derived = layout.local_name + layout.string_width + 12;
+    if (derived != layout.object_array && LooksLikeSlotArrays(
+                                              layout.player_pool, derived)) {
+      LOG_INFO("player slots move from +0x{:X} to +0x{:X}, derived from the "
+               "local record", layout.object_array, derived);
+      layout.object_array    = derived;
+      layout.not_empty_array = derived + kMaxPlayers * 4;
     }
   }
 
