@@ -4,6 +4,7 @@ add_library(bot MODULE
   log.cpp
   crash_log.cpp
   bridge.cpp
+  hooks/cursor.cpp
   hooks/frame.cpp
   samp/version.cpp
   samp/discovery.cpp

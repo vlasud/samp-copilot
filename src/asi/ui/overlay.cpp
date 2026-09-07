@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "bridge.hpp"
+#include "hooks/cursor.hpp"
 #include "hooks/frame.hpp"
 #include "log.hpp"
 #include "mcp/rpc.hpp"
@@ -99,6 +100,7 @@ const ImVec4& LevelColour(int level) {
 
 void Teardown() {
   if (!g_initialised) return;
+  CursorHook::SetFreed(false);
   if (g_previous_wndproc && g_window) {
     SetWindowLongPtrW(g_window, GWLP_WNDPROC,
                       reinterpret_cast<LONG_PTR>(g_previous_wndproc));
@@ -192,6 +194,10 @@ bool Initialise(IDirect3DDevice9* device) {
     LOG_WARN("could not chain the window procedure - the panel will not take "
              "the mouse");
 
+  // The panel is the only thing that wants the mouse, so the hooks that take
+  // it live and die with the panel.
+  CursorHook::Install();
+
   g_device      = device;
   g_initialised = true;
   LOG_INFO("overlay initialised on hwnd 0x{:08X}, settings in {}",
@@ -226,6 +232,8 @@ void PollToggle() {
     // ImGui draws the cursor itself: the game hides the system one, so there
     // would otherwise be nothing to aim with.
     ImGui::GetIO().MouseDrawCursor = g_mode == Mode::kInteractive;
+    // And the pointer changes hands here, in the one place the mode changes.
+    CursorHook::SetFreed(g_mode == Mode::kInteractive);
   }
   g_toggle_down = down;
 }
@@ -261,10 +269,21 @@ void DrawPanel() {
              ImGuiWindowFlags_NoInputs;
   ImGui::Begin("gtabot", nullptr, flags);
 
-  if (g_mode == Mode::kInteractive)
+  if (g_mode == Mode::kInteractive) {
     ImGui::TextColored(kAmber, "interactive - drag to move, F11 to hide");
-  else
+    // Says plainly whether the pointer was actually taken. A counter that
+    // stays at zero means something other than SetCursorPos is holding it,
+    // and the log names what.
+    if (!CursorHook::installed())
+      ImGui::TextColored(kRed, "the mouse could not be taken from the game");
+    else
+      ImGui::TextColored(kGrey, "mouse held from the game (%llu recentres "
+                                "answered)",
+                         static_cast<unsigned long long>(
+                             CursorHook::suppressed()));
+  } else {
     ImGui::TextColored(kGrey, "F11 to grab the mouse");
+  }
 
   const bool healthy = verdict == "ok";
   Label("verdict", verdict, healthy ? kGreen : kAmber);
@@ -460,6 +479,16 @@ void Overlay::Render(IDirect3DDevice9* device) {
   g_resources_live = true;
   ImGui_ImplDX9_NewFrame();
   ImGui_ImplWin32_NewFrame();
+  // The backend has just asked Windows where the cursor is and been told what
+  // the game is told: the middle of the screen, every frame. The real position
+  // comes through the untouched original, and the later event wins.
+  if (g_mode == Mode::kInteractive && CursorHook::freed()) {
+    POINT pointer{};
+    if (CursorHook::RealCursorPos(&pointer) &&
+        ScreenToClient(g_window, &pointer))
+      ImGui::GetIO().AddMousePosEvent(static_cast<float>(pointer.x),
+                                      static_cast<float>(pointer.y));
+  }
   ImGui::NewFrame();
   DrawPanel();
   ImGui::EndFrame();
@@ -487,9 +516,13 @@ void Overlay::ReleaseIfUnfocused() {
   OnLostDevice();
 }
 
-void Overlay::Shutdown() { Teardown(); }
+void Overlay::Shutdown() {
+  Teardown();
+  CursorHook::Uninstall();
+}
 
 void Overlay::DisableAfterFault() {
+  CursorHook::SetFreed(false);
   // Deliberately does not tear ImGui down: whatever faulted may be mid-way
   // through its own state, and unwinding it now is another chance to crash.
   //
