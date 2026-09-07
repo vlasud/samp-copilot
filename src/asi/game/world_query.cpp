@@ -43,13 +43,8 @@ std::atomic<bool> g_trusted{false};
 std::atomic<bool> g_los_trusted{false};
 std::atomic<bool> g_los_refused{false};
 std::atomic<bool> g_enabled{false};
-// When arming happened, so the stages can advance from it.
-std::atomic<unsigned long long> g_armed_ms{0};
-constexpr unsigned long long kStageMs = 25000;
-
-// The ceiling. Comfortably above what the background reads and a single plan
-// need, and far below the three hundred a second that took the input away.
-constexpr int kCallsPerSecond = 120;
+// The ceiling on world queries - the calls that walk the game's collision.
+constexpr int kCallsPerSecond = 250;
 std::atomic<unsigned long long> g_second_started{0};
 std::atomic<int> g_calls_this_second{0};
 std::atomic<int> g_calls_last_second{0};
@@ -116,31 +111,13 @@ void SetEnabled(bool on) {
   const bool was = g_enabled.exchange(on, std::memory_order_acq_rel);
   if (was == on) return;
   if (on) {
-    g_armed_ms.store(GetTickCount64(), std::memory_order_release);
     g_ground_calls.store(0);
     g_los_calls.store(0);
     g_screen_calls.store(0);
   }
-  LOG_INFO("game calls {}{}", on ? "ENABLED" : "disabled",
-           on ? " - stage 1, ground only" : "");
+  LOG_INFO("game calls {}", on ? "ENABLED" : "disabled");
 }
 
-Stage CurrentStage() {
-  const unsigned long long armed = g_armed_ms.load(std::memory_order_acquire);
-  if (armed == 0) return Stage::kGroundOnly;
-  const unsigned long long elapsed = GetTickCount64() - armed;
-  if (elapsed < kStageMs) return Stage::kGroundOnly;
-  if (elapsed < kStageMs * 2) return Stage::kAndLineOfSight;
-  return Stage::kAndScreen;
-}
-
-const char* StageName() {
-  switch (CurrentStage()) {
-    case Stage::kGroundOnly:     return "1:ground";
-    case Stage::kAndLineOfSight: return "2:+lineofsight";
-    default:                     return "3:+screen";
-  }
-}
 bool Enabled() { return g_enabled.load(std::memory_order_acquire); }
 
 bool CallsTrusted() {
@@ -208,8 +185,7 @@ bool LineOfSightTrusted() {
 }
 
 bool LineOfSightAvailable() {
-  return CallsTrusted() && g_los_trusted.load(std::memory_order_acquire) &&
-         CurrentStage() >= Stage::kAndLineOfSight;
+  return CallsTrusted() && g_los_trusted.load(std::memory_order_acquire);
 }
 
 bool SelfCheckLineOfSight(const Vec3& player, const char** why) {
@@ -275,7 +251,6 @@ bool SelfCheckLineOfSight(const Vec3& player, const char** why) {
 bool LineClear(const Vec3& a, const Vec3& b) {
   if (!CallsTrusted()) return false;
   if (!g_los_trusted.load(std::memory_order_acquire)) return false;
-  if (CurrentStage() < Stage::kAndLineOfSight) return false;
   if (!TakeCallSlot()) return false;
   g_los_calls.fetch_add(1, std::memory_order_relaxed);
   bool clear = false;
@@ -294,8 +269,8 @@ bool ControlsDisabled(bool* disabled) {
 
 bool ToScreen(const Vec3& world, float* sx, float* sy) {
   if (!CallsTrusted()) return false;
-  if (CurrentStage() < Stage::kAndScreen) return false;
-  if (!TakeCallSlot()) return false;
+  // Not rate limited: arithmetic on the camera, not a walk of the world, and
+  // everything drawn needs one of these per point per frame.
   g_screen_calls.fetch_add(1, std::memory_order_relaxed);
   const auto fn = reinterpret_cast<ScreenFn>(At(kCalcScreenCoors));
   if (fn == nullptr) return false;

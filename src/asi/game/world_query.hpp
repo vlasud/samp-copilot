@@ -33,33 +33,25 @@ struct Vec3 {
 void SetEnabled(bool on);
 bool Enabled();
 
-// Which of the three calls are allowed yet.
-//
-// Something a call into the game does takes the player's input away and does
-// not give it back, and six attempts to reason out which call have all been
-// wrong. So arming brings them in one at a time, on a clock: first the only
-// one that has ever been verified, then line of sight, then the projection.
-// Whatever stage the input dies in names the call, in one session, without
-// anybody having to guess.
-enum class Stage { kGroundOnly = 1, kAndLineOfSight = 2, kAndScreen = 3 };
-Stage CurrentStage();
+// The staged arming that found the fault is gone. It brought the three calls
+// in on a twenty-five second clock so that whichever stage the input died in
+// would name the call. It did its job; leaving it in only meant nothing could
+// be drawn for the first fifty seconds after arming. What earned a permanent
+// place instead are the self-checks below, which ask whether a call works
+// rather than when it is allowed.
 
-// How many calls into the game were made in the last second, and the ceiling.
-//
-// Every session that lost the player's input had the reach fan running -
-// three hundred collision queries a second, every second, out of the frame
-// hook - and the one session that armed everything without it kept its input
-// through all three stages. Rate is what does it, so rate is what is capped:
-// past the ceiling every call answers "no" until the second turns over.
-// How many of each kind have been made since arming, so a report of the
-// input going away can name what had been called by then.
+// How many calls into the game were made in the last second, and the ceiling
+// on them. The ceiling covers the calls that walk the game's collision; the
+// projection is arithmetic on the camera and is not counted, or a fan drawn
+// at ninety frames a second would spend the whole allowance on itself.
+int CallsInLastSecond();
+int CallsPerSecondCeiling();
+
+// How many of each kind have been made since arming, so a report of the input
+// going away can name what had been called by then.
 int GroundCalls();
 int LineOfSightCalls();
 int ScreenCalls();
-
-int CallsInLastSecond();
-int CallsPerSecondCeiling();
-const char* StageName();
 
 // Whether the calls below can be trusted: enabled, and SelfCheck() has passed.
 bool CallsTrusted();

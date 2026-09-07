@@ -818,7 +818,7 @@ std::string Overlay::InputState() {
   }
 
   std::snprintf(text, sizeof(text),
-                "focus=%s%s mode=%s cursor=%s controls=%s movement=%s stage=%s "
+                "focus=%s%s mode=%s cursor=%s controls=%s movement=%s "
                 "keys=%s%s%s%s%s",
                 ours ? "game" : "OTHER", who,
                 g_mode == Mode::kInteractive ? "interactive"
@@ -826,8 +826,7 @@ std::string Overlay::InputState() {
                                              : "hidden",
                 CursorHook::freed() ? "ours" : "the game's",
                 !controls_known ? "?" : controls ? "DISABLED" : "enabled",
-                game::Enabled() ? "armed" : "off",
-                game::Enabled() ? game::StageName() : "-", w ? "W" : "",
+                game::Enabled() ? "armed" : "off", w ? "W" : "",
                 a_ ? "A" : "", s_ ? "S" : "", d ? "D" : "", moved);
   return text;
 }
