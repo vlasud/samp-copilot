@@ -28,7 +28,11 @@
 
 namespace gtabot::game {
 
-constexpr int kPathAreas = 64;
+// Sixty-four map areas and eight interior ones. The arrays inside CPathFind
+// are all sized for both, which is what makes the stride between them 288
+// bytes rather than 256.
+constexpr int kPathAreas = 72;
+constexpr int kPathMapAreas = 64;
 
 struct PathNode {
   Vec3          pos;

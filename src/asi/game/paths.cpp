@@ -20,8 +20,32 @@ namespace {
 // CPathFind, per the public headers for 1.0 US. The starting guess for where
 // to look; nothing is read from it until the arrays inside have been
 // recognised by what they contain.
-constexpr std::uint32_t kThePaths     = 0x96F050;
-constexpr std::uint32_t kThePathsSize = 0x3C80;
+// CPathFind, from the reversed declaration rather than from a search.
+//
+//   CNodeAddress             info;                      0x000
+//   CPathNode*               m_apNodesSearchLists[512]; 0x004
+//   CPathNode*               m_pPathNodes[72];          0x804
+//   CCarPathLink*            m_pNaviNodes[72];          0x924
+//   CNodeAddress*            m_pNodeLinks[72];          0xA44
+//   unsigned char*           m_pLinkLengths[72];        0xB64
+//   CPathIntersectionInfo*   m_pPathIntersections[72];  0xC84
+//   CCarPathLinkAddress*     m_pNaviLinks[64];          0xDA4
+//   void*                    field_EA4[64];             0xEA4  <- names its own
+//   unsigned int             m_dwNumNodes[72];          0xFA4
+//   unsigned int             m_dwNumVehicleNodes[72];   0x10C4
+//   unsigned int             m_dwNumPedNodes[72];       0x11E4
+//
+// Two things this settles that a search never could. There are seventy-two
+// areas, not sixty-four - sixty-four of map and eight of interiors - so the
+// stride between these arrays is 288 bytes, not 256. And the counts are
+// 32-bit, not 16. Looking for three 64-entry arrays 256 bytes apart was
+// looking for something that is not there, which is why it never found them.
+constexpr std::uint32_t kThePaths        = 0x96F050;
+constexpr std::uint32_t kPathNodesArray  = kThePaths + 0x804;
+constexpr std::uint32_t kNodeLinksFromNodes        = 0x240;
+constexpr std::uint32_t kNumNodesFromNodes         = 0x7A0;
+constexpr std::uint32_t kNumVehicleNodesFromNodes  = 0x8C0;
+constexpr std::uint32_t kNumPedNodesFromNodes      = 0x9E0;
 
 // One node is 28 bytes: two words nobody reads, the position as three
 // signed shorts in eighths of a metre, a search field, the index of the
@@ -61,17 +85,6 @@ unsigned long long g_last_attempt_ms = 0;
 // The null pattern of the node array at resolve time. When it changes the
 // game has loaded or dropped an area, and the cached counts are stale.
 std::uint32_t      g_loaded_mask = 0;
-// The node array, once found. Scanning the executable's data for it again
-// every five seconds was pointless - it does not move - and repeatedly
-// sweeping the game's own memory is, on a server with an anticheat, exactly
-// the behaviour a memory scanner is looked for by.
-std::uintptr_t     g_nodes_cached = 0;
-// The count tables have never been found on this build. Trying forever means
-// that sweep runs for the rest of the session, so it gets a small number of
-// attempts and then stops for good.
-int                g_count_attempts = 0;
-constexpr int      kMaxCountAttempts = 3;
-bool               g_counts_hopeless = false;
 
 int AreaOf(float x, float y) {
   int ax = static_cast<int>((x + kWorldHalf) / kAreaSide);
@@ -131,66 +144,8 @@ bool LoadCounts(std::uintptr_t base, int width, std::uint32_t* out) {
   return asi::mem::ReadGuarded(base, out, kPathAreas * 4) == kPathAreas * 4;
 }
 
-// Whether `pointer` leads to an array of nodes that say they are area `area`.
-bool LeadsToNodesOf(std::uintptr_t pointer, int area) {
-  if (pointer == 0) return false;
-  PathNode first;
-  if (!ReadNodeAt(pointer, &first)) return false;
-  return first.area == area && first.index == 0 &&
-         PlausiblePosition(first.pos);
-}
-
 bool ReadPointers(std::uintptr_t at, std::uint32_t* out) {
   return asi::mem::ReadGuarded(at, out, kPathAreas * 4) == kPathAreas * 4;
-}
-
-// The per-area node array: 64 pointers, null for areas not loaded, and every
-// other one leading to nodes that name that area.
-bool IsNodeArray(std::uintptr_t at, int* loaded) {
-  std::uint32_t entries[kPathAreas];
-  if (!ReadPointers(at, entries)) return false;
-  int present = 0;
-  for (int i = 0; i < kPathAreas; ++i) {
-    if (entries[i] == 0) continue;
-    if (!LeadsToNodesOf(entries[i], i)) return false;
-    ++present;
-  }
-  if (present == 0) return false;
-  *loaded = present;
-  return true;
-}
-
-std::uintptr_t FindNodeArray(std::uintptr_t begin, std::uintptr_t end,
-                             unsigned long long deadline, int* loaded) {
-  // Any pointer to a block whose first node says "area k, index 0" puts the
-  // array k slots before it. Cheaper than testing every offset as a start.
-  //
-  // Read a chunk at a time rather than a word at a time: a word at a time
-  // asks the kernel about every one of them, and over the executable's data
-  // that took longer than the budget allowed, every time, from the start -
-  // a fallback that could never finish.
-  constexpr std::size_t kChunkWords = 2048;
-  std::uint32_t chunk[kChunkWords];
-  for (std::uintptr_t base = begin; base + 4 <= end; base += kChunkWords * 4) {
-    if (GetTickCount64() > deadline) return 0;
-    const std::size_t want =
-        (end - base < kChunkWords * 4 ? end - base : kChunkWords * 4) & ~3u;
-    const std::size_t got = asi::mem::ReadGuarded(base, chunk, want);
-    for (std::size_t i = 0; i < got / 4; ++i) {
-      const std::uint32_t value = chunk[i];
-      if (value < 0x10000u || value >= 0xC0000000u || value % 4 != 0) continue;
-      PathNode first;
-      if (!ReadNodeAt(value, &first)) continue;
-      if (first.index != 0 || first.area >= kPathAreas) continue;
-      if (!PlausiblePosition(first.pos)) continue;
-      const std::uintptr_t at = base + i * 4;
-      const std::uintptr_t start = at - first.area * 4;
-      if (start < begin) continue;
-      if (IsNodeArray(start, loaded)) return start;
-    }
-    if (got < want) break;
-  }
-  return 0;
 }
 
 // How many nodes an area's array actually holds, read off the array itself:
@@ -312,39 +267,6 @@ bool CountsAgree(std::uintptr_t all, std::uintptr_t vehicle, std::uintptr_t ped,
   return checked > 0;
 }
 
-bool FindCounts(std::uintptr_t begin, std::uintptr_t end,
-                const std::uint32_t* node_pointers, unsigned long long deadline,
-                PathLayout* layout) {
-  // Two widths, because SA stores these as int16 and this code first assumed
-  // int32. The stride between the three arrays is 64 entries of that width.
-  for (int width = 4; width >= 2; width -= 2) {
-    const std::uintptr_t stride = kPathAreas * width;
-    for (std::uintptr_t at = begin; at + stride * 3 <= end; at += 2) {
-      // The budget this search thought it had was only ever checked while
-      // looking for the node array. Stepping two bytes at a time across
-      // thirty-two kilobytes, twice, is the expensive half.
-      if ((at & 0x3FF) == 0 && GetTickCount64() > deadline) return false;
-      const std::uintptr_t first = at, second = at + stride, third = at + stride * 2;
-      // The total may be declared first or last; the data decides which.
-      if (CountsAgree(first, second, third, width, node_pointers)) {
-        layout->count_all = first;
-        layout->count_vehicle = second;
-        layout->count_ped = third;
-        layout->count_width = width;
-        return true;
-      }
-      if (CountsAgree(third, first, second, width, node_pointers)) {
-        layout->count_all = third;
-        layout->count_vehicle = first;
-        layout->count_ped = second;
-        layout->count_width = width;
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 // The link table: 64 pointers with the same null pattern as the node array,
 // whose entries, for a node with links, lead to nodes a walk away.
 bool IsLinkArray(std::uintptr_t at, const std::uint32_t* node_pointers,
@@ -393,16 +315,6 @@ bool IsLinkArray(std::uintptr_t at, const std::uint32_t* node_pointers,
   return verified > 0;
 }
 
-std::uintptr_t FindLinkArray(std::uintptr_t begin, std::uintptr_t end,
-                             const std::uint32_t* node_pointers,
-                             std::uintptr_t count_all, std::uintptr_t not_this) {
-  for (std::uintptr_t at = begin; at + kPathAreas * 4 <= end; at += 4) {
-    if (at == not_this) continue;
-    if (IsLinkArray(at, node_pointers, count_all)) return at;
-  }
-  return 0;
-}
-
 std::uint32_t LoadedMask(const std::uint32_t* node_pointers) {
   std::uint32_t mask = 0;
   for (int i = 0; i < 32; ++i)
@@ -419,20 +331,16 @@ const PathLayout& CachedPaths() { return g_layout; }
 void ForgetPaths() {
   g_resolved = false;
   g_layout   = PathLayout{};
-  g_nodes_cached = 0;
-  g_count_attempts = 0;
-  g_counts_hopeless = false;
 }
 
 const PathLayout& ResolvePaths(const Vec3& player) {
   // Areas come and go as the player moves; when the set changes, the counts
-  // were read for a different world and get established again.
+  // were read for a different world and get read again.
   if (g_resolved) {
     std::uint32_t pointers[kPathAreas];
     if (ReadPointers(g_layout.nodes, pointers) &&
         LoadedMask(pointers) == g_loaded_mask)
       return g_layout;
-    LOG_INFO("path areas changed - re-reading the graph");
     g_resolved = false;
   }
 
@@ -440,92 +348,59 @@ const PathLayout& ResolvePaths(const Vec3& player) {
   if (g_last_attempt_ms != 0 && now - g_last_attempt_ms < kRetryAfterMs)
     return g_layout;
   g_last_attempt_ms = now;
-  const unsigned long long deadline = now + kResolveBudgetMs;
 
   PathLayout layout;
-  const std::uintptr_t the_paths = At(kThePaths);
-  if (the_paths == 0) {
-    layout.note = "the executable is not the build the graph's address is for";
+  const std::uintptr_t nodes = At(kPathNodesArray);
+  if (nodes == 0) {
+    layout.note = "the executable is not the build these addresses are for";
     g_layout = layout;
     return g_layout;
   }
 
-  // Search the structure the headers name first, then the whole of the
-  // executable's data if that comes up empty.
-  const std::uintptr_t window_begin = the_paths;
-  const std::uintptr_t window_end   = the_paths + kThePathsSize;
-  int loaded = 0;
-  std::uintptr_t nodes = 0;
-  // Found once, kept. Only if it stops looking like the node array is the
-  // search run again.
-  if (g_nodes_cached != 0 && IsNodeArray(g_nodes_cached, &loaded)) {
-    nodes = g_nodes_cached;
-  } else {
-    nodes = FindNodeArray(window_begin, window_end, deadline, &loaded);
-  }
-  if (nodes == 0) {
-    const asi::mem::Module exe = asi::mem::FindModule(nullptr);
-    for (const asi::mem::Region& region : asi::mem::ReadableRegions(&exe)) {
-      if (!region.is_writable) continue;
-      nodes = FindNodeArray(region.base, region.base + region.size, deadline,
-                            &loaded);
-      if (nodes != 0) break;
-    }
-  }
-  if (nodes == 0) {
-    layout.note = "no per-area node array found - the graph is not loaded "
-                  "yet, or this is not the layout the headers describe";
-    NoteFailure(layout.note);
-    g_layout = layout;
-    return g_layout;
-  }
-  layout.nodes        = nodes;
-  layout.loaded_areas = loaded;
-  g_nodes_cached      = nodes;
+  // Nothing is searched for any more. CPathFind's layout is declared, and
+  // every offset below follows from it by arithmetic that the data then has
+  // to agree with. Sweeping the executable for these arrays was both slower
+  // and, on a server that watches for exactly that, a poor idea.
+  layout.nodes         = nodes;
+  layout.links         = nodes + kNodeLinksFromNodes;
+  layout.count_all     = nodes + kNumNodesFromNodes;
+  layout.count_vehicle = nodes + kNumVehicleNodesFromNodes;
+  layout.count_ped     = nodes + kNumPedNodesFromNodes;
+  layout.count_width   = 4;
 
   std::uint32_t node_pointers[kPathAreas];
-  ReadPointers(nodes, node_pointers);
-
-  // The other arrays live in the same structure, so they are looked for
-  // around the one just found rather than anywhere.
-  const std::uintptr_t near_begin = nodes > 0x4000 ? nodes - 0x4000 : 0;
-  const std::uintptr_t near_end   = nodes + 0x4000;
-  if (g_counts_hopeless) {
-    layout.note = "the node array is there, but this build's count tables "
-                  "were not found in three attempts and are not looked for "
-                  "again - routing stays unavailable";
+  if (!ReadPointers(nodes, node_pointers)) {
+    layout.note = "the node array is not readable - the graph is not loaded";
     g_layout = layout;
-    g_resolved = true;   // stop retrying; nothing here changes by waiting
     return g_layout;
   }
-  if (!FindCounts(near_begin, near_end, node_pointers, deadline, &layout)) {
-    if (++g_count_attempts >= kMaxCountAttempts) {
-      g_counts_hopeless = true;
-      LOG_WARN("path graph: giving up on the count tables after {} attempts - "
-               "not sweeping the executable for them again", g_count_attempts);
-    }
-    char where[96];
-    std::snprintf(where, sizeof(where), " (node array at gta_sa.exe+0x%X, %d areas loaded)",
-                  static_cast<unsigned>(nodes - Detect().base), loaded);
-    layout.note = "node array found, but no three count arrays where one is "
-                  "the sum of the other two" + std::string(where);
+  for (int i = 0; i < kPathAreas; ++i)
+    if (node_pointers[i] != 0) ++layout.loaded_areas;
+  if (layout.loaded_areas == 0) {
+    layout.note = "no path area is loaded yet";
+    g_layout = layout;
+    return g_layout;
+  }
+
+  // The layout is declared, not believed. Every loaded area has to agree that
+  // its total is its vehicle nodes plus its ped nodes, and that the last node
+  // of its array carries the index that total implies.
+  if (!CountsAgree(layout.count_all, layout.count_vehicle, layout.count_ped,
+                   layout.count_width, node_pointers)) {
+    layout.note = "the declared count tables do not describe the nodes that "
+                  "are loaded - this is not the CPathFind these offsets are for";
     NoteFailure(layout.note);
     DumpAround(nodes, node_pointers);
     g_layout = layout;
+    g_resolved = true;   // the offsets do not change by waiting
     return g_layout;
   }
-  layout.links = FindLinkArray(near_begin, near_end, node_pointers,
-                               layout.count_all, nodes);
-  if (layout.links == 0) {
-    char where[128];
-    std::snprintf(where, sizeof(where),
-                  " (nodes at gta_sa.exe+0x%X, counts at +0x%X)",
-                  static_cast<unsigned>(nodes - Detect().base),
-                  static_cast<unsigned>(layout.count_all - Detect().base));
-    layout.note = "node array and counts found, but no link table whose "
-                  "entries lead to nearby nodes" + std::string(where);
+  if (!IsLinkArray(layout.links, node_pointers, layout.count_all)) {
+    layout.note = "the counts check out but the link table does not lead to "
+                  "nearby nodes";
     NoteFailure(layout.note);
     g_layout = layout;
+    g_resolved = true;
     return g_layout;
   }
 
@@ -534,9 +409,9 @@ const PathLayout& ResolvePaths(const Vec3& player) {
   for (int i = 0; i < kPathAreas; ++i)
     if (node_pointers[i] != 0) layout.ped_nodes_loaded += static_cast<int>(ped[i]);
 
-  layout.valid = true;
-  g_layout     = layout;
-  g_resolved   = true;
+  layout.valid  = true;
+  g_layout      = layout;
+  g_resolved    = true;
   g_loaded_mask = LoadedMask(node_pointers);
 
   // The check that the positions decode right: the nearest ped node to a
