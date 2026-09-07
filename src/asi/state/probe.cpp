@@ -11,6 +11,8 @@
 #include "bridge.hpp"
 #include "hooks/frame.hpp"
 #include "samp/version.hpp"
+#include <atomic>
+
 #include "game/paths.hpp"
 #include "game/world_query.hpp"
 #include "samp/chat.hpp"
@@ -76,6 +78,20 @@ json HitsToJson(const std::vector<mem::Hit>& hits, bool with_context) {
 
 }  // namespace
 
+// Published rather than read on demand: resolving SA-MP's layout is game
+// thread work, and the thread that wants this is the one that has to keep
+// answering when the game thread has stopped.
+std::atomic<bool>  g_have_position{false};
+std::atomic<float> g_local_x{0}, g_local_y{0}, g_local_z{0};
+
+bool LastLocalPosition(float* x, float* y, float* z) {
+  if (!g_have_position.load(std::memory_order_acquire)) return false;
+  *x = g_local_x.load(std::memory_order_relaxed);
+  *y = g_local_y.load(std::memory_order_relaxed);
+  *z = g_local_z.load(std::memory_order_relaxed);
+  return true;
+}
+
 json BuildWorldSnapshot() {
   // Resolving the chat here, on the worker's clock, rather than from the panel:
   // the search walks a lot of memory, and a draw call is the one place heavy
@@ -89,6 +105,10 @@ json BuildWorldSnapshot() {
   // is where he stands, the second to check the nearest pavement is nearby.
   const samp::LocalPed self = samp::ReadLocalPed();
   if (self.valid) {
+    g_local_x.store(self.x, std::memory_order_relaxed);
+    g_local_y.store(self.y, std::memory_order_relaxed);
+    g_local_z.store(self.z, std::memory_order_relaxed);
+    g_have_position.store(true, std::memory_order_release);
     const game::Vec3 at{self.x, self.y, self.z};
     const char* why = "";
     if (!game::CallsTrusted()) game::SelfCheck(at, &why);

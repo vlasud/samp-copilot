@@ -41,6 +41,9 @@ constexpr float kPedHeightMax = 1.8f;
 
 std::atomic<bool> g_trusted{false};
 std::atomic<bool> g_enabled{false};
+// When arming happened, so the stages can advance from it.
+std::atomic<unsigned long long> g_armed_ms{0};
+constexpr unsigned long long kStageMs = 25000;
 
 // Each call is guarded. If the executable is what the fingerprint says, none
 // of these can fault; if it is not, a fault here becomes "no answer" rather
@@ -82,7 +85,27 @@ bool CallScreen(ScreenFn fn, const Vec3* world, Vec3* screen) {
 
 void SetEnabled(bool on) {
   const bool was = g_enabled.exchange(on, std::memory_order_acq_rel);
-  if (was != on) LOG_INFO("game calls {}", on ? "ENABLED" : "disabled");
+  if (was == on) return;
+  if (on) g_armed_ms.store(GetTickCount64(), std::memory_order_release);
+  LOG_INFO("game calls {}{}", on ? "ENABLED" : "disabled",
+           on ? " - stage 1, ground only" : "");
+}
+
+Stage CurrentStage() {
+  const unsigned long long armed = g_armed_ms.load(std::memory_order_acquire);
+  if (armed == 0) return Stage::kGroundOnly;
+  const unsigned long long elapsed = GetTickCount64() - armed;
+  if (elapsed < kStageMs) return Stage::kGroundOnly;
+  if (elapsed < kStageMs * 2) return Stage::kAndLineOfSight;
+  return Stage::kAndScreen;
+}
+
+const char* StageName() {
+  switch (CurrentStage()) {
+    case Stage::kGroundOnly:     return "1:ground";
+    case Stage::kAndLineOfSight: return "2:+lineofsight";
+    default:                     return "3:+screen";
+  }
 }
 bool Enabled() { return g_enabled.load(std::memory_order_acquire); }
 
@@ -132,6 +155,7 @@ bool GroundBelow(const Vec3& at, float* ground_z) {
 
 bool LineClear(const Vec3& a, const Vec3& b) {
   if (!CallsTrusted()) return false;
+  if (CurrentStage() < Stage::kAndLineOfSight) return false;
   const auto fn = reinterpret_cast<LineClearFn>(At(kGetIsLineOfSightClear));
   bool clear = false;
   return fn != nullptr && CallLineClear(fn, &a, &b, &clear) && clear;
@@ -149,6 +173,7 @@ bool ControlsDisabled(bool* disabled) {
 
 bool ToScreen(const Vec3& world, float* sx, float* sy) {
   if (!CallsTrusted()) return false;
+  if (CurrentStage() < Stage::kAndScreen) return false;
   const auto fn = reinterpret_cast<ScreenFn>(At(kCalcScreenCoors));
   if (fn == nullptr) return false;
   Vec3 screen;

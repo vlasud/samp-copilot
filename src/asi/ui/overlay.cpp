@@ -777,16 +777,37 @@ std::string Overlay::InputState() {
   const bool s_ = (GetAsyncKeyState('S') & 0x8000) != 0;
   const bool d = (GetAsyncKeyState('D') & 0x8000) != 0;
 
+  // How far he actually travelled since this was last asked. With the keys
+  // held beside it, this is the whole bug in one field: keys down and nothing
+  // moving is the input being gone, recorded rather than reported.
+  static bool  had_last = false;
+  static float last_x = 0, last_y = 0, last_z = 0;
+  float px = 0, py = 0, pz = 0;
+  char moved[32] = " moved=?";
+  if (LastLocalPosition(&px, &py, &pz)) {
+    if (had_last) {
+      const float dx = px - last_x, dy = py - last_y, dz = pz - last_z;
+      std::snprintf(moved, sizeof(moved), " moved=%.2f",
+                    std::sqrt(dx * dx + dy * dy + dz * dz));
+    }
+    had_last = true;
+    last_x = px;
+    last_y = py;
+    last_z = pz;
+  }
+
   std::snprintf(text, sizeof(text),
-                "focus=%s%s mode=%s cursor=%s controls=%s movement=%s keys=%s%s%s%s",
+                "focus=%s%s mode=%s cursor=%s controls=%s movement=%s stage=%s "
+                "keys=%s%s%s%s%s",
                 ours ? "game" : "OTHER", who,
                 g_mode == Mode::kInteractive ? "interactive"
                 : g_mode == Mode::kPassive   ? "passive"
                                              : "hidden",
                 CursorHook::freed() ? "ours" : "the game's",
                 !controls_known ? "?" : controls ? "DISABLED" : "enabled",
-                game::Enabled() ? "armed" : "off", w ? "W" : "", a_ ? "A" : "",
-                s_ ? "S" : "", d ? "D" : "");
+                game::Enabled() ? "armed" : "off",
+                game::Enabled() ? game::StageName() : "-", w ? "W" : "",
+                a_ ? "A" : "", s_ ? "S" : "", d ? "D" : "", moved);
   return text;
 }
 

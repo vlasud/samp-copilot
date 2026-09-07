@@ -15,6 +15,11 @@ namespace gtabot::asi {
 // slot. This is where players and vehicles will land.
 json BuildWorldSnapshot();
 
+// Where the local player was when the snapshot was last built, published for
+// threads that must not walk SA-MP's structures themselves. Returns false
+// until there has been one.
+bool LastLocalPosition(float* x, float* y, float* z);
+
 // Worker thread. Touches only its own counters and code bytes in d3d9.dll, so
 // it keeps reporting while the game thread is stalled - which is exactly when
 // the report matters most.

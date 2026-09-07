@@ -33,6 +33,18 @@ struct Vec3 {
 void SetEnabled(bool on);
 bool Enabled();
 
+// Which of the three calls are allowed yet.
+//
+// Something a call into the game does takes the player's input away and does
+// not give it back, and six attempts to reason out which call have all been
+// wrong. So arming brings them in one at a time, on a clock: first the only
+// one that has ever been verified, then line of sight, then the projection.
+// Whatever stage the input dies in names the call, in one session, without
+// anybody having to guess.
+enum class Stage { kGroundOnly = 1, kAndLineOfSight = 2, kAndScreen = 3 };
+Stage CurrentStage();
+const char* StageName();
+
 // Whether the calls below can be trusted: enabled, and SelfCheck() has passed.
 bool CallsTrusted();
 
