@@ -80,6 +80,12 @@ bool SelfCheck(const Vec3& player_position, const char** why);
 bool SelfCheckLineOfSight(const Vec3& player_position, const char** why);
 bool LineOfSightTrusted();
 
+// Whether a line-of-sight answer can be had at all right now: verified, armed
+// and past the stage that brings it in. Callers need this to tell "the way is
+// blocked" from "nobody asked" - reporting the second as the first is how
+// every plan in the first twenty-five seconds came back "no headroom".
+bool LineOfSightAvailable();
+
 // The ground below (x, y, z), searching downwards from z. False when the
 // game finds none - which is also the answer for anywhere not streamed in.
 bool GroundBelow(const Vec3& at, float* ground_z);

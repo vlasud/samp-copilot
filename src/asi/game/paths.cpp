@@ -61,6 +61,17 @@ unsigned long long g_last_attempt_ms = 0;
 // The null pattern of the node array at resolve time. When it changes the
 // game has loaded or dropped an area, and the cached counts are stale.
 std::uint32_t      g_loaded_mask = 0;
+// The node array, once found. Scanning the executable's data for it again
+// every five seconds was pointless - it does not move - and repeatedly
+// sweeping the game's own memory is, on a server with an anticheat, exactly
+// the behaviour a memory scanner is looked for by.
+std::uintptr_t     g_nodes_cached = 0;
+// The count tables have never been found on this build. Trying forever means
+// that sweep runs for the rest of the session, so it gets a small number of
+// attempts and then stops for good.
+int                g_count_attempts = 0;
+constexpr int      kMaxCountAttempts = 3;
+bool               g_counts_hopeless = false;
 
 int AreaOf(float x, float y) {
   int ax = static_cast<int>((x + kWorldHalf) / kAreaSide);
@@ -302,12 +313,17 @@ bool CountsAgree(std::uintptr_t all, std::uintptr_t vehicle, std::uintptr_t ped,
 }
 
 bool FindCounts(std::uintptr_t begin, std::uintptr_t end,
-                const std::uint32_t* node_pointers, PathLayout* layout) {
+                const std::uint32_t* node_pointers, unsigned long long deadline,
+                PathLayout* layout) {
   // Two widths, because SA stores these as int16 and this code first assumed
   // int32. The stride between the three arrays is 64 entries of that width.
   for (int width = 4; width >= 2; width -= 2) {
     const std::uintptr_t stride = kPathAreas * width;
     for (std::uintptr_t at = begin; at + stride * 3 <= end; at += 2) {
+      // The budget this search thought it had was only ever checked while
+      // looking for the node array. Stepping two bytes at a time across
+      // thirty-two kilobytes, twice, is the expensive half.
+      if ((at & 0x3FF) == 0 && GetTickCount64() > deadline) return false;
       const std::uintptr_t first = at, second = at + stride, third = at + stride * 2;
       // The total may be declared first or last; the data decides which.
       if (CountsAgree(first, second, third, width, node_pointers)) {
@@ -403,6 +419,9 @@ const PathLayout& CachedPaths() { return g_layout; }
 void ForgetPaths() {
   g_resolved = false;
   g_layout   = PathLayout{};
+  g_nodes_cached = 0;
+  g_count_attempts = 0;
+  g_counts_hopeless = false;
 }
 
 const PathLayout& ResolvePaths(const Vec3& player) {
@@ -436,7 +455,14 @@ const PathLayout& ResolvePaths(const Vec3& player) {
   const std::uintptr_t window_begin = the_paths;
   const std::uintptr_t window_end   = the_paths + kThePathsSize;
   int loaded = 0;
-  std::uintptr_t nodes = FindNodeArray(window_begin, window_end, deadline, &loaded);
+  std::uintptr_t nodes = 0;
+  // Found once, kept. Only if it stops looking like the node array is the
+  // search run again.
+  if (g_nodes_cached != 0 && IsNodeArray(g_nodes_cached, &loaded)) {
+    nodes = g_nodes_cached;
+  } else {
+    nodes = FindNodeArray(window_begin, window_end, deadline, &loaded);
+  }
   if (nodes == 0) {
     const asi::mem::Module exe = asi::mem::FindModule(nullptr);
     for (const asi::mem::Region& region : asi::mem::ReadableRegions(&exe)) {
@@ -455,6 +481,7 @@ const PathLayout& ResolvePaths(const Vec3& player) {
   }
   layout.nodes        = nodes;
   layout.loaded_areas = loaded;
+  g_nodes_cached      = nodes;
 
   std::uint32_t node_pointers[kPathAreas];
   ReadPointers(nodes, node_pointers);
@@ -463,7 +490,20 @@ const PathLayout& ResolvePaths(const Vec3& player) {
   // around the one just found rather than anywhere.
   const std::uintptr_t near_begin = nodes > 0x4000 ? nodes - 0x4000 : 0;
   const std::uintptr_t near_end   = nodes + 0x4000;
-  if (!FindCounts(near_begin, near_end, node_pointers, &layout)) {
+  if (g_counts_hopeless) {
+    layout.note = "the node array is there, but this build's count tables "
+                  "were not found in three attempts and are not looked for "
+                  "again - routing stays unavailable";
+    g_layout = layout;
+    g_resolved = true;   // stop retrying; nothing here changes by waiting
+    return g_layout;
+  }
+  if (!FindCounts(near_begin, near_end, node_pointers, deadline, &layout)) {
+    if (++g_count_attempts >= kMaxCountAttempts) {
+      g_counts_hopeless = true;
+      LOG_WARN("path graph: giving up on the count tables after {} attempts - "
+               "not sweeping the executable for them again", g_count_attempts);
+    }
     char where[96];
     std::snprintf(where, sizeof(where), " (node array at gta_sa.exe+0x%X, %d areas loaded)",
                   static_cast<unsigned>(nodes - Detect().base), loaded);

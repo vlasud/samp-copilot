@@ -89,8 +89,15 @@ bool GroundAt(const Vec3& p, float* ground) {
   return game::GroundBelow(Vec3{p.x, p.y, p.z + kMaxGroundAbove}, ground);
 }
 
+// "Nothing is in the way", separated from "nobody could tell us".
+//
+// A line-of-sight answer is not always to be had: it has to have passed its
+// self-check, the calls have to be armed, and the stage that brings it in has
+// to have come round. Treating any of those as an obstacle is what made every
+// plan in the first twenty-five seconds report "no headroom" about open air.
 bool Clear(const Vec3& a, const Vec3& b) {
-  if (PastDeadline()) return false;
+  if (!game::LineOfSightAvailable()) return true;
+  if (PastDeadline()) return true;
   ++g_calls;
   return game::LineClear(a, b);
 }

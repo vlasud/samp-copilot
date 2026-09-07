@@ -207,6 +207,11 @@ bool LineOfSightTrusted() {
   return g_los_trusted.load(std::memory_order_acquire);
 }
 
+bool LineOfSightAvailable() {
+  return CallsTrusted() && g_los_trusted.load(std::memory_order_acquire) &&
+         CurrentStage() >= Stage::kAndLineOfSight;
+}
+
 bool SelfCheckLineOfSight(const Vec3& player, const char** why) {
   if (g_los_trusted.load()) {
     *why = "already verified";

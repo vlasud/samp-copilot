@@ -333,11 +333,19 @@ void Shadowed(ImDrawList* draw, ImVec2 at, ImU32 colour, const char* text) {
 // blocked; a red line on the screen says by what.
 void DrawWorld() {
   if (!game::CallsTrusted()) return;
+
+  // Nothing asked for means nothing drawn, and nothing drawn means the game
+  // is not asked anything. This used to project the player's own feet on
+  // every frame whether or not there was a line to draw - ninety calls a
+  // second against a ceiling of a hundred and twenty, so the ceiling was
+  // reached by drawing alone and every other caller was told "no answer".
+  const nav::DebugState debug = nav::GetDebug();
+  if (!g_show_fan && !g_show_nodes && !debug.has_target) return;
+
   const samp::LocalPed self = samp::ReadLocalPed();
   if (!self.valid) return;
 
   ImDrawList* draw = ImGui::GetBackgroundDrawList();
-  const nav::DebugState debug = nav::GetDebug();
 
   float px = 0, py = 0;
   const bool self_on_screen =
