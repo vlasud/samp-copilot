@@ -878,9 +878,12 @@ void Overlay::WatchForLostInput() {
   if (still < 6) return;
   still = 0;
 
+  bool controls = false;
+  const bool known = game::ControlsDisabled(&controls);
   LOG_ERROR("input lost while armed - keys held and he has not moved. "
-            "Calls since arming: {} ground, {} line of sight, {} screen. "
-            "Disarming; press the checkbox to try again",
+            "The game says its player controls are {}. Calls since arming: "
+            "{} ground, {} line of sight, {} screen. Disarming",
+            !known ? "unreadable" : controls ? "DISABLED" : "enabled",
             game::GroundCalls(), game::LineOfSightCalls(), game::ScreenCalls());
   game::SetEnabled(false);
 }

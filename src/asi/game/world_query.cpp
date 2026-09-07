@@ -18,11 +18,25 @@ constexpr std::uint32_t kFindGroundZFor3DCoord = 0x5696C0;
 constexpr std::uint32_t kGetIsLineOfSightClear = 0x56A490;
 constexpr std::uint32_t kCalcScreenCoors       = 0x71DA00;
 
-// CPad for the first player, and the member the game consults before it
-// lets him move. Not a call - a read, so it needs no self-check beyond the
-// build fingerprint.
-constexpr std::uint32_t kPad0                   = 0xB73458;
-constexpr std::uint32_t kPadDisablePlayerControls = 0xF6;
+// CPad for the first player, and the member the game consults before it lets
+// him move. Not a call - a read - so it needs no self-check beyond the build
+// fingerprint.
+//
+// The offset was wrong, and wrong in the worst way: 0xF6 lands inside
+// PCTempMouseState, so every "controls=enabled" this module has ever logged
+// was reading mouse bytes and meant nothing at all. The game disabling the
+// player's controls was ruled out over and over on the strength of it. The
+// declaration puts it at 0x10E, after the two shake fields:
+//
+//   CControllerState PCTempMouseState;  0x0D8
+//   char             Phase;             0x108
+//   short            Mode;              0x10A
+//   short            ShakeDur;          0x10C
+//   unsigned short   DisablePlayerControls; 0x10E   <- a union of flag bits
+//
+// CPad is 0x134 bytes, which the array stride has to agree with.
+constexpr std::uint32_t kPad0                     = 0xB73458;
+constexpr std::uint32_t kPadDisablePlayerControls = 0x10E;
 
 using FindGroundFn = float(__cdecl*)(float x, float y, float z, bool* found,
                                      void** entity);
