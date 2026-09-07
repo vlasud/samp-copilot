@@ -505,10 +505,18 @@ void DrawPanel() {
     const game::Exe& exe = game::Detect();
     if (!exe.known) {
       Label("game", "not the 1.0 US build - no calls into it", kRed);
+    } else if (!game::Enabled()) {
+      Label("game", "movement OFF - tick to arm the game calls", kGrey);
     } else if (!game::CallsTrusted()) {
-      Label("game", "calls not verified yet (on foot, on the ground?)", kAmber);
+      Label("game", "armed, verifying (on foot, on the ground?)", kAmber);
     } else {
-      Label("game", "calls verified", kGreen);
+      Label("game", "armed and verified", kGreen);
+    }
+    if (g_mode == Mode::kInteractive && exe.known) {
+      static bool enable = false;
+      enable = game::Enabled();
+      if (ImGui::Checkbox("enable movement (calls into the game)", &enable))
+        game::SetEnabled(enable);
     }
 
     const game::PathLayout& graph = game::CachedPaths();

@@ -26,8 +26,14 @@ struct Vec3 {
   float x = 0, y = 0, z = 0;
 };
 
-// Whether the calls below can be trusted. Established once by SelfCheck()
-// and never assumed.
+// The master switch. The whole subsystem is off until this is set, and no
+// function here calls into the game while it is off. Default off, deliberately:
+// a machine that had to be rebooted is a high enough price that movement does
+// not turn itself on.
+void SetEnabled(bool on);
+bool Enabled();
+
+// Whether the calls below can be trusted: enabled, and SelfCheck() has passed.
 bool CallsTrusted();
 
 // Runs the check that decides CallsTrusted(): with the local player's

@@ -49,7 +49,10 @@ struct PathLayout {
   bool           valid = false;
   std::uintptr_t nodes = 0;   // uintptr_t[64], one array of nodes per area
   std::uintptr_t links = 0;   // uintptr_t[64], one array of links per area
-  std::uintptr_t count_all = 0, count_vehicle = 0, count_ped = 0;  // u32[64]
+  std::uintptr_t count_all = 0, count_vehicle = 0, count_ped = 0;
+  // 2 or 4: SA stores these counts as int16, but a build could widen them, so
+  // the width is established from the data rather than assumed.
+  int            count_width = 4;
   int            loaded_areas = 0;
   int            ped_nodes_loaded = 0;
   // The nearest ped node to the player at resolve time, as the check that

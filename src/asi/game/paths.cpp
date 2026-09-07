@@ -98,6 +98,28 @@ bool ReadNodeAt(std::uintptr_t at, PathNode* out) {
   return true;
 }
 
+// One count, read at the width the layout uses.
+std::uint32_t CountAt(std::uintptr_t base, int area, int width) {
+  if (width == 2) {
+    std::uint16_t value = 0;
+    return asi::mem::Read<std::uint16_t>(base + area * 2, &value) ? value : 0;
+  }
+  std::uint32_t value = 0;
+  return asi::mem::Read<std::uint32_t>(base + area * 4, &value) ? value : 0;
+}
+
+// A whole 64-entry count array, widened to 32 bits.
+bool LoadCounts(std::uintptr_t base, int width, std::uint32_t* out) {
+  if (width == 2) {
+    std::uint16_t narrow[kPathAreas];
+    if (asi::mem::ReadGuarded(base, narrow, sizeof(narrow)) != sizeof(narrow))
+      return false;
+    for (int i = 0; i < kPathAreas; ++i) out[i] = narrow[i];
+    return true;
+  }
+  return asi::mem::ReadGuarded(base, out, kPathAreas * 4) == kPathAreas * 4;
+}
+
 // Whether `pointer` leads to an array of nodes that say they are area `area`.
 bool LeadsToNodesOf(std::uintptr_t pointer, int area) {
   if (pointer == 0) return false;
@@ -224,6 +246,23 @@ void DumpAround(std::uintptr_t nodes, const std::uint32_t* node_pointers) {
     }
     file << std::endl;
   }
+  file << std::endl
+       << "the count region as int16, per loaded area (offset from the node "
+       << "array; the counts are the columns that read 273 for area 5 and "
+       << "2410 for area 13, etc.):" << std::endl;
+  for (std::ptrdiff_t offset = 0x600; offset <= 0xA00; offset += 2) {
+    char head[32];
+    std::snprintf(head, sizeof(head), "  +0x%03X ", static_cast<unsigned>(offset));
+    file << head;
+    for (int k = 0; k < loaded_count; ++k) {
+      std::uint16_t v = 0;
+      asi::mem::Read<std::uint16_t>(nodes + offset + loaded[k] * 2, &v);
+      char cell[24];
+      std::snprintf(cell, sizeof(cell), "[%d]=%-5u ", loaded[k], v);
+      file << cell;
+    }
+    file << std::endl;
+  }
   file << std::endl;
   LOG_INFO("wrote {}", path);
 }
@@ -242,11 +281,11 @@ void NoteFailure(const std::string& note) {
 // the last node of the array carries its own index, which has to be the
 // count less one.
 bool CountsAgree(std::uintptr_t all, std::uintptr_t vehicle, std::uintptr_t ped,
-                 const std::uint32_t* node_pointers) {
+                 int width, const std::uint32_t* node_pointers) {
   std::uint32_t a[kPathAreas], v[kPathAreas], p[kPathAreas];
-  if (asi::mem::ReadGuarded(all, a, sizeof(a)) != sizeof(a)) return false;
-  if (asi::mem::ReadGuarded(vehicle, v, sizeof(v)) != sizeof(v)) return false;
-  if (asi::mem::ReadGuarded(ped, p, sizeof(p)) != sizeof(p)) return false;
+  if (!LoadCounts(all, width, a)) return false;
+  if (!LoadCounts(vehicle, width, v)) return false;
+  if (!LoadCounts(ped, width, p)) return false;
   int checked = 0;
   for (int i = 0; i < kPathAreas; ++i) {
     if (a[i] != v[i] + p[i]) return false;
@@ -264,21 +303,27 @@ bool CountsAgree(std::uintptr_t all, std::uintptr_t vehicle, std::uintptr_t ped,
 
 bool FindCounts(std::uintptr_t begin, std::uintptr_t end,
                 const std::uint32_t* node_pointers, PathLayout* layout) {
-  for (std::uintptr_t at = begin; at + kPathAreas * 12 <= end; at += 4) {
-    const std::uintptr_t first = at, second = at + kPathAreas * 4,
-                         third = at + kPathAreas * 8;
-    // The total may be declared first or last; the data decides which.
-    if (CountsAgree(first, second, third, node_pointers)) {
-      layout->count_all = first;
-      layout->count_vehicle = second;
-      layout->count_ped = third;
-      return true;
-    }
-    if (CountsAgree(third, first, second, node_pointers)) {
-      layout->count_all = third;
-      layout->count_vehicle = first;
-      layout->count_ped = second;
-      return true;
+  // Two widths, because SA stores these as int16 and this code first assumed
+  // int32. The stride between the three arrays is 64 entries of that width.
+  for (int width = 4; width >= 2; width -= 2) {
+    const std::uintptr_t stride = kPathAreas * width;
+    for (std::uintptr_t at = begin; at + stride * 3 <= end; at += 2) {
+      const std::uintptr_t first = at, second = at + stride, third = at + stride * 2;
+      // The total may be declared first or last; the data decides which.
+      if (CountsAgree(first, second, third, width, node_pointers)) {
+        layout->count_all = first;
+        layout->count_vehicle = second;
+        layout->count_ped = third;
+        layout->count_width = width;
+        return true;
+      }
+      if (CountsAgree(third, first, second, width, node_pointers)) {
+        layout->count_all = third;
+        layout->count_vehicle = first;
+        layout->count_ped = second;
+        layout->count_width = width;
+        return true;
+      }
     }
   }
   return false;
@@ -444,9 +489,8 @@ const PathLayout& ResolvePaths(const Vec3& player) {
     return g_layout;
   }
 
-  std::uint32_t vehicle[kPathAreas], ped[kPathAreas];
-  asi::mem::ReadGuarded(layout.count_vehicle, vehicle, sizeof(vehicle));
-  asi::mem::ReadGuarded(layout.count_ped, ped, sizeof(ped));
+  std::uint32_t ped[kPathAreas];
+  LoadCounts(layout.count_ped, layout.count_width, ped);
   for (int i = 0; i < kPathAreas; ++i)
     if (node_pointers[i] != 0) layout.ped_nodes_loaded += static_cast<int>(ped[i]);
 
@@ -478,14 +522,15 @@ const PathLayout& ResolvePaths(const Vec3& player) {
 
 bool ReadNode(std::uint16_t area, std::uint16_t index, PathNode* out) {
   if (!g_layout.valid || area >= kPathAreas) return false;
-  std::uint32_t pointer = 0, total = 0, vehicle = 0;
+  std::uint32_t pointer = 0;
   if (!asi::mem::Read<std::uint32_t>(g_layout.nodes + area * 4, &pointer) ||
       pointer == 0)
     return false;
-  if (!asi::mem::Read<std::uint32_t>(g_layout.count_all + area * 4, &total) ||
-      index >= total)
-    return false;
-  asi::mem::Read<std::uint32_t>(g_layout.count_vehicle + area * 4, &vehicle);
+  const std::uint32_t total =
+      CountAt(g_layout.count_all, area, g_layout.count_width);
+  if (index >= total) return false;
+  const std::uint32_t vehicle =
+      CountAt(g_layout.count_vehicle, area, g_layout.count_width);
   if (!ReadNodeAt(pointer + index * kNodeSize, out)) return false;
   out->ped = index >= vehicle;
   return out->area == area && out->index == index;
@@ -521,10 +566,8 @@ std::vector<PathNode> PedNodesNear(const Vec3& at, float radius,
 
   std::uint32_t pointers[kPathAreas], total[kPathAreas], vehicle[kPathAreas];
   if (!ReadPointers(g_layout.nodes, pointers)) return found;
-  if (asi::mem::ReadGuarded(g_layout.count_all, total, sizeof(total)) != sizeof(total))
-    return found;
-  if (asi::mem::ReadGuarded(g_layout.count_vehicle, vehicle, sizeof(vehicle)) !=
-      sizeof(vehicle))
+  if (!LoadCounts(g_layout.count_all, g_layout.count_width, total)) return found;
+  if (!LoadCounts(g_layout.count_vehicle, g_layout.count_width, vehicle))
     return found;
 
   struct Hit {

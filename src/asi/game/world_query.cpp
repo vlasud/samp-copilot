@@ -40,6 +40,7 @@ constexpr float kPedHeightMin = 0.3f;
 constexpr float kPedHeightMax = 1.8f;
 
 std::atomic<bool> g_trusted{false};
+std::atomic<bool> g_enabled{false};
 
 // Each call is guarded. If the executable is what the fingerprint says, none
 // of these can fault; if it is not, a fault here becomes "no answer" rather
@@ -79,9 +80,22 @@ bool CallScreen(ScreenFn fn, const Vec3* world, Vec3* screen) {
 
 }  // namespace
 
-bool CallsTrusted() { return g_trusted.load(std::memory_order_acquire); }
+void SetEnabled(bool on) {
+  const bool was = g_enabled.exchange(on, std::memory_order_acq_rel);
+  if (was != on) LOG_INFO("game calls {}", on ? "ENABLED" : "disabled");
+}
+bool Enabled() { return g_enabled.load(std::memory_order_acquire); }
+
+bool CallsTrusted() {
+  return g_enabled.load(std::memory_order_acquire) &&
+         g_trusted.load(std::memory_order_acquire);
+}
 
 bool SelfCheck(const Vec3& player, const char** why) {
+  if (!g_enabled.load(std::memory_order_acquire)) {
+    *why = "movement is off";
+    return false;
+  }
   if (g_trusted.load()) {
     *why = "already verified";
     return true;
@@ -111,13 +125,13 @@ bool SelfCheck(const Vec3& player, const char** why) {
 }
 
 bool GroundBelow(const Vec3& at, float* ground_z) {
-  if (!g_trusted.load(std::memory_order_acquire)) return false;
+  if (!CallsTrusted()) return false;
   const auto fn = reinterpret_cast<FindGroundFn>(At(kFindGroundZFor3DCoord));
   return fn != nullptr && CallGround(fn, at.x, at.y, at.z, ground_z);
 }
 
 bool LineClear(const Vec3& a, const Vec3& b) {
-  if (!g_trusted.load(std::memory_order_acquire)) return false;
+  if (!CallsTrusted()) return false;
   const auto fn = reinterpret_cast<LineClearFn>(At(kGetIsLineOfSightClear));
   bool clear = false;
   return fn != nullptr && CallLineClear(fn, &a, &b, &clear) && clear;
@@ -134,7 +148,7 @@ bool ControlsDisabled(bool* disabled) {
 }
 
 bool ToScreen(const Vec3& world, float* sx, float* sy) {
-  if (!g_trusted.load(std::memory_order_acquire)) return false;
+  if (!CallsTrusted()) return false;
   const auto fn = reinterpret_cast<ScreenFn>(At(kCalcScreenCoors));
   if (fn == nullptr) return false;
   Vec3 screen;
