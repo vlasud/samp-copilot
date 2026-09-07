@@ -45,6 +45,32 @@ std::atomic<bool> g_enabled{false};
 std::atomic<unsigned long long> g_armed_ms{0};
 constexpr unsigned long long kStageMs = 25000;
 
+// The ceiling. Comfortably above what the background reads and a single plan
+// need, and far below the three hundred a second that took the input away.
+constexpr int kCallsPerSecond = 120;
+std::atomic<unsigned long long> g_second_started{0};
+std::atomic<int> g_calls_this_second{0};
+std::atomic<int> g_calls_last_second{0};
+std::atomic<bool> g_reported_ceiling{false};
+
+// True while there is still room this second. Rolls the window over itself,
+// so no frame hook has to remember to.
+bool TakeCallSlot() {
+  const unsigned long long now = GetTickCount64();
+  const unsigned long long started = g_second_started.load(std::memory_order_acquire);
+  if (now - started >= 1000) {
+    g_second_started.store(now, std::memory_order_release);
+    g_calls_last_second.store(g_calls_this_second.exchange(0));
+  }
+  if (g_calls_this_second.fetch_add(1, std::memory_order_relaxed) <
+      kCallsPerSecond)
+    return true;
+  if (!g_reported_ceiling.exchange(true))
+    LOG_WARN("game calls hit the ceiling of {} a second - the rest of this "
+             "second is answered without asking the game", kCallsPerSecond);
+  return false;
+}
+
 // Each call is guarded. If the executable is what the fingerprint says, none
 // of these can fault; if it is not, a fault here becomes "no answer" rather
 // than the session. No C++ objects inside, which is what __try requires.
@@ -147,8 +173,12 @@ bool SelfCheck(const Vec3& player, const char** why) {
   return true;
 }
 
+int CallsInLastSecond() { return g_calls_last_second.load(); }
+int CallsPerSecondCeiling() { return kCallsPerSecond; }
+
 bool GroundBelow(const Vec3& at, float* ground_z) {
   if (!CallsTrusted()) return false;
+  if (!TakeCallSlot()) return false;
   const auto fn = reinterpret_cast<FindGroundFn>(At(kFindGroundZFor3DCoord));
   return fn != nullptr && CallGround(fn, at.x, at.y, at.z, ground_z);
 }
@@ -156,6 +186,7 @@ bool GroundBelow(const Vec3& at, float* ground_z) {
 bool LineClear(const Vec3& a, const Vec3& b) {
   if (!CallsTrusted()) return false;
   if (CurrentStage() < Stage::kAndLineOfSight) return false;
+  if (!TakeCallSlot()) return false;
   const auto fn = reinterpret_cast<LineClearFn>(At(kGetIsLineOfSightClear));
   bool clear = false;
   return fn != nullptr && CallLineClear(fn, &a, &b, &clear) && clear;
@@ -174,6 +205,7 @@ bool ControlsDisabled(bool* disabled) {
 bool ToScreen(const Vec3& world, float* sx, float* sy) {
   if (!CallsTrusted()) return false;
   if (CurrentStage() < Stage::kAndScreen) return false;
+  if (!TakeCallSlot()) return false;
   const auto fn = reinterpret_cast<ScreenFn>(At(kCalcScreenCoors));
   if (fn == nullptr) return false;
   Vec3 screen;

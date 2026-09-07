@@ -43,6 +43,16 @@ bool Enabled();
 // anybody having to guess.
 enum class Stage { kGroundOnly = 1, kAndLineOfSight = 2, kAndScreen = 3 };
 Stage CurrentStage();
+
+// How many calls into the game were made in the last second, and the ceiling.
+//
+// Every session that lost the player's input had the reach fan running -
+// three hundred collision queries a second, every second, out of the frame
+// hook - and the one session that armed everything without it kept its input
+// through all three stages. Rate is what does it, so rate is what is capped:
+// past the ceiling every call answers "no" until the second turns over.
+int CallsInLastSecond();
+int CallsPerSecondCeiling();
 const char* StageName();
 
 // Whether the calls below can be trusted: enabled, and SelfCheck() has passed.

@@ -245,10 +245,13 @@ void PollToggle() {
 
 // ---- movement debugging ----------------------------------------------------
 
-constexpr int   kFanSpokes   = 16;
-constexpr float kFanMetres   = 8.0f;
+// Eight spokes at six metres, refreshed every two seconds: about fifty calls
+// a second where the sixteen-spoke version at one second managed three
+// hundred, which is the rate that kept taking the player's input away.
+constexpr int   kFanSpokes   = 8;
+constexpr float kFanMetres   = 6.0f;
 constexpr float kNodeRadius  = 80.0f;
-constexpr unsigned long long kFanRefreshMs  = 1000;
+constexpr unsigned long long kFanRefreshMs  = 2000;
 constexpr unsigned long long kNodeRefreshMs = 2000;
 
 // Both opt-in. They are debugging aids that cost calls into the game every
@@ -575,6 +578,14 @@ void DrawPanel() {
           LOG_INFO("the game reports player controls {}",
                    disabled ? "DISABLED" : "enabled");
         }
+      }
+      if (game::Enabled()) {
+        std::snprintf(text, sizeof(text), "%d of %d a second",
+                      game::CallsInLastSecond(), game::CallsPerSecondCeiling());
+        Label("calls", text,
+              game::CallsInLastSecond() >= game::CallsPerSecondCeiling()
+                  ? kAmber
+                  : kGrey);
       }
       if (g_show_fan) {
         std::snprintf(text, sizeof(text), "%d calls, %llu ms per refresh",
