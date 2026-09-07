@@ -92,6 +92,8 @@ constexpr int kClockSeconds = 1;
 // Below this there are not enough entries for a repeated value to mean
 // anything: two entries agree on plenty by accident.
 constexpr int kMinSignatureVoters = 4;
+constexpr int kMaxVoters    = 48;
+constexpr int kMaxProposers = 3;
 
 // The anchored search sweeps the whole process, which costs the game a visible
 // stutter, so it runs a few times and then gives up rather than every retry
@@ -191,7 +193,8 @@ int CountSentences(const unsigned char* block, std::size_t size,
 // not be able to take the game down for that. No C++ objects here, which is
 // what __try requires.
 bool SearchRing(const unsigned char* block, std::size_t size,
-                std::size_t scan, int max_references, Shape* best) {
+                std::size_t scan, int max_references,
+                unsigned long long deadline, Shape* best) {
   Shape winner;
   bool found = false;
   __try {
@@ -200,6 +203,11 @@ bool SearchRing(const unsigned char* block, std::size_t size,
     for (std::size_t at = 0; at + 4 < limit && references < max_references;
          ++at) {
       if (!FieldStart(block, limit, at)) continue;
+      // The one part of this whose cost depends on what the memory happens to
+      // contain, so the one part that needs a clock rather than a count.
+      // Abandoning it early costs the best shape found so far and nothing
+      // else.
+      if ((references & 0x1F) == 0 && GetTickCount64() > deadline) break;
       ++references;
 
       for (std::uint32_t stride = kMinStride; stride <= kMaxStride;
@@ -419,7 +427,7 @@ bool ScanClock(const unsigned char* block, std::size_t size, const Shape& shape,
         bool falling = true;
         bool readable = true;
 
-        for (int k = 0; k < shape.count && readable; ++k) {
+        for (int k = 0; k < shape.count && k < kMaxVoters && readable; ++k) {
           const std::ptrdiff_t entry =
               static_cast<std::ptrdiff_t>(shape.reference) +
               static_cast<std::ptrdiff_t>(k) * shape.stride;
@@ -666,10 +674,12 @@ int FindSignature(const unsigned char* block, std::size_t size,
                   SignatureColumn* out, int max_out) {
   int written = 0;
   __try {
-    // Entries holding text, which are the ones that can vote.
-    int live[kMaxEntries];
+    // Entries holding text, which are the ones that can vote. A few dozen
+    // settle any question a few hundred would, and the cost of this runs on
+    // the number of voters.
+    int live[kMaxVoters];
     int live_count = 0;
-    for (int k = 0; k < shape.count && live_count < kMaxEntries; ++k) {
+    for (int k = 0; k < shape.count && live_count < kMaxVoters; ++k) {
       const std::ptrdiff_t at =
           static_cast<std::ptrdiff_t>(shape.reference) +
           static_cast<std::ptrdiff_t>(k) * shape.stride + text_delta;
@@ -690,7 +700,18 @@ int FindSignature(const unsigned char* block, std::size_t size,
       int best_matches = 0;
       bool readable = true;
 
-      for (int a = 0; a < live_count && readable; ++a) {
+      // Only the first few entries propose a value, rather than every entry
+      // proposing one and every entry voting on it. Comparing all against all
+      // is quadratic in the number of entries, and at a few hundred entries
+      // and five hundred offsets that stopped being a search and became a
+      // frozen game.
+      //
+      // The first entries are the safe ones to ask: a run overshoots the end
+      // of an array, never the start, so whatever strangers it collected are
+      // at the far end.
+      const int proposers =
+          live_count < kMaxProposers ? live_count : kMaxProposers;
+      for (int a = 0; a < proposers && readable; ++a) {
         const std::ptrdiff_t at =
             static_cast<std::ptrdiff_t>(shape.reference) +
             static_cast<std::ptrdiff_t>(live[a]) * shape.stride + text_delta +
@@ -828,10 +849,11 @@ void Describe(const Candidate& candidate, const Shape& shape,
 }
 
 bool TryCandidate(const Candidate& candidate, std::size_t scan,
-                  int max_references, ChatLayout* layout) {
+                  int max_references, unsigned long long deadline,
+                  ChatLayout* layout) {
   Shape shape;
   if (!SearchRing(reinterpret_cast<const unsigned char*>(candidate.block),
-                  candidate.span, scan, max_references, &shape))
+                  candidate.span, scan, max_references, deadline, &shape))
     return false;
   Describe(candidate, shape, layout);
   return true;
@@ -977,7 +999,8 @@ const ChatLayout& ResolveChat() {
     candidate.rva   = kChatPointerRva;
     layout.roots_tried = 1;
     if (candidate.span >= kMinBlockSpan &&
-        TryCandidate(candidate, kBlockScan, kReferencesPrimary, &layout)) {
+        TryCandidate(candidate, kBlockScan, kReferencesPrimary, deadline,
+                     &layout)) {
       layout.valid = true;
       layout.note  = "chat found through the documented pointer";
     }
@@ -986,12 +1009,15 @@ const ChatLayout& ResolveChat() {
   if (!layout.valid) {
     const std::vector<Candidate> roots = SweepRoots(samp, deadline);
     layout.roots_tried += static_cast<int>(roots.size());
+    LOG_INFO("chat: the documented pointer led nowhere, searching {} blocks",
+             roots.size());
     int searched = 0;
     for (const Candidate& candidate : roots) {
       if (++searched > kMaxSearches) break;
       if (GetTickCount64() > deadline) break;
       ChatLayout attempt;
-      if (!TryCandidate(candidate, kSweepScan, kReferencesFallback, &attempt))
+      if (!TryCandidate(candidate, kSweepScan, kReferencesFallback, deadline,
+                        &attempt))
         continue;
       // The best of the sweep, not the first: several blocks hold text at a
       // regular stride, and the chat log is the one full of sentences.
