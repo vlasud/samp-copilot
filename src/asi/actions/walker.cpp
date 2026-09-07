@@ -10,6 +10,7 @@
 #include <mutex>
 
 #include "game/exe.hpp"
+#include "hooks/windowmode.hpp"
 #include "log.hpp"
 #include "samp/world.hpp"
 #include "state/memory.hpp"
@@ -215,6 +216,18 @@ void __cdecl HookedUpdatePads() {
 
 bool Install() {
   if (g_installed.load()) return true;
+  // The only place this module writes into gta_sa.exe's own code, and that
+  // executable is protected - instructions relocated into stubs, obfuscation
+  // around them. Worth being able to switch off without a rebuild.
+  if (!asi::WindowMode::WalkerAllowed()) {
+    static bool said = false;
+    if (!said) {
+      said = true;
+      LOG_INFO("walker: bot.cfg says walker=off - the game's code is left "
+               "alone and the character cannot be walked");
+    }
+    return false;
+  }
   auto* target = reinterpret_cast<void*>(game::At(kUpdatePads));
   if (target == nullptr) {
     LOG_WARN("walker: not the build CPad::UpdatePads is known for - the "

@@ -29,6 +29,7 @@ int g_height = 0;
 // The window is styled once. Restyling on every reset fights the game's own
 // SetWindowPos and makes the window flicker and jump.
 std::atomic<bool> g_styled{false};
+std::atomic<bool> g_walker_allowed{true};
 
 std::string Trim(const std::string& in) {
   const std::size_t a = in.find_first_not_of(" \t\r\n");
@@ -52,6 +53,13 @@ void ReadConfig() {
     if (eq == std::string::npos) continue;
     const std::string key   = Trim(line.substr(0, eq));
     const std::string value = Trim(line.substr(eq + 1));
+    if (key == "walker") {
+      const bool off = value == "off" || value == "0" || value == "false";
+      g_walker_allowed.store(!off);
+      LOG_INFO("bot.cfg: the walker may {} patch the game's code",
+               off ? "NOT" : "");
+      continue;
+    }
     if (key != "window") continue;
 
     if (value == "off" || value == "0" || value == "false") {
@@ -87,6 +95,11 @@ void WindowMode::EnsureConfigured() { std::call_once(g_once, ReadConfig); }
 bool WindowMode::Enabled() {
   EnsureConfigured();
   return g_enabled.load(std::memory_order_acquire);
+}
+
+bool WindowMode::WalkerAllowed() {
+  EnsureConfigured();
+  return g_walker_allowed.load(std::memory_order_acquire);
 }
 
 void WindowMode::ForceWindowed(D3DPRESENT_PARAMETERS* params) {

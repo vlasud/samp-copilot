@@ -37,6 +37,12 @@ class WindowMode {
   static void EnsureConfigured();
   static bool Enabled();
 
+  // Whether the walker may patch the game's own code. gta_sa.exe here is
+  // protected - instructions relocated into stubs, junk code around them -
+  // and the walker's hook is the only place this module writes into it.
+  // bot.cfg: walker=on (default) or walker=off.
+  static bool WalkerAllowed();
+
   // Rewrites present parameters to windowed at the configured size. Called
   // from the CreateDevice and Reset hooks with whatever the game passed.
   static void ForceWindowed(D3DPRESENT_PARAMETERS* params);

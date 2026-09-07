@@ -630,8 +630,16 @@ void DrawPanel() {
 
     if (g_mode == Mode::kInteractive) {
       if (ImGui::Button("Walk the plan")) {
+        // Saying why, rather than doing nothing: a button that silently
+        // ignores a press is indistinguishable from one that is broken.
         const nav::DebugState debug = nav::GetDebug();
-        if (debug.has_target && debug.plan.ok && debug.plan.waypoints.size() > 1)
+        if (!debug.has_target)
+          SetReportSummary("no plan to walk - ask for one first");
+        else if (!debug.plan.ok)
+          SetReportSummary("that plan is not walkable: " + debug.plan.note);
+        else if (debug.plan.waypoints.size() < 2)
+          SetReportSummary("that plan has nowhere to go");
+        else
           act::WalkTo(std::vector<game::Vec3>(debug.plan.waypoints.begin() + 1,
                                               debug.plan.waypoints.end()));
       }
