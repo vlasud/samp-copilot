@@ -51,6 +51,20 @@ std::atomic<int> g_calls_last_second{0};
 std::atomic<bool> g_reported_ceiling{false};
 std::atomic<int> g_ground_calls{0}, g_los_calls{0}, g_screen_calls{0};
 
+constexpr int kScreenCallsPerSecond = 2000;
+std::atomic<unsigned long long> g_screen_second{0};
+std::atomic<int> g_screen_this_second{0};
+
+bool TakeScreenSlot() {
+  const unsigned long long now = GetTickCount64();
+  if (now - g_screen_second.load(std::memory_order_acquire) >= 1000) {
+    g_screen_second.store(now, std::memory_order_release);
+    g_screen_this_second.store(0);
+  }
+  return g_screen_this_second.fetch_add(1, std::memory_order_relaxed) <
+         kScreenCallsPerSecond;
+}
+
 // True while there is still room this second. Rolls the window over itself,
 // so no frame hook has to remember to.
 bool TakeCallSlot() {
@@ -269,8 +283,11 @@ bool ControlsDisabled(bool* disabled) {
 
 bool ToScreen(const Vec3& world, float* sx, float* sy) {
   if (!CallsTrusted()) return false;
-  // Not rate limited: arithmetic on the camera, not a walk of the world, and
-  // everything drawn needs one of these per point per frame.
+  // Cheaper than a world query - arithmetic on the camera - but not free, and
+  // taking it off the leash entirely let the node overlay make seventeen
+  // thousand of these in eleven seconds. Its own allowance, generous enough
+  // for everything drawn at any frame rate and still an allowance.
+  if (!TakeScreenSlot()) return false;
   g_screen_calls.fetch_add(1, std::memory_order_relaxed);
   const auto fn = reinterpret_cast<ScreenFn>(At(kCalcScreenCoors));
   if (fn == nullptr) return false;

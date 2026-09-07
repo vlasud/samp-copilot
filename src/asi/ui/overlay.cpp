@@ -250,7 +250,11 @@ void PollToggle() {
 // hundred, which is the rate that kept taking the player's input away.
 constexpr int   kFanSpokes   = 8;
 constexpr float kFanMetres   = 6.0f;
-constexpr float kNodeRadius  = 80.0f;
+constexpr float kNodeRadius  = 50.0f;
+// Every one of these is a projection every frame. Three hundred of them at
+// ninety frames a second is seventeen thousand calls in eleven seconds, which
+// is what the node overlay was actually doing.
+constexpr std::size_t kMaxDrawnNodes = 64;
 constexpr unsigned long long kFanRefreshMs  = 2000;
 constexpr unsigned long long kNodeRefreshMs = 2000;
 
@@ -307,7 +311,7 @@ void RefreshNodes() {
     const samp::LocalPed self = samp::ReadLocalPed();
     if (!self.valid) return;
     nav::SetDebugNodes(game::PedNodesNear(game::Vec3{self.x, self.y, self.z},
-                                          kNodeRadius, 300));
+                                          kNodeRadius, kMaxDrawnNodes));
   });
 }
 
@@ -803,9 +807,14 @@ std::string Overlay::InputState() {
   // moving is the input being gone, recorded rather than reported.
   static bool  had_last = false;
   static float last_x = 0, last_y = 0, last_z = 0;
+  static unsigned last_line_serial = 0;
   float px = 0, py = 0, pz = 0;
   char moved[32] = " moved=?";
-  if (LastLocalPosition(&px, &py, &pz)) {
+  const unsigned line_serial = LastPositionSerial();
+  if (line_serial == last_line_serial) {
+    std::snprintf(moved, sizeof(moved), " moved=stale");
+  } else if (LastLocalPosition(&px, &py, &pz)) {
+    last_line_serial = line_serial;
     if (had_last) {
       const float dx = px - last_x, dy = py - last_y, dz = pz - last_z;
       std::snprintf(moved, sizeof(moved), " moved=%.2f",
@@ -842,8 +851,18 @@ void Overlay::WatchForLostInput() {
   static float last_x = 0, last_y = 0, last_z = 0;
   static bool  had = false;
   static int   still = 0;
+  static unsigned last_serial = 0;
   float x = 0, y = 0, z = 0;
   if (!LastLocalPosition(&x, &y, &z)) return;
+
+  // A position nobody has refreshed says nothing about whether he moved. When
+  // reading the player starts failing, the last one read stays exactly where
+  // it was and is indistinguishable from a man standing still - which would
+  // have this disarm the calls for a fault that is not there.
+  const unsigned serial = LastPositionSerial();
+  if (serial == last_serial) return;
+  last_serial = serial;
+
   if (!had) {
     had = true;
     last_x = x; last_y = y; last_z = z;

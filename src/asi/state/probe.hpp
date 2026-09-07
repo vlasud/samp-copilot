@@ -20,6 +20,12 @@ json BuildWorldSnapshot();
 // until there has been one.
 bool LastLocalPosition(float* x, float* y, float* z);
 
+// How many world snapshots have been built. A position that has not been
+// refreshed cannot be used to say the player has stopped: when reading him
+// starts failing, the last one read stays put and looks exactly like a man
+// who is not moving.
+unsigned LastPositionSerial();
+
 // Worker thread. Touches only its own counters and code bytes in d3d9.dll, so
 // it keeps reporting while the game thread is stalled - which is exactly when
 // the report matters most.

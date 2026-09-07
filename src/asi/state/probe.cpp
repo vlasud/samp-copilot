@@ -82,7 +82,12 @@ json HitsToJson(const std::vector<mem::Hit>& hits, bool with_context) {
 // thread work, and the thread that wants this is the one that has to keep
 // answering when the game thread has stopped.
 std::atomic<bool>  g_have_position{false};
+std::atomic<unsigned> g_position_serial{0};
 std::atomic<float> g_local_x{0}, g_local_y{0}, g_local_z{0};
+
+unsigned LastPositionSerial() {
+  return g_position_serial.load(std::memory_order_acquire);
+}
 
 bool LastLocalPosition(float* x, float* y, float* z) {
   if (!g_have_position.load(std::memory_order_acquire)) return false;
@@ -109,6 +114,7 @@ json BuildWorldSnapshot() {
     g_local_y.store(self.y, std::memory_order_relaxed);
     g_local_z.store(self.z, std::memory_order_relaxed);
     g_have_position.store(true, std::memory_order_release);
+    g_position_serial.fetch_add(1, std::memory_order_release);
     const game::Vec3 at{self.x, self.y, self.z};
     const char* why = "";
     if (!game::CallsTrusted()) game::SelfCheck(at, &why);
