@@ -273,6 +273,10 @@ int CountStrings(const unsigned char* block, std::size_t size, std::size_t at,
   return strings;
 }
 
+inline std::int32_t Magnitude(std::int32_t value) {
+  return value < 0 ? -value : value;
+}
+
 struct Column {
   std::int32_t delta        = 0;
   int          hits         = 0;
@@ -578,23 +582,43 @@ void Describe(const Candidate& candidate, const Shape& shape,
 
   // The message is the column that holds sentences. The reference offset is
   // simply wherever the first field start landed, which inside an entry is as
-  // likely to be the speaker as the text, so it gets no special standing.
+  // likely to be the speaker as the text, so it gets no special standing -
+  // except as a tie-breaker, because the reference is the first text in the
+  // block and so the column the array actually starts at. Taking a tied
+  // column at some other offset instead shifts every read by an entry and
+  // drags in whatever sat in memory before the array.
   const Column* message = nullptr;
   for (int i = 0; i < column_count; ++i) {
     if (message == nullptr || columns[i].sentences > message->sentences ||
         (columns[i].sentences == message->sentences &&
-         columns[i].total_length > message->total_length))
+         columns[i].total_length > message->total_length) ||
+        (columns[i].sentences == message->sentences &&
+         columns[i].total_length == message->total_length &&
+         Magnitude(columns[i].delta) < Magnitude(message->delta)))
       message = &columns[i];
   }
 
   const std::int32_t text_delta = message ? message->delta : 0;
+  const int message_average =
+      message && message->hits > 0 ? message->total_length / message->hits : 0;
 
-  // The speaker is the next fullest column that is a column of its own rather
-  // than part of the message.
+  // The speaker, if the entries have one. Two tests, both learned the hard
+  // way from a panel that printed every line beside the one before it:
+  //
+  //   - A column a whole stride away is not another column. It is this same
+  //     column in the next entry, and it matches on every count there is.
+  //   - Whoever is speaking is named in fewer characters than they used to
+  //     say something. A copy of the message column averages exactly what the
+  //     message column averages, so this rules that out too.
   const Column* speaker = nullptr;
   for (int i = 0; i < column_count; ++i) {
     const std::int32_t gap = columns[i].delta - text_delta;
     if (gap > -4 && gap < 4) continue;
+    if (gap <= -static_cast<std::int32_t>(shape.stride) ||
+        gap >= static_cast<std::int32_t>(shape.stride))
+      continue;
+    if (columns[i].hits == 0) continue;
+    if (columns[i].total_length / columns[i].hits >= message_average) continue;
     if (speaker == nullptr || columns[i].hits > speaker->hits ||
         (columns[i].hits == speaker->hits &&
          columns[i].total_length > speaker->total_length))
@@ -606,7 +630,15 @@ void Describe(const Candidate& candidate, const Shape& shape,
   layout->root_rva     = candidate.rva;
   layout->stride       = shape.stride;
   layout->entries      = shape.count;
-  layout->populated    = shape.strings;
+  // Counted on the column that gets read, not on the one the search anchored
+  // on: with the two a hundred and twenty six bytes apart, they disagreed.
+  const std::int64_t text_at =
+      static_cast<std::int64_t>(shape.reference) + text_delta;
+  layout->populated =
+      text_at >= 0 ? CountStrings(block, candidate.span,
+                                  static_cast<std::size_t>(text_at),
+                                  shape.stride, shape.count)
+                   : shape.strings;
   layout->sentences    = shape.sentences;
   layout->first_text   = candidate.block + shape.reference + text_delta;
   layout->has_prefix   = speaker != nullptr;
