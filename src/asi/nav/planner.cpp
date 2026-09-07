@@ -38,11 +38,25 @@ constexpr std::size_t kJoinCandidates = 8;
 // A* stops here; the loaded graph is a few square kilometres and a route
 // that needs more than this is not one the character can walk yet.
 constexpr int kMaxExpansions = 4000;
-// Pulling the route tight: try to skip up to this many nodes at a time, but
-// never across a leg longer than this - the game's collision is only sure
-// close by, and a long straight line across a city block is usually wrong.
-constexpr int   kSmoothLookahead = 3;
-constexpr float kSmoothMaxLeg    = 35.0f;
+// Pulling the route tight.
+//
+// The graph is there to get around things, not to be followed. Left alone it
+// produces exactly what it is - the pavement network the game's pedestrians
+// walk - so a route to the far side of a street goes down to the crossing and
+// back up, in big obedient loops, when a person would simply cross the road.
+//
+// So the route is pulled as tight as the world actually allows: from each
+// point, the furthest one still reachable in a straight line wins, searched
+// from the far end down so the longest legal shortcut is the one taken. What
+// makes that safe is that the shortcut is not assumed - it is walked in
+// sampling, metre by metre, ground and clearance the whole way, exactly as
+// the direct line was. A road is walkable ground, so cutting across one is
+// allowed; a building is not, so cutting through one is not.
+constexpr int   kSmoothLookahead = 24;
+constexpr float kSmoothMaxLeg    = 140.0f;
+// Two passes. The first turns a hundred nodes into a handful of long legs;
+// the second straightens the kinks that are only visible once it has.
+constexpr int   kSmoothPasses    = 2;
 // The whole plan, in calls into the game. Past this, legs are marked
 // unverified rather than assumed.
 constexpr int kCallBudget = 8000;
@@ -53,7 +67,10 @@ int g_calls = 0;
 // game thread, where a long answer is a frame nobody draws and a message
 // nobody pumps - which looks exactly like the input being taken away.
 unsigned long long g_deadline_ms = 0;
-constexpr unsigned long long kBudgetMs = 8;
+// Enough for two passes of pulling a long route tight. This runs while the
+// walker is standing still waiting for somewhere to go, so a frame spent here
+// costs a pause before setting off rather than a stutter mid-stride.
+constexpr unsigned long long kBudgetMs = 15;
 
 bool PastDeadline() {
   return g_deadline_ms != 0 && GetTickCount64() > g_deadline_ms;
@@ -440,23 +457,33 @@ Plan PlanPath(const Vec3& from, const Vec3& to) {
   for (const game::PathNode& node : route) points.push_back(Lifted(node));
   points.push_back(b);
 
-  std::vector<Vec3> tight;
-  tight.push_back(points.front());
-  std::size_t i = 0;
-  while (i + 1 < points.size()) {
-    std::size_t next = i + 1;
-    const std::size_t furthest =
-        std::min(points.size() - 1, i + 1 + static_cast<std::size_t>(kSmoothLookahead));
-    for (std::size_t j = furthest; j > i + 1; --j) {
-      if (Distance2D(points[i], points[j]) > kSmoothMaxLeg) continue;
-      if (g_calls >= kCallBudget) break;
-      if (WalkableInner(points[i], points[j]).ok) {
-        next = j;
-        break;
+  std::vector<Vec3> tight = points;
+  for (int pass = 0; pass < kSmoothPasses && tight.size() > 2; ++pass) {
+    std::vector<Vec3> pulled;
+    pulled.push_back(tight.front());
+    std::size_t i = 0;
+    while (i + 1 < tight.size()) {
+      std::size_t next = i + 1;
+      const std::size_t furthest = std::min(
+          tight.size() - 1, i + 1 + static_cast<std::size_t>(kSmoothLookahead));
+      // From the far end down: the first one that works is the longest
+      // shortcut available, which is the one a person would take.
+      for (std::size_t j = furthest; j > i + 1; --j) {
+        if (Distance2D(tight[i], tight[j]) > kSmoothMaxLeg) continue;
+        if (g_calls >= kCallBudget || PastDeadline()) break;
+        if (WalkableInner(tight[i], tight[j]).ok) {
+          next = j;
+          break;
+        }
       }
+      pulled.push_back(tight[next]);
+      i = next;
     }
-    tight.push_back(points[next]);
-    i = next;
+    if (pulled.size() == tight.size()) {
+      tight = std::move(pulled);
+      break;   // nothing more to straighten
+    }
+    tight = std::move(pulled);
   }
   plan.waypoints = tight;
 

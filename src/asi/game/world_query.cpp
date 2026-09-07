@@ -63,7 +63,14 @@ std::atomic<bool> g_los_trusted{false};
 std::atomic<bool> g_los_refused{false};
 std::atomic<bool> g_enabled{false};
 // The ceiling on world queries - the calls that walk the game's collision.
-constexpr int kCallsPerSecond = 250;
+//
+// Raised, because the reason it was set this low did not survive: the input
+// was lost once at six calls a second and kept through three hundred, so rate
+// was never what did it. What genuinely bounds these is the planner's own
+// wall clock, which will not spend more than a few milliseconds of any frame.
+// This is left as a backstop against a runaway rather than as a budget, and
+// pulling a route tight across a city is worth a few thousand of them.
+constexpr int kCallsPerSecond = 4000;
 std::atomic<unsigned long long> g_second_started{0};
 std::atomic<int> g_calls_this_second{0};
 std::atomic<int> g_calls_last_second{0};

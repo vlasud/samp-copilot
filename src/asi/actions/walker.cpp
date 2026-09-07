@@ -150,11 +150,19 @@ bool DecideStick(short* out_x, short* out_y) {
   }
   const Vec3 here{self.x, self.y, self.z};
 
-  // Arrived at this leg?
+  // Arrived at this leg - or past it.
+  //
+  // Insisting on reaching each point exactly is what makes a character walk
+  // like a machine: he heads for a corner, touches it, then turns on the spot
+  // for the next one. A person rounds the corner. So a waypoint also counts
+  // as done once the one after it is nearer than it is, which is what having
+  // passed something means, and the turn happens while still moving.
   while (g_leg < g_route.size()) {
     const bool last = g_leg + 1 == g_route.size();
     const float d = Distance2D(here, g_route[g_leg]);
-    if (d > (last ? kArriveLast : kArriveNext)) break;
+    bool done = d <= (last ? kArriveLast : kArriveNext);
+    if (!done && !last && Distance2D(here, g_route[g_leg + 1]) < d) done = true;
+    if (!done) break;
     ++g_leg;
     g_progress_ms = now;
     g_best_distance = 0;
