@@ -46,6 +46,13 @@ struct ChatLayout {
   std::uint32_t  stride     = 0;
   int            entries    = 0;
   int            populated  = 0;
+  // Entries that read like a line someone wrote rather than a table cell.
+  // This is what the search picks a winner on.
+  int            sentences  = 0;
+  // Whether the line the client printed when it connected is in this ring.
+  // That line contains the server address, which is the one piece of chat we
+  // can prove exists without looking at the screen.
+  bool           anchored   = false;
   // The speaker, when the entries have one.
   bool           has_prefix   = false;
   std::int32_t   prefix_delta = 0;
