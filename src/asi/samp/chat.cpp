@@ -410,8 +410,6 @@ bool ScanClock(const unsigned char* block, std::size_t size, const Shape& shape,
   __try {
     const std::int32_t span = static_cast<std::int32_t>(shape.stride);
     for (std::int32_t delta = -span + 1; delta < span && !found; ++delta) {
-      if ((shape.reference + delta) % 4 != 0) continue;
-
       for (int base = kClockTicks; base <= kClockSeconds && !found; ++base) {
         std::uint32_t previous = 0;
         int live     = 0;   // entries holding a line
@@ -684,8 +682,10 @@ int FindSignature(const unsigned char* block, std::size_t size,
     const int allowed = live_count / 5 + 1;
 
     const std::int32_t span = static_cast<std::int32_t>(shape.stride);
-    for (std::int32_t delta = -span; delta < span && written < max_out;
-         ++delta) {
+    // Not stopping at max_out: the list is kept by strength, so it has to
+    // keep looking after it is full or the weakest columns found first would
+    // simply hold their places.
+    for (std::int32_t delta = -span; delta < span; ++delta) {
       std::uint32_t best_value = 0;
       int best_matches = 0;
       bool readable = true;
@@ -796,6 +796,10 @@ void Describe(const Candidate& candidate, const Shape& shape,
   layout->entries      = shape.count;
   // Counted on the column that gets read, not on the one the search anchored
   // on: with the two a hundred and twenty six bytes apart, they disagreed.
+  layout->signature_count =
+      FindSignature(block, candidate.span, shape, text_delta,
+                    layout->signature, ChatLayout::kMaxSignature);
+
   const std::int64_t text_at =
       static_cast<std::int64_t>(shape.reference) + text_delta;
   layout->populated =
@@ -1076,6 +1080,25 @@ json ReadChat(int limit) {
     // clock column, it says which slots are lines and which are leftovers -
     // the only test that tells them apart, since a real line is allowed to be
     // short and meaningless too.
+    // An entry of this array carries what every entry of it carries. Whatever
+    // else holds text at the right spacing - and SA-MP's table of client
+    // command names, sitting in the same allocation right after the chat log,
+    // does - carries none of it.
+    if (layout.signature_count > 0) {
+      int matched = 0;
+      for (int c = 0; c < layout.signature_count; ++c) {
+        std::uint32_t value = 0;
+        if (asi::mem::Read<std::uint32_t>(at + layout.signature[c].delta,
+                                          &value) &&
+            value == layout.signature[c].value)
+          ++matched;
+      }
+      if (matched * 2 < layout.signature_count) {
+        ++stale;
+        continue;
+      }
+    }
+
     std::int64_t age_ms = -1;
     if (layout.has_time) {
       std::uint32_t stamp = 0;
