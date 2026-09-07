@@ -30,6 +30,8 @@ constexpr std::size_t kMaxReferences = 24;
 // The reference sweep runs per hit and is the expensive half, so only the
 // first few live copies get the full treatment.
 constexpr std::size_t kMaxDetailed = 6;
+// How much of a region a sweep copies out at a time before looking at it.
+constexpr std::size_t kSweepWords = 2048;  // 8 KB
 
 bool g_written = false;
 
@@ -136,15 +138,31 @@ void DescribeReferences(std::ostream& out, std::uintptr_t hit,
 
   std::size_t found = 0;
   std::size_t scanned = 0;
+  std::vector<std::uint32_t> chunk(kSweepWords);
   for (const asi::mem::Region& region : regions) {
     if (found >= kMaxReferences || scanned >= kScanBudget) break;
     if (!region.is_writable) continue;
     scanned += region.size;
 
-    const auto* values = reinterpret_cast<const std::uint32_t*>(region.base);
+    // Copied out a chunk at a time rather than read through a pointer into
+    // the region. This loop walks every writable page in the process, and
+    // sooner or later one of them is unmapped between VirtualQuery listing it
+    // and this line reading it - which is exactly how it crashed the game.
     const std::size_t count = region.size / sizeof(std::uint32_t);
+    std::size_t have = 0;
+    std::size_t from = 0;
     for (std::size_t i = 0; i < count && found < kMaxReferences; ++i) {
-      const std::uintptr_t value = values[i];
+      if (i >= from + have) {
+        from = i;
+        const std::size_t want =
+            (count - from < kSweepWords ? count - from : kSweepWords) *
+            sizeof(std::uint32_t);
+        have = asi::mem::ReadGuarded(region.base + from * sizeof(std::uint32_t),
+                                     chunk.data(), want) /
+               sizeof(std::uint32_t);
+        if (have == 0) break;
+      }
+      const std::uintptr_t value = chunk[i - from];
       if (value < low || value > high) continue;
 
       const std::uintptr_t at = region.base + i * sizeof(std::uint32_t);

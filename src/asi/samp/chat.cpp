@@ -48,6 +48,8 @@ constexpr int kReferencesPrimary  = 512;
 constexpr int kReferencesFallback = 128;
 constexpr int kMaxRoots     = 256;
 constexpr int kMaxColumns   = 192;
+// How much of a region the sweep copies out at a time before looking at it.
+constexpr std::size_t kSweepWords = 2048;  // 8 KB
 // Candidates that get the full stride search. The cheap filter below decides
 // which ones, and this caps what the expensive half can ever cost.
 constexpr int kMaxSearches  = 48;
@@ -467,6 +469,16 @@ int CountFieldStarts(const unsigned char* block, std::size_t size,
   return count;
 }
 
+// Walks back from a byte inside a string to where the string began. Guarded
+// like every other raw walk here.
+std::size_t FieldStartBefore(const unsigned char* block, std::size_t at) {
+  __try {
+    while (at > 0 && Printable(block[at - 1])) --at;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  }
+  return at;
+}
+
 struct Candidate {
   std::uintptr_t block = 0;
   std::size_t    span  = 0;
@@ -503,16 +515,28 @@ std::vector<Candidate> SweepRoots(const asi::mem::Module& samp,
   const std::vector<asi::mem::Region> everything = asi::mem::ReadableRegions();
   const std::vector<asi::mem::Region> data = asi::mem::ReadableRegions(&samp);
 
+  std::vector<std::uint32_t> chunk(kSweepWords);
   for (const asi::mem::Region& region : data) {
     if (!region.is_writable) continue;  // a root pointer lives in writable data
-    const auto* words = reinterpret_cast<const std::uint32_t*>(region.base);
     const std::size_t count = region.size / sizeof(std::uint32_t);
+    std::size_t have = 0;
+    std::size_t from = 0;
 
     for (std::size_t i = 0; i < count; ++i) {
       if (found.size() >= static_cast<std::size_t>(kMaxRoots)) return found;
       if ((i & 0x3FF) == 0 && GetTickCount64() > deadline) return found;
+      if (i >= from + have) {
+        from = i;
+        const std::size_t want =
+            (count - from < kSweepWords ? count - from : kSweepWords) *
+            sizeof(std::uint32_t);
+        have = asi::mem::ReadGuarded(region.base + from * sizeof(std::uint32_t),
+                                     chunk.data(), want) /
+               sizeof(std::uint32_t);
+        if (have == 0) break;
+      }
 
-      const std::uintptr_t value = words[i];
+      const std::uintptr_t value = chunk[i - from];
       if (value < 0x00010000u || value >= 0xC0000000u) continue;
       if (value % 4 != 0) continue;
 
@@ -662,8 +686,8 @@ bool SearchByConnectLine(const std::string& host, unsigned long long deadline,
     const auto* block = reinterpret_cast<const unsigned char*>(candidate.block);
     // The address sits in the middle of the line; the field starts wherever
     // the printable run before it began.
-    std::size_t at = hit.address - candidate.block;
-    while (at > 0 && Printable(block[at - 1])) --at;
+    const std::size_t at =
+        FieldStartBefore(block, hit.address - candidate.block);
 
     int confirmations = 0;
     for (std::uint32_t stride = kMinStride; stride <= kMaxStride; stride += 4) {

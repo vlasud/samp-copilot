@@ -50,6 +50,17 @@ bool Read(std::uintptr_t address, T* out) {
 // first byte outside the printable range. Empty on any failure.
 std::string ReadCString(std::uintptr_t address, std::size_t max_length);
 
+// Copies as much of [address, address+bytes) as is still there into `out`,
+// and says how much that was.
+//
+// This is the only safe way to sweep a region. VirtualQuery reports what was
+// mapped a moment ago; another thread is free to unmap a page before the read
+// lands, and a diagnostic that walks the whole address space will eventually
+// meet one that has. Reading through a raw pointer instead is what crashed
+// the game the first time somebody joined a busy server while a report was
+// being written.
+std::size_t ReadGuarded(std::uintptr_t address, void* out, std::size_t bytes);
+
 // Every committed readable region of the process, or of one module when
 // `within` is given.
 std::vector<Region> ReadableRegions(const Module* within = nullptr);

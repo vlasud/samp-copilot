@@ -303,6 +303,10 @@ bool LooksLikeSlotArrays(std::uintptr_t pool, std::uint32_t offset) {
   const auto* object_values = reinterpret_cast<const std::uint32_t*>(objects);
   const auto* flag_values   = reinterpret_cast<const std::uint32_t*>(not_empty);
 
+  // Guarded like the other raw walks: this runs against thousands of
+  // speculative offsets, and IsReadable only speaks for the moment it was
+  // asked. There are no objects to unwind in here, which is what lets it.
+  __try {
   int occupied = 0;
   for (int i = 0; i < kMaxPlayers; ++i) {
     const bool flagged = flag_values[i] != 0;
@@ -322,6 +326,9 @@ bool LooksLikeSlotArrays(std::uintptr_t pool, std::uint32_t offset) {
     if (flag_values[i] == 0) continue;
     if (!IsHeapPointer(object_values[i])) return false;
     ++checked;
+  }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;  // the pages moved under us, so this is not the pool
   }
   return true;
 }
@@ -804,7 +811,12 @@ const Layout& ResolveLayout() {
     // recognised by mostly being pointers, and the player pool is then
     // identified by what it contains rather than by its index.
     if (!asi::mem::IsReadable(candidate, kPoolSlotsToTry * 4)) continue;
-    const auto* entries = reinterpret_cast<const std::uint32_t*>(candidate);
+    // Copied out rather than read in place: `candidate` is a speculative
+    // address and IsReadable only speaks for the moment it was asked.
+    std::uint32_t entries[kPoolSlotsToTry] = {};
+    if (asi::mem::ReadGuarded(candidate, entries, sizeof(entries)) !=
+        sizeof(entries))
+      continue;
     int pointer_like = 0;
     for (int i = 0; i < kPoolCount; ++i)
       if (entries[i] != 0 && IsHeapPointer(entries[i])) ++pointer_like;
