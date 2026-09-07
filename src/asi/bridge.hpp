@@ -31,6 +31,10 @@ class Bridge {
   static json GetWorld(std::int64_t* age_ms);
   // Just the age, without copying the snapshot - the overlay asks every frame.
   static std::int64_t world_age_ms();
+  // Everything in the snapshot except the two arrays in it, which are the
+  // only expensive parts. The panel wants the counts and the local player,
+  // not six hundred rows, four times a second.
+  static json GetWorldSummary(std::int64_t* age_ms);
 
   static std::size_t pending_tasks();
   // Tasks dropped because the queue was full - a stuck game thread, not a

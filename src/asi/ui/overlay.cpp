@@ -37,8 +37,11 @@ namespace {
 
 // F11: F8 is GTA's screenshot key and F9 was taken too.
 constexpr int kToggleKey = VK_F11;
-constexpr int kLogLines  = 14;
-constexpr int kChatLines = 6;
+// The log column is as tall as the window, so it holds a lot more than the
+// fourteen lines it used to get at the bottom of one.
+constexpr int   kLogLines   = 60;
+constexpr int   kChatLines  = 8;
+constexpr float kLeftColumn = 400.0f;
 // Rebuilding the status json costs allocations; at 96 fps that is pure waste
 // for numbers a human reads. Refresh it four times a second instead.
 constexpr unsigned long long kRefreshMs = 250;
@@ -65,17 +68,8 @@ const ImVec4 kGrey {0.60f, 0.60f, 0.60f, 1.0f};
 // Results of the posted diagnostics: written by a task on the game thread,
 // read by the panel on a later frame.
 std::mutex  g_summary_mutex;
-std::string g_probe_summary;
 std::string g_report_summary;
 
-void SetProbeSummary(std::string text) {
-  std::lock_guard<std::mutex> lock(g_summary_mutex);
-  g_probe_summary = std::move(text);
-}
-std::string ProbeSummary() {
-  std::lock_guard<std::mutex> lock(g_summary_mutex);
-  return g_probe_summary;
-}
 void SetReportSummary(std::string text) {
   std::lock_guard<std::mutex> lock(g_summary_mutex);
   g_report_summary = std::move(text);
@@ -88,7 +82,7 @@ std::string ReportSummary() {
 void Label(const char* name, const std::string& value,
            const ImVec4& colour = ImVec4{1, 1, 1, 1}) {
   ImGui::TextColored(kGrey, "%s", name);
-  ImGui::SameLine(150.0f);
+  ImGui::SameLine(70.0f);
   ImGui::TextColored(colour, "%s", value.c_str());
 }
 
@@ -240,28 +234,32 @@ void PollToggle() {
 
 void DrawPanel() {
   static json               cached;
+  static json               cached_world;
   static json               cached_chat;
   static unsigned long long cached_at = 0;
+  static std::int64_t       cached_age = -1;
   const unsigned long long now = GetTickCount64();
   if (cached.is_null() || now - cached_at >= kRefreshMs) {
-    cached    = BuildStatusSnapshot();
-    // Cached alongside the status for the same reason: reading the ring means
-    // validating an address per entry, and doing that ninety times a second
-    // for six lines a person is reading is pure waste.
+    cached = BuildStatusSnapshot();
+    // The summary, not the world: the snapshot carries six hundred players
+    // and a copy of it four times a second to show three numbers is waste.
+    cached_world = Bridge::GetWorldSummary(&cached_age);
+    // Cached for the same reason: reading the ring means validating an
+    // address per entry, and doing that ninety times a second for six lines
+    // a person is reading buys nothing.
     cached_chat = samp::CachedChat().valid ? samp::ReadChat(kChatLines)
                                            : json::object();
     cached_at = now;
   }
 
   const json& status = cached;
-  const json frame  = status.value("frame", json::object());
-  const json hook   = status.value("hook", json::object());
+  const json  frame  = status.value("frame", json::object());
   const std::string verdict = status.value("verdict", std::string{"?"});
 
   // FirstUseEver, not Always: past the first run the position comes from
   // bot.imgui.ini, which is the point of being able to drag it.
   ImGui::SetNextWindowPos(ImVec2(12, 12), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(520, 430), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(820, 400), ImGuiCond_FirstUseEver);
 
   ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
   if (g_mode != Mode::kInteractive)
@@ -269,57 +267,77 @@ void DrawPanel() {
              ImGuiWindowFlags_NoInputs;
   ImGui::Begin("gtabot", nullptr, flags);
 
+  // Left: what the bot can see. Right: what it has been saying. Everything
+  // that was here to prove the plumbing works - frame counters, patch bytes,
+  // queue depths, pool addresses - has gone: it is answered by the verdict
+  // when it matters and is noise when it does not.
+  ImGui::BeginChild("left", ImVec2(kLeftColumn, 0), false);
+
   if (g_mode == Mode::kInteractive) {
-    ImGui::TextColored(kAmber, "interactive - drag to move, F11 to hide");
-    // Says plainly whether the pointer was actually taken. A counter that
-    // stays at zero means something other than SetCursorPos is holding it,
-    // and the log names what.
-    if (!CursorHook::installed())
-      ImGui::TextColored(kRed, "the mouse could not be taken from the game");
+    if (CursorHook::installed())
+      ImGui::TextColored(kAmber, "interactive - the mouse is ours, F11 to "
+                                 "give it back");
     else
-      ImGui::TextColored(kGrey, "mouse held from the game (%llu recentres "
-                                "answered)",
-                         static_cast<unsigned long long>(
-                             CursorHook::suppressed()));
+      ImGui::TextColored(kRed, "interactive, but the mouse could not be taken "
+                               "from the game");
   } else {
     ImGui::TextColored(kGrey, "F11 to grab the mouse");
   }
 
   const bool healthy = verdict == "ok";
-  Label("verdict", verdict, healthy ? kGreen : kAmber);
-
-  ImGui::Separator();
-  Label("frames", std::to_string(frame.value("frames", 0ull)));
-  Label("fps", std::to_string(static_cast<int>(frame.value("fps", 0.0))));
-  Label("idle", std::to_string(frame.value("idle_ms", 0ull)) + " ms");
-  Label("driver", frame.value("driver", std::string{"?"}));
-  const bool intact = hook.value("present_intact", false) ||
-                      hook.value("endscene_intact", false);
-  Label("patch bytes", intact ? "intact" : "REWRITTEN",
-        intact ? kGreen : kRed);
-
-  ImGui::Separator();
-  const samp::Client client = samp::Detect();
-  Label("samp.dll", client.base ? samp::ToString(client.version) : "not loaded",
-        client.base ? kGreen : kGrey);
-  if (client.base) {
-    char buffer[32];
-    std::snprintf(buffer, sizeof(buffer), "0x%08X",
-                  static_cast<unsigned int>(client.base));
-    Label("base", buffer);
+  if (healthy) {
+    char headline[64];
+    std::snprintf(headline, sizeof(headline), "ok  -  %d fps",
+                  static_cast<int>(frame.value("fps", 0.0)));
+    Label("bot", headline, kGreen);
+  } else {
+    Label("bot", verdict, kAmber);
   }
 
-  ImGui::Separator();
+  const samp::Client client = samp::Detect();
   const samp::Layout& layout = samp::ResolveLayout();
   if (layout.valid) {
-    char pool_text[32];
-    std::snprintf(pool_text, sizeof(pool_text), "0x%08X",
-                  static_cast<unsigned>(layout.player_pool));
-    Label("pool", pool_text, kGreen);
-    Label("host", layout.host, kGreen);
+    Label("server", layout.host + "   " + samp::ToString(client.version),
+          kGreen);
   } else {
-    Label("pool", layout.note.empty() ? "not resolved" : layout.note, kAmber);
+    Label("server", layout.note.empty() ? "not in a server" : layout.note,
+          kAmber);
   }
+
+  if (cached_world.value("resolved", false)) {
+    const json world_layout = cached_world.value("layout", json::object());
+    char counts[96];
+    std::snprintf(counts, sizeof(counts), "%d players, %d near, %d cars",
+                  cached_world.value("player_count", 0),
+                  world_layout.value("players_streamed", 0),
+                  cached_world.value("vehicle_count", 0));
+    Label("world", counts);
+
+    const json self = cached_world.value("self", json::object());
+    if (!self.empty()) {
+      char who[128];
+      std::snprintf(who, sizeof(who), "id %d   hp %d   armour %d   %s",
+                    self.value("id", -1),
+                    static_cast<int>(self.value("health", 0.0f)),
+                    static_cast<int>(self.value("armour", 0.0f)),
+                    self.value("weapon_name", std::string{"?"}).c_str());
+      Label("self", who);
+      const json pos = self.value("pos", json::array());
+      if (pos.size() == 3) {
+        char where[64];
+        std::snprintf(where, sizeof(where), "%.0f, %.0f, %.0f",
+                      pos[0].get<float>(), pos[1].get<float>(),
+                      pos[2].get<float>());
+        Label("at", where);
+      }
+    }
+  } else {
+    Label("world", cached_age < 0 ? "never built" : "not resolved", kAmber);
+  }
+
+  const StatusSource::Mcp mcp = StatusSource::mcp();
+  Label("mcp", mcp.listening ? mcp.endpoint : "not listening",
+        mcp.listening ? kGreen : kRed);
 
   ImGui::Separator();
   // The chat, drawn next to the real one on purpose: the only way to know a
@@ -327,13 +345,9 @@ void DrawPanel() {
   const samp::ChatLayout& chat = samp::CachedChat();
   if (chat.valid) {
     char shape[96];
-    std::snprintf(shape, sizeof(shape), "%d lines, stride %u, %s, %s",
-                  chat.populated, chat.stride,
-                  chat.anchored ? "anchored" : "shape only",
-                  chat.order_known
-                      ? (chat.newest_first ? "newest first" : "oldest first")
-                      : "order unknown");
-    Label("chat", shape, kGreen);
+    std::snprintf(shape, sizeof(shape), "%d lines, %s", chat.populated,
+                  chat.anchored ? "anchored" : "by shape only");
+    Label("chat", shape, chat.anchored ? kGreen : kAmber);
     for (const json& line : cached_chat.value("lines", json::array())) {
       const std::string from = line.value("from", std::string{});
       ImGui::TextWrapped("  %s%s", from.empty() ? "" : (from + "  ").c_str(),
@@ -342,90 +356,41 @@ void DrawPanel() {
   } else {
     Label("chat", chat.note.empty() ? "not resolved" : chat.note, kAmber);
   }
-  if (g_mode == Mode::kInteractive && ImGui::Button("Dump chat")) {
-    Bridge::PostToGameThread([]() { samp::DumpChat(); });
-  }
 
-  ImGui::Separator();
-  const StatusSource::Mcp mcp = StatusSource::mcp();
-  Label("mcp", mcp.listening ? mcp.endpoint : "not listening",
-        mcp.listening ? kGreen : kRed);
-  Label("requests", std::to_string(mcp.requests));
-  Label("in flight", std::to_string(mcp::Rpc::in_flight()) + "  timed out " +
-                         std::to_string(mcp::Rpc::timed_out()));
-
-  const std::int64_t world_age_ms = Bridge::world_age_ms();
-  Label("world age", world_age_ms < 0 ? "never built"
-                                      : std::to_string(world_age_ms) + " ms");
-  Label("task queue", std::to_string(Bridge::pending_tasks()) + " pending, " +
-                          std::to_string(Bridge::dropped_tasks()) + " dropped");
-
-  ImGui::Separator();
-  // The panel draws on the game thread, so a probe can simply be run here -
-  // no round trip, and no need to be alt-tabbed away to ask for one.
-  static std::string probe_summary;
   if (g_mode == Mode::kInteractive) {
-    // Posted rather than run here. A scan of the whole process inside the
-    // draw call charges any fault in it to the panel, and the panel is what
-    // gets switched off for it.
-    if (ImGui::Button("Run memory probe")) {
-      SetProbeSummary("running...");
-      Bridge::PostToGameThread([]() {
-        try {
-          const json result = ProbeMemory(json::object());
-          LogProbeSummary(result);
-          const json search = result.value("search", json::object());
-          SetProbeSummary(search.value("needle", std::string{"<none>"}) +
-                          " found " +
-                          std::to_string(search.value("found", std::size_t{0})) +
-                          " time(s)");
-        } catch (const std::exception& e) {
-          SetProbeSummary(std::string("failed: ") + e.what());
-        }
-      });
-    }
-    probe_summary = ProbeSummary();
-    if (!probe_summary.empty()) {
-      ImGui::SameLine();
-      ImGui::TextColored(kGrey, "%s", probe_summary.c_str());
-    }
-
-    // The launcher nickname is useless as an anchor on a roleplay server,
-    // where the name above the character is a different string entirely. It
-    // has to be typed, and typing it here beats alt-tabbing to do it.
-    static char        needle[64] = "";
-    static std::string report_summary;
-    ImGui::SetNextItemWidth(220.0f);
-    ImGui::InputTextWithHint("##needle", "name shown above your character",
-                             needle, sizeof(needle));
+    ImGui::Separator();
+    if (ImGui::Button("Dump chat"))
+      Bridge::PostToGameThread([]() { samp::DumpChat(); });
     ImGui::SameLine();
-    if (ImGui::Button("Dump SA-MP structures")) {
+    if (ImGui::Button("Dump structures")) {
       SetReportSummary("running...");
-      const std::string wanted = needle;
-      Bridge::PostToGameThread([wanted]() {
+      Bridge::PostToGameThread([]() {
         samp::DumpPlayerRecords();
-        const samp::ReportOutcome outcome = samp::WriteStructureReport(wanted);
-        SetReportSummary(outcome.written
-                             ? "wrote " + outcome.path + " - " +
-                                   std::to_string(outcome.structure_hits) +
-                                   " worth looking at, " +
-                                   std::to_string(outcome.command_line_hits) +
-                                   " command-line copies skipped"
-                             : outcome.error);
+        const samp::ReportOutcome outcome = samp::WriteStructureReport();
+        SetReportSummary(outcome.written ? "wrote " + outcome.path
+                                         : outcome.error);
       });
     }
-    report_summary = ReportSummary();
+    const std::string report_summary = ReportSummary();
     if (!report_summary.empty())
       ImGui::TextWrapped("%s", report_summary.c_str());
   }
+  ImGui::EndChild();
 
-  ImGui::Separator();
-  ImGui::TextColored(kGrey, "log");
-  ImGui::BeginChild("log", ImVec2(0, kLogLines * ImGui::GetTextLineHeight()),
-                    false, ImGuiWindowFlags_NoInputs);
+  ImGui::SameLine();
+  ImGui::BeginChild("log", ImVec2(0, 0), true,
+                    ImGuiWindowFlags_NoNav |
+                        (g_mode == Mode::kInteractive
+                             ? 0
+                             : ImGuiWindowFlags_NoInputs));
   for (const LogLine& line : RecentLogLines(kLogLines)) {
-    ImGui::TextColored(LevelColour(line.level), "%s", line.text.c_str());
+    ImGui::PushStyleColor(ImGuiCol_Text, LevelColour(line.level));
+    ImGui::TextWrapped("%s", line.text.c_str());
+    ImGui::PopStyleColor();
   }
+  // Follow the tail, unless the reader has scrolled up to look at something.
+  if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 1.0f)
+    ImGui::SetScrollHereY(1.0f);
   ImGui::EndChild();
 
   ImGui::End();

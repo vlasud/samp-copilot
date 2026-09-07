@@ -59,6 +59,18 @@ json Bridge::GetWorld(std::int64_t* age_ms) {
   return g_world;
 }
 
+json Bridge::GetWorldSummary(std::int64_t* age_ms) {
+  std::lock_guard<std::mutex> lock(g_world_mutex);
+  if (age_ms) *age_ms = g_world_ms ? NowMillis() - g_world_ms : -1;
+  json summary = json::object();
+  if (!g_world.is_object()) return summary;
+  for (auto it = g_world.begin(); it != g_world.end(); ++it) {
+    if (it.key() == "players" || it.key() == "vehicles") continue;
+    summary[it.key()] = it.value();
+  }
+  return summary;
+}
+
 std::int64_t Bridge::world_age_ms() {
   std::lock_guard<std::mutex> lock(g_world_mutex);
   return g_world_ms ? NowMillis() - g_world_ms : -1;
