@@ -294,12 +294,16 @@ DebugState g_debug;
 
 Verdict Standable(const Vec3& p) {
   g_calls = 0;
-  return StandableInner(p);
+  Verdict verdict = StandableInner(p);
+  verdict.calls = g_calls;
+  return verdict;
 }
 
 Verdict Walkable(const Vec3& a, const Vec3& b) {
   g_calls = 0;
-  return WalkableInner(a, b);
+  Verdict verdict = WalkableInner(a, b);
+  verdict.calls = g_calls;
+  return verdict;
 }
 
 Plan PlanPath(const Vec3& from, const Vec3& to) {

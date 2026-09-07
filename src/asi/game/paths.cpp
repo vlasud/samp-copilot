@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 #include "game/exe.hpp"
@@ -127,19 +128,42 @@ std::uintptr_t FindNodeArray(std::uintptr_t begin, std::uintptr_t end,
                              unsigned long long deadline, int* loaded) {
   // Any pointer to a block whose first node says "area k, index 0" puts the
   // array k slots before it. Cheaper than testing every offset as a start.
-  for (std::uintptr_t at = begin; at + 4 <= end; at += 4) {
-    if (((at - begin) & 0xFFF) == 0 && GetTickCount64() > deadline) return 0;
-    std::uint32_t value = 0;
-    if (!asi::mem::Read<std::uint32_t>(at, &value) || value < 0x10000u) continue;
-    PathNode first;
-    if (!ReadNodeAt(value, &first)) continue;
-    if (first.index != 0 || first.area >= kPathAreas) continue;
-    if (!PlausiblePosition(first.pos)) continue;
-    const std::uintptr_t start = at - first.area * 4;
-    if (start < begin) continue;
-    if (IsNodeArray(start, loaded)) return start;
+  //
+  // Read a chunk at a time rather than a word at a time: a word at a time
+  // asks the kernel about every one of them, and over the executable's data
+  // that took longer than the budget allowed, every time, from the start -
+  // a fallback that could never finish.
+  constexpr std::size_t kChunkWords = 2048;
+  std::uint32_t chunk[kChunkWords];
+  for (std::uintptr_t base = begin; base + 4 <= end; base += kChunkWords * 4) {
+    if (GetTickCount64() > deadline) return 0;
+    const std::size_t want =
+        (end - base < kChunkWords * 4 ? end - base : kChunkWords * 4) & ~3u;
+    const std::size_t got = asi::mem::ReadGuarded(base, chunk, want);
+    for (std::size_t i = 0; i < got / 4; ++i) {
+      const std::uint32_t value = chunk[i];
+      if (value < 0x10000u || value >= 0xC0000000u || value % 4 != 0) continue;
+      PathNode first;
+      if (!ReadNodeAt(value, &first)) continue;
+      if (first.index != 0 || first.area >= kPathAreas) continue;
+      if (!PlausiblePosition(first.pos)) continue;
+      const std::uintptr_t at = base + i * 4;
+      const std::uintptr_t start = at - first.area * 4;
+      if (start < begin) continue;
+      if (IsNodeArray(start, loaded)) return start;
+    }
+    if (got < want) break;
   }
   return 0;
+}
+
+// Said once per distinct reason, so a graph that never resolves leaves a
+// trail rather than a gap.
+void NoteFailure(const std::string& note) {
+  static std::string last;
+  if (note == last) return;
+  last = note;
+  LOG_WARN("path graph: {}", note);
 }
 
 // Three arrays of 64 counts where one is the sum of the other two, and the
@@ -309,6 +333,7 @@ const PathLayout& ResolvePaths(const Vec3& player) {
   if (nodes == 0) {
     layout.note = "no per-area node array found - the graph is not loaded "
                   "yet, or this is not the layout the headers describe";
+    NoteFailure(layout.note);
     g_layout = layout;
     return g_layout;
   }
@@ -323,16 +348,26 @@ const PathLayout& ResolvePaths(const Vec3& player) {
   const std::uintptr_t near_begin = nodes > 0x4000 ? nodes - 0x4000 : 0;
   const std::uintptr_t near_end   = nodes + 0x4000;
   if (!FindCounts(near_begin, near_end, node_pointers, &layout)) {
+    char where[96];
+    std::snprintf(where, sizeof(where), " (node array at gta_sa.exe+0x%X, %d areas loaded)",
+                  static_cast<unsigned>(nodes - Detect().base), loaded);
     layout.note = "node array found, but no three count arrays where one is "
-                  "the sum of the other two";
+                  "the sum of the other two" + std::string(where);
+    NoteFailure(layout.note);
     g_layout = layout;
     return g_layout;
   }
   layout.links = FindLinkArray(near_begin, near_end, node_pointers,
                                layout.count_all, nodes);
   if (layout.links == 0) {
+    char where[128];
+    std::snprintf(where, sizeof(where),
+                  " (nodes at gta_sa.exe+0x%X, counts at +0x%X)",
+                  static_cast<unsigned>(nodes - Detect().base),
+                  static_cast<unsigned>(layout.count_all - Detect().base));
     layout.note = "node array and counts found, but no link table whose "
-                  "entries lead to nearby nodes";
+                  "entries lead to nearby nodes" + std::string(where);
+    NoteFailure(layout.note);
     g_layout = layout;
     return g_layout;
   }

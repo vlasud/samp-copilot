@@ -9,6 +9,7 @@
 
 #include <spdlog/common.h>
 
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <mutex>
@@ -133,7 +134,11 @@ LRESULT CALLBACK HookedWndProc(HWND window, UINT message, WPARAM wparam,
     ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
     const ImGuiIO& io = ImGui::GetIO();
     if (io.WantCaptureMouse && IsMouseMessage(message)) return TRUE;
-    if (io.WantCaptureKeyboard && IsKeyboardMessage(message)) return TRUE;
+    // Keys reach the game unless the panel is actually taking text. The game
+    // reads its keyboard from these messages, so swallowing them is the
+    // character standing still - and WantCaptureKeyboard is true whenever
+    // any item is active, which is a far wider net than typing.
+    if (io.WantTextInput && IsKeyboardMessage(message)) return TRUE;
   }
   return CallWindowProcW(g_previous_wndproc, window, message, wparam, lparam);
 }
@@ -245,8 +250,13 @@ constexpr float kNodeRadius  = 80.0f;
 constexpr unsigned long long kFanRefreshMs  = 1000;
 constexpr unsigned long long kNodeRefreshMs = 2000;
 
-bool g_show_fan   = true;
+// Both opt-in. They are debugging aids that cost calls into the game every
+// second, and the agent has no use for them.
+bool g_show_fan   = false;
 bool g_show_nodes = false;
+// What the last fan cost, so a stutter has a number next to it.
+std::atomic<unsigned long long> g_fan_ms{0};
+std::atomic<int>                g_fan_calls{0};
 
 const ImU32 kLineOk      = IM_COL32(80, 220, 80, 230);
 const ImU32 kLineBlocked = IM_COL32(240, 70, 70, 230);
@@ -262,9 +272,11 @@ void RefreshFan() {
   Bridge::PostToGameThread([]() {
     const samp::LocalPed self = samp::ReadLocalPed();
     if (!self.valid || !game::CallsTrusted()) return;
+    const unsigned long long started = GetTickCount64();
     std::vector<game::Vec3> ends;
     std::vector<bool>       ok;
     const game::Vec3 here{self.x, self.y, self.z};
+    int calls = 0;
     for (int i = 0; i < kFanSpokes; ++i) {
       const float angle = static_cast<float>(i) * 6.2831853f / kFanSpokes;
       const game::Vec3 to{self.x + std::cos(angle) * kFanMetres,
@@ -272,8 +284,17 @@ void RefreshFan() {
       const nav::Verdict verdict = nav::Walkable(here, to);
       ends.push_back(verdict.where);
       ok.push_back(verdict.ok);
+      calls += verdict.calls;
     }
     nav::SetDebugFan(std::move(ends), std::move(ok));
+    g_fan_ms.store(GetTickCount64() - started);
+    g_fan_calls.store(calls);
+    static bool reported = false;
+    if (!reported) {
+      reported = true;
+      LOG_INFO("reach fan: {} calls into the game in {} ms", calls,
+               g_fan_ms.load());
+    }
   });
 }
 
@@ -512,6 +533,25 @@ void DrawPanel() {
       Label("plan", text, debug.plan.ok ? kGreen : kAmber);
     } else {
       Label("plan", "none - ask for one below or via plan_path", kGrey);
+    }
+
+    // Who has the input right now. If the character will not move, this
+    // line is the first thing to read.
+    {
+      const ImGuiIO& io = ImGui::GetIO();
+      char text[128];
+      std::snprintf(text, sizeof(text), "%s, mouse %s, keys %s%s",
+                    g_mode == Mode::kInteractive ? "interactive" : "passive",
+                    g_mode == Mode::kInteractive ? "ours" : "the game's",
+                    io.WantTextInput ? "ours (typing)" : "the game's",
+                    g_show_fan ? "" : "");
+      Label("input", text, g_mode == Mode::kInteractive ? kAmber : kGrey);
+      if (g_show_fan) {
+        std::snprintf(text, sizeof(text), "%d calls, %llu ms per refresh",
+                      g_fan_calls.load(),
+                      static_cast<unsigned long long>(g_fan_ms.load()));
+        Label("fan", text, g_fan_ms.load() > 30 ? kAmber : kGrey);
+      }
     }
 
     if (g_mode == Mode::kInteractive) {

@@ -42,6 +42,7 @@ struct Verdict {
   Vec3        where;       // the point that decided it
   float       ground_z = 0;
   float       metres   = 0;  // along the segment, for Walkable
+  int         calls    = 0;  // into the game, to answer this
 };
 
 Verdict Standable(const Vec3& p);
