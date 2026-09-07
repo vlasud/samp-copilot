@@ -7,6 +7,7 @@
 #include "log.hpp"
 #include "mcp/rpc.hpp"
 #include "mcp/server.hpp"
+#include "samp/chat.hpp"
 #include "samp/discovery.hpp"
 #include "state/probe.hpp"
 #include "types.hpp"
@@ -53,6 +54,44 @@ void RegisterTools(Server* server) {
         std::int64_t world_age_ms = -1;
         json world = asi::Bridge::GetWorld(&world_age_ms);
         return json{{"world", std::move(world)}, {"world_age_ms", world_age_ms}};
+      },
+  });
+
+  server->AddTool({
+      "get_chat",
+      "The chat log as the player sees it: server messages, other players "
+      "talking, and anything the server printed. Oldest first. 'order' says "
+      "whether the module could establish the direction of the array from "
+      "timestamps or is assuming it.",
+      {{"type", "object"},
+       {"properties",
+        {{"limit",
+          {{"type", "integer"},
+           {"minimum", 1},
+           {"maximum", 200},
+           {"description", "How many of the most recent lines to return. "
+                           "Defaults to 40."}}}}}},
+      [](const json& args) {
+        const int limit = args.value("limit", 40);
+        return Rpc::RunOnGameThread([limit] { return samp::ReadChat(limit); },
+                                    kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "dump_chat",
+      "Writes bot.chat-dump.txt next to the module: the shape the chat log was "
+      "recognised by, and the raw bytes of the last few entries. This is how a "
+      "column the search labelled wrongly gets corrected.",
+      NoArguments(),
+      [](const json&) {
+        return Rpc::RunOnGameThread(
+            []() -> json {
+              if (!samp::DumpChat())
+                throw std::runtime_error("could not write the dump");
+              return json{{"path", ModuleDirectory() + "bot.chat-dump.txt"}};
+            },
+            kFastTimeoutMs);
       },
   });
 

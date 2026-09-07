@@ -13,6 +13,9 @@ Commands:
     players [n]         the first n players in the pool, in full
     near [n]            the n nearest streamed players, with distances
     cars [n]            the n nearest vehicles, with distances
+    chat [n]            the last n lines of the in-game chat
+    chatdump            write bot.chat-dump.txt, for correcting a column the
+                        shape search labelled wrongly
     probe [text]        search samp.dll for text; with no text, the nickname
                         from the launcher command line
     scan <text>         search the whole process (stutters the game once)
@@ -123,6 +126,22 @@ def run_command(client, line):
             print("  %6.1f m  id %-5d model %s" % (
                 distance, car["id"], car.get("model", "?")), flush=True)
         print("  (%d vehicles streamed)" % len(rows), flush=True)
+    elif command == "chat":
+        result = client.tool("get_chat", {"limit": int(argument or 25)})
+        if not result.get("valid"):
+            print("  " + str(result.get("note")), flush=True)
+            return
+        for line in result.get("lines", []):
+            age = line.get("age_ms")
+            when = "%5.0fs" % (age / 1000.0) if age is not None else "     ?"
+            who = line.get("from")
+            print("  %s  %s%s" % (when, (who + "  ") if who else "",
+                                  line.get("text", "")), flush=True)
+        print("  (%d lines held, order: %s, from %s)" % (
+            result.get("count", 0), result.get("order"),
+            result.get("source")), flush=True)
+    elif command == "chatdump":
+        show(client.tool("dump_chat"))
     elif command == "players":
         world = client.tool("get_world").get("world", {})
         limit = int(argument or 15)

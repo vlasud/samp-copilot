@@ -11,6 +11,7 @@
 #include "bridge.hpp"
 #include "hooks/frame.hpp"
 #include "samp/version.hpp"
+#include "samp/chat.hpp"
 #include "samp/world.hpp"
 #include "state/memory.hpp"
 
@@ -74,6 +75,11 @@ json HitsToJson(const std::vector<mem::Hit>& hits, bool with_context) {
 }  // namespace
 
 json BuildWorldSnapshot() {
+  // Resolving the chat here, on the worker's clock, rather than from the panel:
+  // the search walks a lot of memory, and a draw call is the one place heavy
+  // work must not run - a fault there is charged to the panel, and the panel is
+  // what gets switched off for it.
+  samp::ResolveChat();
   return samp::ReadWorld();
 }
 

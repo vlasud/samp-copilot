@@ -9,6 +9,7 @@
 
 #include <spdlog/common.h>
 
+#include <cstdio>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -17,6 +18,7 @@
 #include "hooks/frame.hpp"
 #include "log.hpp"
 #include "mcp/rpc.hpp"
+#include "samp/chat.hpp"
 #include "samp/discovery.hpp"
 #include "samp/version.hpp"
 #include "samp/world.hpp"
@@ -35,6 +37,7 @@ namespace {
 // F11: F8 is GTA's screenshot key and F9 was taken too.
 constexpr int kToggleKey = VK_F11;
 constexpr int kLogLines  = 14;
+constexpr int kChatLines = 6;
 // Rebuilding the status json costs allocations; at 96 fps that is pure waste
 // for numbers a human reads. Refresh it four times a second instead.
 constexpr unsigned long long kRefreshMs = 250;
@@ -164,6 +167,19 @@ bool Initialise(IDirect3DDevice9* device) {
   ImGui::GetStyle().WindowRounding = 4.0f;
   ImGui::GetStyle().Alpha          = 0.92f;
 
+  // The built-in font has ASCII glyphs and nothing else, so every Cyrillic
+  // letter in the chat would draw as a box - which makes the panel useless
+  // for checking a read against what is on screen, on the one server we can
+  // actually check against. Tahoma ships with Windows and covers Cyrillic.
+  char fonts[MAX_PATH] = {};
+  if (GetWindowsDirectoryA(fonts, MAX_PATH)) {
+    const std::string path = std::string(fonts) + "\\Fonts\\tahoma.ttf";
+    if (io.Fonts->AddFontFromFileTTF(path.c_str(), 15.0f, nullptr,
+                                     io.Fonts->GetGlyphRangesCyrillic()) ==
+        nullptr)
+      LOG_WARN("no {} - the panel cannot draw Cyrillic", path);
+  }
+
   if (!ImGui_ImplWin32_Init(g_window)) return false;
   if (!ImGui_ImplDX9_Init(device)) {
     ImGui_ImplWin32_Shutdown();
@@ -278,6 +294,31 @@ void DrawPanel() {
     Label("host", layout.host, kGreen);
   } else {
     Label("pool", layout.note.empty() ? "not resolved" : layout.note, kAmber);
+  }
+
+  ImGui::Separator();
+  // The chat, drawn next to the real one on purpose: the only way to know a
+  // column was labelled right is to read it against what is on screen.
+  const samp::ChatLayout& chat = samp::CachedChat();
+  if (chat.valid) {
+    char shape[96];
+    std::snprintf(shape, sizeof(shape), "%d lines, stride %u, %s",
+                  chat.populated, chat.stride,
+                  chat.order_known
+                      ? (chat.newest_first ? "newest first" : "oldest first")
+                      : "order unknown");
+    Label("chat", shape, kGreen);
+    const json lines = samp::ReadChat(kChatLines);
+    for (const json& line : lines.value("lines", json::array())) {
+      const std::string from = line.value("from", std::string{});
+      ImGui::TextWrapped("  %s%s", from.empty() ? "" : (from + "  ").c_str(),
+                         line.value("text", std::string{}).c_str());
+    }
+  } else {
+    Label("chat", chat.note.empty() ? "not resolved" : chat.note, kAmber);
+  }
+  if (g_mode == Mode::kInteractive && ImGui::Button("Dump chat")) {
+    Bridge::PostToGameThread([]() { samp::DumpChat(); });
   }
 
   ImGui::Separator();
