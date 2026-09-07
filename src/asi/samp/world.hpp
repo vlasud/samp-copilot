@@ -72,6 +72,17 @@ void ForgetLayout();
 // The local player and everyone in the pool. Game thread only.
 json ReadWorld();
 
+// The local player's game ped, for code that needs to reason about him
+// rather than report him: where he stands and which way he faces. Heading is
+// the direction of the entity's forward vector, in radians, atan2 style.
+struct LocalPed {
+  bool           valid    = false;
+  std::uintptr_t game_ped = 0;
+  float          x = 0, y = 0, z = 0;
+  float          heading = 0;
+};
+LocalPed ReadLocalPed();
+
 // Writes bot.playerinfo-dump.txt: the first occupied records, each word
 // classified, and the CRemotePlayer each one points at. Game thread only.
 bool DumpPlayerRecords();

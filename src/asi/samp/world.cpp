@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -1177,6 +1178,43 @@ std::uint32_t FindReportedHealth(const Layout& layout, std::size_t* samples) {
   }
 
   return 0;
+}
+
+LocalPed ReadLocalPed() {
+  LocalPed self;
+  const Layout& layout = ResolveLayout();
+  if (!layout.valid || layout.string_width == 0) return self;
+
+  std::uint32_t local_player = 0;
+  if (!asi::mem::Read<std::uint32_t>(
+          layout.player_pool + layout.local_name + layout.string_width,
+          &local_player) ||
+      !IsHeapPointer(local_player))
+    return self;
+  std::uint32_t samp_ped = 0;
+  if (!asi::mem::Read<std::uint32_t>(local_player, &samp_ped)) return self;
+  const std::uint32_t game_ped = GamePedOfSampPed(samp_ped);
+  const Position position = ReadEntityPosition(game_ped);
+  if (!position.valid) return self;
+
+  self.game_ped = game_ped;
+  self.x = position.x;
+  self.y = position.y;
+  self.z = position.z;
+
+  // A ped faces along the second row of its matrix - RenderWare calls it
+  // "up", the game calls it forward. The first row is his right hand.
+  std::uint32_t matrix = 0;
+  float forward_x = 0.0f;
+  float forward_y = 1.0f;
+  if (asi::mem::Read<std::uint32_t>(game_ped + kEntityMatrix, &matrix) &&
+      matrix != 0) {
+    asi::mem::Read<float>(matrix + 0x10, &forward_x);
+    asi::mem::Read<float>(matrix + 0x14, &forward_y);
+  }
+  self.heading = std::atan2(forward_y, forward_x);
+  self.valid   = true;
+  return self;
 }
 
 json ReadWorld() {

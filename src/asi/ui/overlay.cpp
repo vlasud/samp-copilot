@@ -9,16 +9,21 @@
 
 #include <spdlog/common.h>
 
+#include <cmath>
 #include <cstdio>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include "bridge.hpp"
+#include "game/exe.hpp"
+#include "game/paths.hpp"
+#include "game/world_query.hpp"
 #include "hooks/cursor.hpp"
 #include "hooks/frame.hpp"
 #include "log.hpp"
 #include "mcp/rpc.hpp"
+#include "nav/planner.hpp"
 #include "samp/chat.hpp"
 #include "samp/discovery.hpp"
 #include "samp/version.hpp"
@@ -232,6 +237,138 @@ void PollToggle() {
   g_toggle_down = down;
 }
 
+// ---- movement debugging ----------------------------------------------------
+
+constexpr int   kFanSpokes   = 16;
+constexpr float kFanMetres   = 8.0f;
+constexpr float kNodeRadius  = 80.0f;
+constexpr unsigned long long kFanRefreshMs  = 1000;
+constexpr unsigned long long kNodeRefreshMs = 2000;
+
+bool g_show_fan   = true;
+bool g_show_nodes = false;
+
+const ImU32 kLineOk      = IM_COL32(80, 220, 80, 230);
+const ImU32 kLineBlocked = IM_COL32(240, 70, 70, 230);
+const ImU32 kLineUnsure  = IM_COL32(240, 200, 60, 230);
+const ImU32 kDotNode     = IM_COL32(200, 200, 200, 140);
+const ImU32 kDotTarget   = IM_COL32(255, 255, 255, 255);
+const ImU32 kTextShadow  = IM_COL32(0, 0, 0, 200);
+
+// The fan: sixteen short walks from where the character stands, each ending
+// where the world stopped it. Posted, because a few hundred calls into the
+// game do not belong in a draw call.
+void RefreshFan() {
+  Bridge::PostToGameThread([]() {
+    const samp::LocalPed self = samp::ReadLocalPed();
+    if (!self.valid || !game::CallsTrusted()) return;
+    std::vector<game::Vec3> ends;
+    std::vector<bool>       ok;
+    const game::Vec3 here{self.x, self.y, self.z};
+    for (int i = 0; i < kFanSpokes; ++i) {
+      const float angle = static_cast<float>(i) * 6.2831853f / kFanSpokes;
+      const game::Vec3 to{self.x + std::cos(angle) * kFanMetres,
+                          self.y + std::sin(angle) * kFanMetres, self.z};
+      const nav::Verdict verdict = nav::Walkable(here, to);
+      ends.push_back(verdict.where);
+      ok.push_back(verdict.ok);
+    }
+    nav::SetDebugFan(std::move(ends), std::move(ok));
+  });
+}
+
+void RefreshNodes() {
+  Bridge::PostToGameThread([]() {
+    const samp::LocalPed self = samp::ReadLocalPed();
+    if (!self.valid) return;
+    nav::SetDebugNodes(game::PedNodesNear(game::Vec3{self.x, self.y, self.z},
+                                          kNodeRadius, 300));
+  });
+}
+
+void PlanAhead(float metres) {
+  Bridge::PostToGameThread([metres]() {
+    const samp::LocalPed self = samp::ReadLocalPed();
+    if (!self.valid || !game::CallsTrusted()) return;
+    const game::Vec3 here{self.x, self.y, self.z};
+    const game::Vec3 target{self.x + std::cos(self.heading) * metres,
+                            self.y + std::sin(self.heading) * metres, self.z};
+    nav::SetDebugPlan(target, nav::PlanPath(here, target));
+  });
+}
+
+void Shadowed(ImDrawList* draw, ImVec2 at, ImU32 colour, const char* text) {
+  draw->AddText(ImVec2(at.x + 1, at.y + 1), kTextShadow, text);
+  draw->AddText(at, colour, text);
+}
+
+// Everything the planner knows, drawn where it is: the route on the ground
+// it runs over, the fan around the character's feet, the nodes on the
+// pavements. This is the debug tool - a number in a panel says a leg is
+// blocked; a red line on the screen says by what.
+void DrawWorld() {
+  if (!game::CallsTrusted()) return;
+  const samp::LocalPed self = samp::ReadLocalPed();
+  if (!self.valid) return;
+
+  ImDrawList* draw = ImGui::GetBackgroundDrawList();
+  const nav::DebugState debug = nav::GetDebug();
+
+  float px = 0, py = 0;
+  const bool self_on_screen =
+      game::ToScreen(game::Vec3{self.x, self.y, self.z - 0.9f}, &px, &py);
+
+  if (g_show_nodes) {
+    for (const game::PathNode& node : debug.nodes) {
+      float sx = 0, sy = 0;
+      if (!game::ToScreen(node.pos, &sx, &sy)) continue;
+      draw->AddCircleFilled(ImVec2(sx, sy), 3.0f, kDotNode);
+    }
+  }
+
+  if (g_show_fan && self_on_screen) {
+    for (std::size_t i = 0; i < debug.fan_ends.size() && i < debug.fan_ok.size();
+         ++i) {
+      float sx = 0, sy = 0;
+      const game::Vec3 foot{debug.fan_ends[i].x, debug.fan_ends[i].y,
+                            debug.fan_ends[i].z - 0.9f};
+      if (!game::ToScreen(foot, &sx, &sy)) continue;
+      const ImU32 colour = debug.fan_ok[i] ? kLineOk : kLineBlocked;
+      draw->AddLine(ImVec2(px, py), ImVec2(sx, sy), colour, 1.5f);
+      draw->AddCircleFilled(ImVec2(sx, sy), 3.0f, colour);
+    }
+  }
+
+  if (debug.has_target) {
+    const nav::Plan& plan = debug.plan;
+    for (const nav::Leg& leg : plan.legs) {
+      float ax = 0, ay = 0, bx = 0, by = 0;
+      const game::Vec3 a{leg.from.x, leg.from.y, leg.from.z - 0.9f};
+      const game::Vec3 b{leg.to.x, leg.to.y, leg.to.z - 0.9f};
+      if (!game::ToScreen(a, &ax, &ay) || !game::ToScreen(b, &bx, &by)) continue;
+      const ImU32 colour = !leg.verified ? kLineUnsure
+                           : leg.ok      ? kLineOk
+                                         : kLineBlocked;
+      draw->AddLine(ImVec2(ax, ay), ImVec2(bx, by), colour, 3.0f);
+      draw->AddCircle(ImVec2(bx, by), 5.0f, colour, 12, 2.0f);
+      if (!leg.ok && !leg.why.empty())
+        Shadowed(draw, ImVec2(bx + 8, by - 8), kLineBlocked, leg.why.c_str());
+    }
+    float tx = 0, ty = 0;
+    const game::Vec3 target{debug.target.x, debug.target.y, debug.target.z - 0.9f};
+    if (game::ToScreen(target, &tx, &ty)) {
+      draw->AddCircle(ImVec2(tx, ty), 9.0f, kDotTarget, 16, 2.0f);
+      char label[96];
+      const float dx = debug.target.x - self.x;
+      const float dy = debug.target.y - self.y;
+      std::snprintf(label, sizeof(label), "%.1f m  %s",
+                    std::sqrt(dx * dx + dy * dy),
+                    plan.ok ? "ok" : plan.note.c_str());
+      Shadowed(draw, ImVec2(tx + 12, ty - 6), kDotTarget, label);
+    }
+  }
+}
+
 void DrawPanel() {
   static json               cached;
   static json               cached_world;
@@ -338,6 +475,67 @@ void DrawPanel() {
   const StatusSource::Mcp mcp = StatusSource::mcp();
   Label("mcp", mcp.listening ? mcp.endpoint : "not listening",
         mcp.listening ? kGreen : kRed);
+
+  ImGui::Separator();
+  // Movement: whether the calls into the game are trusted, what the graph
+  // looks like from here, and what the last plan made of the world.
+  {
+    const game::Exe& exe = game::Detect();
+    if (!exe.known) {
+      Label("game", "not the 1.0 US build - no calls into it", kRed);
+    } else if (!game::CallsTrusted()) {
+      Label("game", "calls not verified yet (on foot, on the ground?)", kAmber);
+    } else {
+      Label("game", "calls verified", kGreen);
+    }
+
+    const game::PathLayout& graph = game::CachedPaths();
+    if (graph.valid) {
+      char text[96];
+      std::snprintf(text, sizeof(text), "%d areas, %d ped nodes, nearest %.1f m",
+                    graph.loaded_areas, graph.ped_nodes_loaded,
+                    graph.nearest_ped_node_m);
+      Label("graph", text, graph.nearest_ped_node_m >= 0 &&
+                                   graph.nearest_ped_node_m < 40.0f
+                               ? kGreen
+                               : kAmber);
+    } else {
+      Label("graph", graph.note.empty() ? "not resolved" : graph.note, kAmber);
+    }
+
+    const nav::DebugState debug = nav::GetDebug();
+    if (debug.has_target) {
+      char text[160];
+      std::snprintf(text, sizeof(text), "%s - %s, %.1f m, %d calls",
+                    debug.plan.ok ? "ok" : "NO", debug.plan.note.c_str(),
+                    debug.plan.length_m, debug.plan.game_calls);
+      Label("plan", text, debug.plan.ok ? kGreen : kAmber);
+    } else {
+      Label("plan", "none - ask for one below or via plan_path", kGrey);
+    }
+
+    if (g_mode == Mode::kInteractive) {
+      if (ImGui::Button("Plan 15 m ahead")) PlanAhead(15.0f);
+      ImGui::SameLine();
+      if (ImGui::Button("Plan 60 m ahead")) PlanAhead(60.0f);
+      ImGui::SameLine();
+      if (ImGui::Button("Clear")) nav::ClearDebug();
+      ImGui::Checkbox("fan", &g_show_fan);
+      ImGui::SameLine();
+      ImGui::Checkbox("nodes", &g_show_nodes);
+    }
+
+    // The fan and the nodes follow the character, on their own clocks.
+    static unsigned long long fan_at = 0, nodes_at = 0;
+    if (g_show_fan && now - fan_at >= kFanRefreshMs) {
+      fan_at = now;
+      RefreshFan();
+    }
+    if (g_show_nodes && now - nodes_at >= kNodeRefreshMs) {
+      nodes_at = now;
+      RefreshNodes();
+    }
+  }
 
   ImGui::Separator();
   // The chat, drawn next to the real one on purpose: the only way to know a
@@ -461,6 +659,7 @@ void Overlay::Render(IDirect3DDevice9* device) {
                                       static_cast<float>(pointer.y));
   }
   ImGui::NewFrame();
+  DrawWorld();
   DrawPanel();
   ImGui::EndFrame();
   ImGui::Render();

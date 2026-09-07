@@ -4,6 +4,10 @@ add_library(bot MODULE
   log.cpp
   crash_log.cpp
   bridge.cpp
+  game/exe.cpp
+  game/world_query.cpp
+  game/paths.cpp
+  nav/planner.cpp
   hooks/cursor.cpp
   hooks/frame.cpp
   samp/version.cpp

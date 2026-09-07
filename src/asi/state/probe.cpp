@@ -11,6 +11,8 @@
 #include "bridge.hpp"
 #include "hooks/frame.hpp"
 #include "samp/version.hpp"
+#include "game/paths.hpp"
+#include "game/world_query.hpp"
 #include "samp/chat.hpp"
 #include "samp/world.hpp"
 #include "state/memory.hpp"
@@ -80,7 +82,26 @@ json BuildWorldSnapshot() {
   // work must not run - a fault there is charged to the panel, and the panel is
   // what gets switched off for it.
   samp::ResolveChat();
-  return samp::ReadWorld();
+  json world = samp::ReadWorld();
+
+  // The same clock verifies the calls into the game and reads its path graph.
+  // Both need the player's position: the first to check the ground under him
+  // is where he stands, the second to check the nearest pavement is nearby.
+  const samp::LocalPed self = samp::ReadLocalPed();
+  if (self.valid) {
+    const game::Vec3 at{self.x, self.y, self.z};
+    const char* why = "";
+    if (!game::CallsTrusted()) game::SelfCheck(at, &why);
+    if (game::CallsTrusted()) {
+      game::ResolvePaths(at);
+      float ground = 0;
+      if (game::GroundBelow(game::Vec3{at.x, at.y, at.z + 1.0f}, &ground) &&
+          world.contains("self"))
+        world["self"]["ground_z"] = ground;
+    }
+    if (world.contains("self")) world["self"]["heading"] = self.heading;
+  }
+  return world;
 }
 
 json BuildStatusSnapshot() {

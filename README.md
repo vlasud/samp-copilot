@@ -185,7 +185,13 @@ src/asi/  dllmain.cpp     entry point and worker thread
           log.*           file log plus the ring the overlay draws
           bridge.*        post work to the game thread; world snapshot slot
           hooks/frame.*   per-frame callback via the d3d9 vtable
-          samp/           SA-MP client version detection
+          samp/           SA-MP client version detection, the player pool,
+                          the chat log
+          game/exe.*      fingerprints gta_sa.exe; only 1.0 US may be called
+          game/world_query.* calls into the game: ground under a point, line
+                          of sight, world-to-screen
+          game/paths.*    the game's own ped/vehicle node graph, found by shape
+          nav/planner.*   standable / walkable / plan a route
           state/memory.*  validated read-only access to the process
           state/probe.*   snapshot builder and the memory probe
           mcp/server.*    JSON-RPC 2.0 and the tool registry
@@ -206,6 +212,7 @@ tools/    console.py, selftest.py, mcp_http.py, fingerprint_samp.py
 | vehicles: id, model, position | GTA's own `CPool` at `gta_sa.exe+0x774494` | a row of scooters at 1.6, 3.3, 9.1 m, all model 462 - the id another mod's overlay showed for them |
 | other players' health and armour | `CRemotePlayer+0x1BC`, what the server reported | one armed player on 63 hp and 100 armour among civilians on 100 |
 | what other players are holding | their game ped, same fields as ours | a desert eagle on the one player carrying one |
+| the chat log | a ring of entries behind `samp.dll+0x21A0E4`, recognised by its shape | every line matches the screen; the connect line names the server address we already verified |
 
 Not read, and not guessed at either:
 
@@ -213,6 +220,60 @@ Not read, and not guessed at either:
   of the values the scoreboard shows appears anywhere in either. They arrive
   from the server in an RPC and belong with that work.
 - **Money.** The HUD shows more than fits in the ped field that holds it.
+
+## What it asks the game
+
+Movement needs answers reading memory cannot give: whether there is ground
+under a point, whether a line between two points passes through a wall. For
+those the module calls the functions the game's own pedestrians use, in
+`gta_sa.exe`:
+
+| Question | Call | Verified by |
+|---|---|---|
+| ground under a point | `CWorld::FindGroundZFor3DCoord` | the ground under the player is a ped's height below him, or nothing is called |
+| anything solid between two points | `CWorld::GetIsLineOfSightClear` | the red spokes on screen stop at the walls they stop at |
+| where a world point lands on screen | `CSprite::CalcScreenCoors` | the drawn route lies on the pavement it runs over |
+
+A call to the wrong address is not a wrong answer, it is the session gone,
+so two gates stand in front of every one of them. The executable has to be
+the build the addresses belong to - identified by its link timestamp, the
+same value Windows prints in a crash report - and the ground function has to
+pass its self-check against the player's own position before any other call
+is allowed. Each call is also guarded, so a fault becomes "no answer".
+
+These only know about what is streamed in. "No ground" a few hundred metres
+away is the game saying how far it can see, and the planner says so rather
+than calling it a hole.
+
+### The path graph
+
+GTA keeps its roads and pavements as a graph of nodes in an 8x8 grid of
+areas, loaded a few at a time around the player. The ped nodes are what an
+NPC follows when it walks somewhere, and a route along them is what "natural"
+means here.
+
+The arrays are found the way the player pool was. Every node records which
+area it belongs to, so the per-area pointer array is the one whose i-th entry
+leads to nodes that say "i". The counts are the three 64-entry arrays where
+one is the sum of the other two, and the total for every loaded area names an
+array whose last node carries that index. The link table is the one whose
+entries lead to nodes a walk away. The self-check is that the nearest ped
+node to a player on a street is metres off, not hundreds.
+
+### Planning
+
+`plan_path` goes straight when the straight line is walkable - sampled a
+metre at a time: ground the whole way, no step or drop bigger than a person
+takes, nothing solid at knee or chest height. Otherwise it joins the start and
+the target to the graph by walkable legs, runs A* over the ped nodes, and pulls
+the route tight so he does not visit every node. Every leg is then checked
+against the world again: the graph says the pavement is there, the world says
+whether something is parked on it today. Legs the call budget could not reach
+are marked unverified, never assumed.
+
+The panel draws all of it in the world - the route, a fan of short walks
+around the character's feet, the nodes on the pavements - because a number
+says a leg is blocked and a red line on the ground says by what.
 
 ## How offsets get established
 
@@ -258,7 +319,12 @@ Three findings cost a day between them and are worth not rediscovering:
 
 
 Working: the frame hook, the game-thread bridge, the MCP server, the overlay,
-and the world reading described above.
+the world reading and the chat log described above, and the standable /
+walkable / route planning that reads the game's path graph and asks its
+collision.
+
+Not yet: making the character walk the route. That is input synthesis, and it
+sits on top of everything above.
 
 Not started: the RPC layer - chat, dialogs, and the values that only arrive in
 packets - and every action. Actions answer with an explicit "not implemented

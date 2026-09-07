@@ -13,6 +13,10 @@ Commands:
     players [n]         the first n players in the pool, in full
     near [n]            the n nearest streamed players, with distances
     cars [n]            the n nearest vehicles, with distances
+    reach x y [z]       can the character stand there, and walk there straight
+    path x y [z]        plan a route there; also drawn in the game
+    path ahead [m]      plan a route m metres ahead of where he is facing
+    nodes [radius]      the game's ped nodes around him
     chat [n]            the last n lines of the in-game chat
     chatdump            write bot.chat-dump.txt, for correcting a column the
                         shape search labelled wrongly
@@ -25,6 +29,7 @@ Commands:
     quit
 """
 import json
+import math
 import sys
 import time
 
@@ -126,6 +131,63 @@ def run_command(client, line):
             print("  %6.1f m  id %-5d model %s" % (
                 distance, car["id"], car.get("model", "?")), flush=True)
         print("  (%d vehicles streamed)" % len(rows), flush=True)
+    elif command == "reach":
+        parts = argument.split()
+        if len(parts) < 2:
+            print("  reach needs x y", flush=True)
+            return
+        args = {"x": float(parts[0]), "y": float(parts[1])}
+        if len(parts) > 2:
+            args["z"] = float(parts[2])
+        show(client.tool("check_point", args))
+    elif command == "path":
+        parts = argument.split()
+        if parts and parts[0] == "ahead":
+            metres = float(parts[1]) if len(parts) > 1 else 15.0
+            world = client.tool("get_world").get("world", {})
+            me = world.get("self") or {}
+            pos, heading = me.get("pos"), me.get("heading")
+            if not pos or heading is None:
+                print("  no position or heading for the local player", flush=True)
+                return
+            args = {"x": pos[0] + math.cos(heading) * metres,
+                    "y": pos[1] + math.sin(heading) * metres, "z": pos[2]}
+        elif len(parts) >= 2:
+            args = {"x": float(parts[0]), "y": float(parts[1])}
+            if len(parts) > 2:
+                args["z"] = float(parts[2])
+        else:
+            print("  path needs x y, or ahead [metres]", flush=True)
+            return
+        plan = client.tool("plan_path", args)
+        print("  %s: %s (%.1f m, %d game calls)" % (
+            "ok" if plan.get("ok") else "NO", plan.get("note"),
+            plan.get("length_m", 0), plan.get("game_calls", 0)), flush=True)
+        for i, leg in enumerate(plan.get("legs", [])):
+            to = leg["to"]
+            mark = "ok" if leg["ok"] else "BLOCKED"
+            if not leg.get("verified"):
+                mark = "unverified"
+            print("  leg %d -> (%.1f, %.1f, %.1f)  %s%s" % (
+                i + 1, to[0], to[1], to[2], mark,
+                ("  " + leg["why"]) if leg.get("why") else ""), flush=True)
+    elif command == "nodes":
+        result = client.tool("get_nav_nodes",
+                             {"radius": float(argument or 60)})
+        if not result.get("graph"):
+            print("  " + str(result.get("note")), flush=True)
+            return
+        world = client.tool("get_world").get("world", {})
+        me = (world.get("self") or {}).get("pos") or [0, 0, 0]
+        for node in result.get("nodes", []):
+            p = node["pos"]
+            d = ((p[0] - me[0]) ** 2 + (p[1] - me[1]) ** 2) ** 0.5
+            print("  %6.1f m  area %-2d node %-5d (%.1f, %.1f, %.1f)  %d links" % (
+                d, node["area"], node["index"], p[0], p[1], p[2],
+                len(node["links"])), flush=True)
+        print("  (%d nodes, %d areas loaded, %d ped nodes in them)" % (
+            result.get("count", 0), result.get("areas_loaded", 0),
+            result.get("ped_nodes_loaded", 0)), flush=True)
     elif command == "chat":
         result = client.tool("get_chat", {"limit": int(argument or 25)})
         if not result.get("valid"):
