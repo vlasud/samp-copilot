@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "actions/travel.hpp"
 #include "actions/walker.hpp"
 #include "bridge.hpp"
 #include "game/exe.hpp"
@@ -611,6 +612,20 @@ void DrawPanel() {
     }
 
     {
+      const act::TravelStatus trip = act::TravelGet();
+      if (trip.travelling) {
+        char text[192];
+        std::snprintf(text, sizeof(text),
+                      "%.0f m to go, %d legs planned, %s", trip.straight_m,
+                      trip.replans,
+                      trip.reaching ? "heading for the far side" : "on the "
+                                                                   "last leg");
+        Label("journey", text, kGreen);
+      } else if (!trip.note.empty() && trip.note != "idle") {
+        Label("journey", trip.note,
+              trip.note == "arrived" ? kGreen : kAmber);
+      }
+
       const act::Status walk = act::Get();
       if (walk.walking) {
         char text[160];
@@ -629,6 +644,58 @@ void DrawPanel() {
     }
 
     if (g_mode == Mode::kInteractive) {
+      // A destination to type, because crossing a city is the thing worth
+      // testing and "fifteen metres ahead" cannot test it.
+      static float target[2] = {0, 0};
+      static bool  target_set = false;
+      const samp::LocalPed self = samp::ReadLocalPed();
+      if (!target_set && self.valid) {
+        target[0] = self.x;
+        target[1] = self.y;
+        target_set = true;
+      }
+      ImGui::SetNextItemWidth(180.0f);
+      ImGui::InputFloat2("##target", target, "%.0f");
+      ImGui::SameLine();
+      if (ImGui::Button("Travel there"))
+        act::TravelTo(game::Vec3{target[0], target[1],
+                                 self.valid ? self.z : 0.0f});
+      ImGui::SameLine();
+      if (ImGui::Button("Here")) {
+        if (self.valid) {
+          target[0] = self.x;
+          target[1] = self.y;
+        }
+      }
+      if (ImGui::Button("Travel 250 m away")) {
+        // The furthest loaded ped node, which is a real errand across
+        // streets rather than a straight line down one.
+        if (self.valid) {
+          const game::Vec3 here{self.x, self.y, self.z};
+          const std::vector<game::PathNode> nodes =
+              game::PedNodesNear(here, 250.0f, 600);
+          const game::PathNode* furthest = nullptr;
+          float best = 0;
+          for (const game::PathNode& node : nodes) {
+            const float dx = node.pos.x - here.x, dy = node.pos.y - here.y;
+            const float d = std::sqrt(dx * dx + dy * dy);
+            if (d <= best) continue;
+            best = d;
+            furthest = &node;
+          }
+          if (furthest != nullptr) {
+            target[0] = furthest->pos.x;
+            target[1] = furthest->pos.y;
+            act::TravelTo(game::Vec3{furthest->pos.x, furthest->pos.y,
+                                     furthest->pos.z + 1.0f});
+          } else {
+            SetReportSummary("no ped nodes loaded to aim at");
+          }
+        }
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Cancel journey")) act::CancelTravel("cancelled");
+
       if (ImGui::Button("Walk the plan")) {
         // Saying why, rather than doing nothing: a button that silently
         // ignores a press is indistinguishable from one that is broken.
@@ -924,6 +991,7 @@ void Overlay::WatchForLostInput() {
 }
 
 void Overlay::Disarm() {
+  act::CancelTravel("stopped by hotkey");
   act::Stop("stopped by hotkey");
   game::SetEnabled(false);
   g_show_fan   = false;

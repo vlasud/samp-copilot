@@ -16,6 +16,7 @@
 
 #include <string>
 
+#include "actions/travel.hpp"
 #include "actions/walker.hpp"
 #include "bridge.hpp"
 #include "crash_log.hpp"
@@ -54,6 +55,10 @@ std::atomic<bool> g_running{false};
 // here.
 void OnFrame() {
   Bridge::RunPending(kTasksPerFrame);
+
+  // The journey decides what to do next only when the walker has stopped, so
+  // this costs a comparison on almost every frame.
+  act::TravelTick();
 
   static unsigned long long last_world_frame = 0;
   const unsigned long long frame = FrameHook::frames();

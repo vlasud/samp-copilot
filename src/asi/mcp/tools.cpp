@@ -8,6 +8,7 @@
 #include "log.hpp"
 #include "mcp/rpc.hpp"
 #include "mcp/server.hpp"
+#include "actions/travel.hpp"
 #include "actions/walker.hpp"
 #include "game/paths.hpp"
 #include "game/world_query.hpp"
@@ -111,6 +112,30 @@ json WalkStatus() {
            {"remaining_m", walk.remaining_m}};
   if (walk.corrected) out["steering_corrected_deg"] = walk.error_deg;
   return out;
+}
+
+json TravelStatusJson() {
+  const act::TravelStatus trip = act::TravelGet();
+  json out{{"travelling", trip.travelling},
+           {"note", trip.note},
+           {"straight_m", trip.straight_m},
+           {"legs_planned", trip.replans},
+           {"heading_for_staging_point", trip.reaching},
+           {"destination", Point(trip.destination)}};
+  out["walk"] = WalkStatus();
+  return out;
+}
+
+json TravelTo(const json& args) {
+  const samp::LocalPed self = samp::ReadLocalPed();
+  if (!self.valid) throw std::runtime_error("the local player is not readable");
+  if (!game::CallsTrusted())
+    throw std::runtime_error("game calls are not verified on this build");
+  game::Vec3 target;
+  if (!PointFrom(args, self, &target))
+    throw std::runtime_error("x and y are required");
+  act::TravelTo(target);
+  return TravelStatusJson();
 }
 
 json MoveTo(const json& args) {
@@ -312,6 +337,35 @@ void RegisterTools(Server* server) {
   });
 
   server->AddTool({
+      "travel_to",
+      "Go to a point, however far. Unlike move_to, this keeps the destination "
+      "rather than a route: it plans as far toward it as the loaded world "
+      "allows, walks that, and plans again from wherever it ends up - because "
+      "more of the city streams in as you go, and because a car that blocked a "
+      "leg a minute ago may have driven off. Returns at once; poll "
+      "travel_status.",
+      {{"type", "object"},
+       {"properties",
+        {{"x", {{"type", "number"}}},
+         {"y", {{"type", "number"}}},
+         {"z", {{"type", "number"}}}}},
+       {"required", json::array({"x", "y"})}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread([args] { return TravelTo(args); },
+                                    kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "travel_status",
+      "How the journey is going: how far is left in a straight line, how many "
+      "legs have been planned, and whether it is heading for the destination "
+      "or for a staging point on the way to it.",
+      NoArguments(),
+      [](const json&) { return TravelStatusJson(); },
+  });
+
+  server->AddTool({
       "walk_status",
       "How the current walk is going, or why the last one ended: arrived, "
       "stuck, out of time, or stopped.",
@@ -325,8 +379,9 @@ void RegisterTools(Server* server) {
       "player's own input passes through untouched again.",
       NoArguments(),
       [](const json&) {
+        act::CancelTravel("stopped on request");
         act::Stop("stopped on request");
-        return WalkStatus();
+        return TravelStatusJson();
       },
   });
 
