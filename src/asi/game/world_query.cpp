@@ -118,9 +118,10 @@ bool CallGround(FindGroundFn fn, float x, float y, float z, float* out) {
   }
 }
 
-bool CallLineClear(LineClearFn fn, const Vec3* a, const Vec3* b, bool* clear) {
+bool CallLineClear(LineClearFn fn, const Vec3* a, const Vec3* b, bool* clear,
+                   bool vehicles) {
   __try {
-    *clear = fn(a, b, /*buildings=*/true, /*vehicles=*/true, /*peds=*/false,
+    *clear = fn(a, b, /*buildings=*/true, vehicles, /*peds=*/false,
                 /*objects=*/true, /*dummies=*/true, /*see_through=*/false,
                 /*camera_ignore=*/false);
     return true;
@@ -207,9 +208,10 @@ bool GroundBelow(const Vec3& at, float* ground_z) {
 }
 
 namespace {
-bool RawLineClear(const Vec3& a, const Vec3& b, bool* clear) {
+bool RawLineClear(const Vec3& a, const Vec3& b, bool* clear,
+                  bool include_vehicles = true) {
   const auto fn = reinterpret_cast<LineClearFn>(At(kGetIsLineOfSightClear));
-  return fn != nullptr && CallLineClear(fn, &a, &b, clear);
+  return fn != nullptr && CallLineClear(fn, &a, &b, clear, include_vehicles);
 }
 }  // namespace
 
@@ -281,13 +283,13 @@ bool SelfCheckLineOfSight(const Vec3& player, const char** why) {
   return true;
 }
 
-bool LineClear(const Vec3& a, const Vec3& b) {
+bool LineClear(const Vec3& a, const Vec3& b, bool include_vehicles) {
   if (!CallsTrusted()) return false;
   if (!g_los_trusted.load(std::memory_order_acquire)) return false;
   if (!TakeCallSlot()) return false;
   g_los_calls.fetch_add(1, std::memory_order_relaxed);
   bool clear = false;
-  return RawLineClear(a, b, &clear) && clear;
+  return RawLineClear(a, b, &clear, include_vehicles) && clear;
 }
 
 bool ControlsDisabled(bool* disabled) {

@@ -45,6 +45,22 @@ constexpr unsigned long long kWalkLimitMs = 120000;
 // where he actually went is compared with where he was sent.
 constexpr float kCalibrateAfter = 1.5f;
 
+// Meeting something in the way. A person does not stop dead at a bin and
+// abandon the errand; he steps round it and carries on, and tries the other
+// side if that does not work. Only after several of those is it really a wall.
+constexpr int   kMaxSidesteps    = 4;
+constexpr float kSidestepMetres  = 2.8f;
+constexpr unsigned long long kSidestepMs = 1400;
+
+// The stick is eased rather than snapped. Full deflection appearing in one
+// frame is what makes a character look driven rather than walked, and the
+// game's own turning is smoothed anyway - fighting it just wastes distance.
+constexpr float kStickEase = 0.28f;
+// Slowing for the last stride reads as arriving somewhere rather than
+// colliding with it, and stops him sailing past a tight waypoint.
+constexpr float kEaseInFrom = 3.0f;
+constexpr float kSlowest    = 0.55f;
+
 using UpdatePadsFn = void(__cdecl*)();
 UpdatePadsFn g_original_update = nullptr;
 void*        g_hook_target = nullptr;
@@ -71,6 +87,13 @@ bool  g_corrected = false;
 float g_error_deg = 0;
 Vec3  g_calibrate_from;
 float g_calibrate_heading = 0;
+
+// Stepping round something, and the eased stick.
+int   g_sidesteps = 0;
+bool  g_sidestep_left = true;
+unsigned long long g_sidestep_until = 0;
+Vec3  g_sidestep_target;
+float g_stick_x = 0, g_stick_y = 0;
 
 float Normalise(float radians) {
   while (radians > 3.14159265f)  radians -= 6.28318531f;
@@ -99,6 +122,9 @@ void StopLocked(const char* why) {
   g_route.clear();
   g_leg = 0;
   g_note = why;
+  g_sidestep_until = 0;
+  g_stick_x = 0;
+  g_stick_y = 0;
   ClearStick();
 }
 
@@ -147,11 +173,26 @@ bool DecideStick(short* out_x, short* out_y) {
   if (g_best_distance == 0 || distance < g_best_distance - kProgress) {
     g_best_distance = distance;
     g_progress_ms = now;
-  } else if (now - g_progress_ms > kStuckMs) {
-    StopLocked("stuck - no progress toward the next point");
-    LOG_WARN("walk: stuck {:.1f} m short of leg {} of {}", distance,
-             static_cast<int>(g_leg) + 1, static_cast<int>(g_route.size()));
-    return false;
+  } else if (now - g_progress_ms > kStuckMs && now > g_sidestep_until) {
+    if (g_sidesteps >= kMaxSidesteps) {
+      StopLocked("stuck - stepped around four times and still no way through");
+      LOG_WARN("walk: {} ({:.1f} m short of leg {} of {})", g_note, distance,
+               static_cast<int>(g_leg) + 1, static_cast<int>(g_route.size()));
+      return false;
+    }
+    // Out to one side of the way ahead, then carry on. Sides alternate, so a
+    // corner that defeats one direction gets the other tried next.
+    ++g_sidesteps;
+    g_sidestep_left = !g_sidestep_left;
+    const float ahead = std::atan2(target.y - here.y, target.x - here.x);
+    const float side  = ahead + (g_sidestep_left ? 1.5708f : -1.5708f);
+    g_sidestep_target = Vec3{here.x + std::cos(side) * kSidestepMetres,
+                             here.y + std::sin(side) * kSidestepMetres, here.z};
+    g_sidestep_until = now + kSidestepMs;
+    g_progress_ms = now;
+    g_best_distance = 0;
+    LOG_INFO("walk: something in the way, stepping {} round it (attempt {})",
+             g_sidestep_left ? "left" : "right", g_sidesteps);
   }
 
   float camera = 0;
@@ -161,7 +202,10 @@ bool DecideStick(short* out_x, short* out_y) {
     return false;
   }
 
-  const float wanted = std::atan2(target.y - here.y, target.x - here.x);
+  // While stepping round something, that is where he is going.
+  const bool stepping = now < g_sidestep_until;
+  const Vec3& aim = stepping ? g_sidestep_target : target;
+  const float wanted = std::atan2(aim.y - here.y, aim.x - here.x);
 
   // The reference for the check below is taken once, on the first frame of a
   // walk. Retaking it every frame - which is what this did - keeps the
@@ -195,8 +239,19 @@ bool DecideStick(short* out_x, short* out_y) {
   const float relative = Normalise(wanted - camera);
   const float sideways = std::sin(relative) * (g_flip_sideways ? 1.0f : -1.0f);
   const float forward  = std::cos(relative);
-  *out_x = static_cast<short>(sideways * kFullStick);
-  *out_y = static_cast<short>(-forward * kFullStick);
+
+  // Ease off over the last few metres of the last leg.
+  float pace = 1.0f;
+  const bool final_leg = g_leg + 1 == g_route.size();
+  if (final_leg && !stepping && distance < kEaseInFrom)
+    pace = kSlowest + (1.0f - kSlowest) * (distance / kEaseInFrom);
+
+  const float want_x = sideways * kFullStick * pace;
+  const float want_y = -forward * kFullStick * pace;
+  g_stick_x += (want_x - g_stick_x) * kStickEase;
+  g_stick_y += (want_y - g_stick_y) * kStickEase;
+  *out_x = static_cast<short>(g_stick_x);
+  *out_y = static_cast<short>(g_stick_y);
   return true;
 }
 
@@ -278,6 +333,10 @@ void WalkTo(std::vector<Vec3> route) {
   g_calibrated = false;
   g_calibrate_started = false;
   g_corrected = false;
+  g_sidesteps = 0;
+  g_sidestep_until = 0;
+  g_stick_x = 0;
+  g_stick_y = 0;
   g_error_deg = 0;
   const samp::LocalPed self = samp::ReadLocalPed();
   g_calibrate_from = self.valid ? Vec3{self.x, self.y, self.z} : g_route.front();
@@ -302,6 +361,7 @@ Status Get() {
   status.note        = g_note;
   status.corrected   = g_corrected;
   status.error_deg   = g_error_deg;
+  status.sidesteps   = g_sidesteps;
   return status;
 }
 

@@ -629,8 +629,14 @@ void DrawPanel() {
       const act::Status walk = act::Get();
       if (walk.walking) {
         char text[160];
-        std::snprintf(text, sizeof(text), "leg %d of %d, %.1f m to it, %.1f m left",
-                      walk.leg + 1, walk.legs, walk.to_next_m, walk.remaining_m);
+        char round[48] = "";
+        if (walk.sidesteps > 0)
+          std::snprintf(round, sizeof(round), ", stepped round %d",
+                        walk.sidesteps);
+        std::snprintf(text, sizeof(text),
+                      "leg %d of %d, %.1f m to it, %.1f m left%s",
+                      walk.leg + 1, walk.legs, walk.to_next_m, walk.remaining_m,
+                      round);
         Label("walking", text, kGreen);
       } else {
         Label("walking", walk.note.empty() ? "idle" : walk.note, kGrey);

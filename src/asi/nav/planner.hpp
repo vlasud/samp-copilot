@@ -62,6 +62,9 @@ struct Plan {
   std::vector<Leg>  legs;
   float            length_m    = 0;
   int              graph_nodes = 0;   // ped nodes the route passed through
+  // Legs the strict test called blocked. Not a failure: see the note in
+  // PlanPath about why these are reported rather than fatal.
+  int              blocked_legs = 0;
   int              game_calls  = 0;
   std::string      note;
 };

@@ -85,7 +85,7 @@ bool GroundBelow(const Vec3& at, float* ground_z);
 // Whether nothing solid lies between a and b: buildings, objects, vehicles
 // and the dummies fences are made of. Peds are deliberately left out - they
 // move, and a route is not blocked by someone standing in it right now.
-bool LineClear(const Vec3& a, const Vec3& b);
+bool LineClear(const Vec3& a, const Vec3& b, bool include_vehicles = true);
 
 // Where a world point appears on screen, in pixels. False when it is behind
 // the camera.

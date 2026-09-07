@@ -43,6 +43,8 @@ struct Status {
   // how far off the character's actual heading is from the intended one.
   bool        corrected = false;
   float       error_deg = 0;
+  // How many times he has had to step round something on this walk.
+  int         sidesteps = 0;
 };
 
 // Hooks CPad::UpdatePads. MinHook must already be initialised, and the

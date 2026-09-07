@@ -97,6 +97,7 @@ json PlanTo(const json& args) {
               {"note", plan.note},
               {"length_m", plan.length_m},
               {"graph_nodes", plan.graph_nodes},
+              {"blocked_legs", plan.blocked_legs},
               {"game_calls", plan.game_calls},
               {"waypoints", std::move(waypoints)},
               {"legs", std::move(legs)}};
@@ -109,7 +110,8 @@ json WalkStatus() {
            {"leg", walk.leg},
            {"legs", walk.legs},
            {"to_next_m", walk.to_next_m},
-           {"remaining_m", walk.remaining_m}};
+           {"remaining_m", walk.remaining_m},
+           {"sidesteps", walk.sidesteps}};
   if (walk.corrected) out["steering_corrected_deg"] = walk.error_deg;
   return out;
 }

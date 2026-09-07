@@ -99,7 +99,11 @@ bool Clear(const Vec3& a, const Vec3& b) {
   if (!game::LineOfSightAvailable()) return true;
   if (PastDeadline()) return true;
   ++g_calls;
-  return game::LineClear(a, b);
+  // Without vehicles. A route is planned once and walked afterwards, and by
+  // then the car that was across the pavement has driven off - or a different
+  // one has arrived. Cars are the walker's problem, at the moment it meets
+  // one, not the planner's.
+  return game::LineClear(a, b, /*include_vehicles=*/false);
 }
 
 Verdict StandableInner(const Vec3& p) {
@@ -458,19 +462,29 @@ Plan PlanPath(const Vec3& from, const Vec3& to) {
 
   // Every leg checked against the world. The graph says the pavement is
   // there; the world says whether something is parked on it today.
-  bool all_ok = true;
+  int blocked = 0;
   for (std::size_t k = 0; k + 1 < tight.size(); ++k) {
     const bool via_graph = k != 0 && k + 2 != tight.size();
     Leg leg = MakeLeg(tight[k], tight[k + 1], via_graph);
     plan.length_m += Distance2D(tight[k], tight[k + 1]);
-    if (!leg.ok) all_ok = false;
+    if (!leg.ok) ++blocked;
     plan.legs.push_back(std::move(leg));
   }
-  plan.ok = all_ok;
-  plan.note = all_ok ? "via " + std::to_string(route.size()) +
-                           " ped nodes, pulled to " +
-                           std::to_string(tight.size() - 1) + " legs"
-                     : "a leg of the route is blocked";
+
+  // A blocked leg is reported, not fatal. These legs run between the game's
+  // own ped nodes - the network its pedestrians walk - so they are walkable
+  // by construction, while the test applied to them is stricter than walking
+  // actually is: it counts a kerb, a lamppost and a bin as walls. Throwing
+  // the whole route away for one of them is why nothing behind a wall could
+  // ever be reached, when the route around the wall had been found and was
+  // sitting right there.
+  plan.blocked_legs = blocked;
+  plan.ok = true;
+  plan.note = "via " + std::to_string(route.size()) + " ped nodes, pulled to " +
+              std::to_string(tight.size() - 1) + " legs";
+  if (blocked > 0)
+    plan.note += ", " + std::to_string(blocked) +
+                 " of them tight enough to need stepping around";
   plan.game_calls = g_calls;
   Report(plan, began);
   return plan;
