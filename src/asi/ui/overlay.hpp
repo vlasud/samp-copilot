@@ -10,6 +10,8 @@
 // and wrestling that away is a separate problem from showing numbers - so the
 // panel is read-only and toggled with a single polled key.
 //
+#include <string>
+
 struct IDirect3DDevice9;
 
 namespace gtabot::asi {
@@ -45,6 +47,18 @@ class Overlay {
 
   static bool visible();
   static void SetVisible(bool visible);
+
+  // Everything that decides whether a key reaches the character, in one
+  // line: who owns the foreground, which mode the panel is in, whether the
+  // cursor was taken, what the game says about its own controls, and which
+  // movement keys Windows reports held. Callable from any thread - it reads
+  // window state and atomics, never Direct3D.
+  static std::string InputState();
+
+  // Stand down: passive mode, cursor handed back, movement disarmed, the
+  // debug overlays off. Bound to a hotkey polled off the game thread so it
+  // works even when the panel cannot be clicked.
+  static void Disarm();
 };
 
 }  // namespace gtabot::asi

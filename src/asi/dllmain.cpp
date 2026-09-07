@@ -14,6 +14,8 @@
 
 #include <atomic>
 
+#include <string>
+
 #include "bridge.hpp"
 #include "crash_log.hpp"
 #include "hooks/frame.hpp"
@@ -25,6 +27,7 @@
 #include "samp/version.hpp"
 #include "state/probe.hpp"
 #include "types.hpp"
+#include "ui/overlay.hpp"
 #include "ui/status_source.hpp"
 
 namespace gtabot::asi {
@@ -128,6 +131,26 @@ DWORD WINAPI Worker(LPVOID) {
           LOG_INFO("structure report not ready: {}", outcome.error);
       });
     }
+    // The input picture, on this thread because it has to keep working when
+    // the game thread has stopped drawing. Logged only when it changes, so
+    // the moment input goes away is a line with a time on it rather than
+    // something to be reconstructed afterwards.
+    {
+      static std::string last_input_state;
+      std::string now = Overlay::InputState();
+      if (now != last_input_state) {
+        last_input_state = now;
+        LOG_INFO("input: {}", now);
+      }
+    }
+
+    // The way out. Everything else that could turn the panel off needs the
+    // panel to be clickable, and the whole problem is that sometimes it is
+    // not.
+    if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) &&
+        (GetAsyncKeyState(VK_F12) & 0x8000))
+      Overlay::Disarm();
+
     StatusSource::Mcp current = StatusSource::mcp();
     current.requests = transport.requests();
     StatusSource::SetMcp(current);

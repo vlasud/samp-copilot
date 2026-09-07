@@ -756,6 +756,51 @@ void Overlay::ReleaseIfUnfocused() {
   OnLostDevice();
 }
 
+std::string Overlay::InputState() {
+  char text[320];
+  const HWND foreground = GetForegroundWindow();
+  const bool ours = foreground == g_window;
+
+  char who[128] = "";
+  if (!ours) {
+    char cls[64] = "";
+    char title[64] = "";
+    GetClassNameA(foreground, cls, sizeof(cls));
+    GetWindowTextA(foreground, title, sizeof(title));
+    std::snprintf(who, sizeof(who), " foreground=%s '%s'", cls, title);
+  }
+
+  bool controls = false;
+  const bool controls_known = game::ControlsDisabled(&controls);
+  const bool w = (GetAsyncKeyState('W') & 0x8000) != 0;
+  const bool a_ = (GetAsyncKeyState('A') & 0x8000) != 0;
+  const bool s_ = (GetAsyncKeyState('S') & 0x8000) != 0;
+  const bool d = (GetAsyncKeyState('D') & 0x8000) != 0;
+
+  std::snprintf(text, sizeof(text),
+                "focus=%s%s mode=%s cursor=%s controls=%s movement=%s keys=%s%s%s%s",
+                ours ? "game" : "OTHER", who,
+                g_mode == Mode::kInteractive ? "interactive"
+                : g_mode == Mode::kPassive   ? "passive"
+                                             : "hidden",
+                CursorHook::freed() ? "ours" : "the game's",
+                !controls_known ? "?" : controls ? "DISABLED" : "enabled",
+                game::Enabled() ? "armed" : "off", w ? "W" : "", a_ ? "A" : "",
+                s_ ? "S" : "", d ? "D" : "");
+  return text;
+}
+
+void Overlay::Disarm() {
+  game::SetEnabled(false);
+  g_show_fan   = false;
+  g_show_nodes = false;
+  nav::ClearDebug();
+  g_mode = Mode::kPassive;
+  CursorHook::SetFreed(false);
+  if (ImGui::GetCurrentContext()) ImGui::GetIO().MouseDrawCursor = false;
+  LOG_INFO("disarmed by hotkey: passive, cursor returned, movement off");
+}
+
 void Overlay::Shutdown() {
   Teardown();
   CursorHook::Uninstall();
