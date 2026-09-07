@@ -159,7 +159,9 @@ HRESULT APIENTRY HookedReset(IDirect3DDevice9* device,
   const HRESULT hr = g_original_reset(device, params);
   LOG_INFO("Reset returned 0x{:08X}", static_cast<unsigned int>(hr));
   if (SUCCEEDED(hr) && params != nullptr)
-    WindowMode::ApplyWindowStyle(params->hDeviceWindow);
+    WindowMode::ApplyWindowStyle(params->hDeviceWindow,
+                                 static_cast<int>(params->BackBufferWidth),
+                                 static_cast<int>(params->BackBufferHeight));
   return hr;
 }
 
@@ -178,7 +180,10 @@ HRESULT APIENTRY HookedCreateDevice(IDirect3D9* self, UINT adapter,
   }
   const HRESULT hr =
       g_original_create_device(self, adapter, type, focus, flags, params, out);
-  if (windowed && SUCCEEDED(hr)) WindowMode::ApplyWindowStyle(window);
+  if (windowed && SUCCEEDED(hr))
+    WindowMode::ApplyWindowStyle(window,
+                                 static_cast<int>(params->BackBufferWidth),
+                                 static_cast<int>(params->BackBufferHeight));
   return hr;
 }
 

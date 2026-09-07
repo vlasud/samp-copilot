@@ -15,9 +15,11 @@
 // the parameters our own D3D hook is handed, and the window's own style.
 //
 // A setting, because it changes how the game presents and this is a server
-// with an anticheat: bot.cfg beside the module holds `window=1280x720`, or
-// `window=off` to leave the game fullscreen. On by default, because it was
-// asked for and because it is the safer place to be.
+// with an anticheat: bot.cfg beside the module holds `window=on`, `window=off`
+// to leave the game fullscreen, or `window=WIDTHxHEIGHT` to also override the
+// back buffer - which the game may refuse to start with, so it is opt-in.
+// On by default, because it was asked for and because it is the safer place
+// to be.
 //
 #include <windows.h>
 #include <d3d9.h>
@@ -34,9 +36,11 @@ class WindowMode {
   // from the CreateDevice and Reset hooks with whatever the game passed.
   static void ForceWindowed(D3DPRESENT_PARAMETERS* params);
 
-  // Gives the window a border and centres it at the configured size. Called
-  // after the device is (re)created, once the client size is settled.
-  static void ApplyWindowStyle(HWND window);
+  // Gives the window a border and centres it at the size the device actually
+  // got. Called after the device is (re)created. A width or height of zero
+  // means the device took its size from the window, so only the frame is
+  // applied.
+  static void ApplyWindowStyle(HWND window, int width, int height);
 };
 
 }  // namespace gtabot::asi
