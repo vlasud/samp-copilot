@@ -16,6 +16,7 @@
 
 #include <string>
 
+#include "actions/walker.hpp"
 #include "bridge.hpp"
 #include "crash_log.hpp"
 #include "hooks/frame.hpp"
@@ -144,6 +145,10 @@ DWORD WINAPI Worker(LPVOID) {
       }
     }
 
+    // The walker needs the executable recognised, which happens once the
+    // game has started; trying every tick until it takes costs nothing.
+    act::Install();
+
     // If the player has stopped answering his keys while the calls are armed,
     // stand them down rather than leave him stuck.
     Overlay::WatchForLostInput();
@@ -162,6 +167,7 @@ DWORD WINAPI Worker(LPVOID) {
   }
 
   LOG_INFO("bot.asi stopping");
+  act::Uninstall();
   transport.Stop();
   FrameHook::Uninstall();
   ShutdownLogging();

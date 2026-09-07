@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "actions/walker.hpp"
 #include "bridge.hpp"
 #include "game/exe.hpp"
 #include "game/paths.hpp"
@@ -609,7 +610,33 @@ void DrawPanel() {
       }
     }
 
+    {
+      const act::Status walk = act::Get();
+      if (walk.walking) {
+        char text[160];
+        std::snprintf(text, sizeof(text), "leg %d of %d, %.1f m to it, %.1f m left",
+                      walk.leg + 1, walk.legs, walk.to_next_m, walk.remaining_m);
+        Label("walking", text, kGreen);
+      } else {
+        Label("walking", walk.note.empty() ? "idle" : walk.note, kGrey);
+      }
+      if (walk.corrected) {
+        char text[96];
+        std::snprintf(text, sizeof(text), "sideways axis corrected (%.0f deg out)",
+                      walk.error_deg);
+        Label("steering", text, kAmber);
+      }
+    }
+
     if (g_mode == Mode::kInteractive) {
+      if (ImGui::Button("Walk the plan")) {
+        const nav::DebugState debug = nav::GetDebug();
+        if (debug.has_target && debug.plan.ok && debug.plan.waypoints.size() > 1)
+          act::WalkTo(std::vector<game::Vec3>(debug.plan.waypoints.begin() + 1,
+                                              debug.plan.waypoints.end()));
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Stop walking")) act::Stop("stopped from the panel");
       if (ImGui::Button("Plan 15 m ahead")) PlanAhead(15.0f);
       ImGui::SameLine();
       if (ImGui::Button("Plan 60 m ahead")) PlanAhead(60.0f);
@@ -889,6 +916,7 @@ void Overlay::WatchForLostInput() {
 }
 
 void Overlay::Disarm() {
+  act::Stop("stopped by hotkey");
   game::SetEnabled(false);
   g_show_fan   = false;
   g_show_nodes = false;

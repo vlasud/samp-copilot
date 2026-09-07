@@ -36,6 +36,11 @@ constexpr std::uint32_t kCalcScreenCoors       = 0x71DA00;
 //
 // CPad is 0x134 bytes, which the array stride has to agree with.
 constexpr std::uint32_t kPad0                     = 0xB73458;
+// TheCamera, a CPlaceable: matrix pointer where an entity keeps one, and the
+// forward row sixteen bytes into that matrix.
+constexpr std::uint32_t kTheCamera        = 0xB6F028;
+constexpr std::uint32_t kPlaceableMatrix  = 0x14;
+constexpr std::uint32_t kMatrixForward    = 0x10;
 constexpr std::uint32_t kPadDisablePlayerControls = 0x10E;
 
 using FindGroundFn = float(__cdecl*)(float x, float y, float z, bool* found,
@@ -292,6 +297,27 @@ bool ControlsDisabled(bool* disabled) {
   if (!asi::mem::Read<std::uint16_t>(pad + kPadDisablePlayerControls, &value))
     return false;
   *disabled = value != 0;
+  return true;
+}
+
+bool CameraHeading(float* radians) {
+  const std::uintptr_t camera = At(kTheCamera);
+  if (camera == 0) return false;
+  std::uint32_t matrix = 0;
+  if (!asi::mem::Read<std::uint32_t>(camera + kPlaceableMatrix, &matrix) ||
+      matrix == 0)
+    return false;
+  float fx = 0, fy = 0, fz = 0;
+  if (!asi::mem::Read<float>(matrix + kMatrixForward + 0, &fx)) return false;
+  if (!asi::mem::Read<float>(matrix + kMatrixForward + 4, &fy)) return false;
+  if (!asi::mem::Read<float>(matrix + kMatrixForward + 8, &fz)) return false;
+
+  // A real matrix row is a unit vector. Anything else means this is not the
+  // matrix, and steering by it would send the character somewhere arbitrary.
+  const float length = std::sqrt(fx * fx + fy * fy + fz * fz);
+  if (length < 0.9f || length > 1.1f) return false;
+  if (fx == 0.0f && fy == 0.0f) return false;   // looking straight down
+  *radians = std::atan2(fy, fx);
   return true;
 }
 

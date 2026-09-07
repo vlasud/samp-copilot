@@ -4,6 +4,7 @@ add_library(bot MODULE
   log.cpp
   crash_log.cpp
   bridge.cpp
+  actions/walker.cpp
   game/exe.cpp
   game/world_query.cpp
   game/paths.cpp

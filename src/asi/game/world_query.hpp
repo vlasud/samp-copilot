@@ -97,4 +97,14 @@ bool ToScreen(const Vec3& world, float* sx, float* sy);
 // an input problem of ours. Read-only; false when the build is unknown.
 bool ControlsDisabled(bool* disabled);
 
+// Which way the camera looks, as an angle in radians measured the way atan2
+// measures one. On foot the walk stick is camera-relative - pushing forward
+// means "away from the camera", not "north" - so nothing can be steered
+// without this. False when it cannot be read or does not check out.
+//
+// CCamera derives from CPlaceable, so its matrix is where an entity's is, and
+// the check is the one that catches a wrong address: the forward row of a
+// real matrix is a unit vector.
+bool CameraHeading(float* radians);
+
 }  // namespace gtabot::game

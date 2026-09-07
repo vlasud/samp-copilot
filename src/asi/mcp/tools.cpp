@@ -8,6 +8,7 @@
 #include "log.hpp"
 #include "mcp/rpc.hpp"
 #include "mcp/server.hpp"
+#include "actions/walker.hpp"
 #include "game/paths.hpp"
 #include "game/world_query.hpp"
 #include "nav/planner.hpp"
@@ -98,6 +99,42 @@ json PlanTo(const json& args) {
               {"game_calls", plan.game_calls},
               {"waypoints", std::move(waypoints)},
               {"legs", std::move(legs)}};
+}
+
+json WalkStatus() {
+  const act::Status walk = act::Get();
+  json out{{"walking", walk.walking},
+           {"note", walk.note},
+           {"leg", walk.leg},
+           {"legs", walk.legs},
+           {"to_next_m", walk.to_next_m},
+           {"remaining_m", walk.remaining_m}};
+  if (walk.corrected) out["steering_corrected_deg"] = walk.error_deg;
+  return out;
+}
+
+json MoveTo(const json& args) {
+  const samp::LocalPed self = samp::ReadLocalPed();
+  if (!self.valid) throw std::runtime_error("the local player is not readable");
+  if (!game::CallsTrusted())
+    throw std::runtime_error("game calls are not verified on this build");
+  game::Vec3 target;
+  if (!PointFrom(args, self, &target))
+    throw std::runtime_error("x and y are required");
+
+  const game::Vec3 here{self.x, self.y, self.z};
+  const nav::Plan plan = nav::PlanPath(here, target);
+  nav::SetDebugPlan(target, plan);
+  if (!plan.ok || plan.waypoints.size() < 2)
+    throw std::runtime_error("no walkable route: " + plan.note);
+
+  // The first waypoint is where he already is.
+  act::WalkTo(std::vector<game::Vec3>(plan.waypoints.begin() + 1,
+                                      plan.waypoints.end()));
+  json out = WalkStatus();
+  out["route_note"]  = plan.note;
+  out["route_length_m"] = plan.length_m;
+  return out;
 }
 
 json NavNodes(const json& args) {
@@ -252,6 +289,44 @@ void RegisterTools(Server* server) {
       [](const json& args) {
         return Rpc::RunOnGameThread([args] { return NavNodes(args); },
                                     kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "move_to",
+      "Walk the character to a point. Plans a route the same way plan_path "
+      "does, then works his controller so the game walks him along it - the "
+      "same speed and animation as a person at the keyboard, and the same "
+      "position updates to the server. Returns immediately; call walk_status "
+      "to see how it is going.",
+      {{"type", "object"},
+       {"properties",
+        {{"x", {{"type", "number"}}},
+         {"y", {{"type", "number"}}},
+         {"z", {{"type", "number"}}}}},
+       {"required", json::array({"x", "y"})}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread([args] { return MoveTo(args); },
+                                    kScanTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "walk_status",
+      "How the current walk is going, or why the last one ended: arrived, "
+      "stuck, out of time, or stopped.",
+      NoArguments(),
+      [](const json&) { return WalkStatus(); },
+  });
+
+  server->AddTool({
+      "stop",
+      "Let go of the controller. The character stops where he is and the "
+      "player's own input passes through untouched again.",
+      NoArguments(),
+      [](const json&) {
+        act::Stop("stopped on request");
+        return WalkStatus();
       },
   });
 
