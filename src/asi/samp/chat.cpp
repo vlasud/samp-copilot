@@ -76,7 +76,18 @@ constexpr unsigned long long kAnchorBudgetMs = 2000;
 // in the future.
 constexpr std::uint32_t kMaxAgeMs = 24u * 60 * 60 * 1000;
 constexpr std::uint32_t kClockSlackMs = 5000;
-constexpr int kMinTimeSamples = 8;
+// Four is enough to establish a direction, and there are only a handful of
+// lines in the chat in the seconds after joining - which is exactly when this
+// runs.
+constexpr int kMinTimeSamples  = 4;
+constexpr int kMinTimeDistinct = 2;
+constexpr std::size_t kMaxNameLength = 32;
+
+// The two clocks a client might stamp a line with: milliseconds since the
+// machine booted, or seconds since 1970. Which one it is gets decided by
+// which one the numbers fall on, not by which is more usual.
+constexpr int kClockTicks   = 0;
+constexpr int kClockSeconds = 1;
 
 // The anchored search sweeps the whole process, which costs the game a visible
 // stutter, so it runs a few times and then gives up rather than every retry
@@ -273,6 +284,32 @@ int CountStrings(const unsigned char* block, std::size_t size, std::size_t at,
   return strings;
 }
 
+// SA-MP will not let a player be called anything else: the protocol limits a
+// nickname to these characters, so a column claiming to hold one and holding
+// a byte outside them is holding something else. A colour, for instance -
+// which is what the first version of this proudly reported as the speaker of
+// every server message.
+inline bool NameByte(unsigned char byte) {
+  return (byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+         (byte >= '0' && byte <= '9') || byte == '_' || byte == '[' ||
+         byte == ']' || byte == '(' || byte == ')' || byte == '$' ||
+         byte == '@' || byte == '.' || byte == '=' || byte == ':' ||
+         byte == '-' || byte == ' ';
+}
+
+// Seconds since 1970, the other clock a line might be stamped with.
+std::uint32_t NowSeconds() {
+  FILETIME now{};
+  GetSystemTimeAsFileTime(&now);
+  ULARGE_INTEGER packed;
+  packed.LowPart  = now.dwLowDateTime;
+  packed.HighPart = now.dwHighDateTime;
+  // FILETIME counts hundreds of nanoseconds from 1601.
+  constexpr std::uint64_t kToUnix = 116444736000000000ull;
+  if (packed.QuadPart < kToUnix) return 0;
+  return static_cast<std::uint32_t>((packed.QuadPart - kToUnix) / 10000000ull);
+}
+
 inline std::int32_t Magnitude(std::int32_t value) {
   return value < 0 ? -value : value;
 }
@@ -282,6 +319,9 @@ struct Column {
   int          hits         = 0;
   int          sentences    = 0;
   int          total_length = 0;
+  // Values that could be somebody's name rather than four bytes of something
+  // else that happen to be printable.
+  int          namelike     = 0;
 };
 
 // Every column in the entry, the reference one included. Which of them is the
@@ -297,6 +337,7 @@ int ScanColumns(const unsigned char* block, std::size_t size,
       int hits      = 0;
       int total     = 0;
       int sentences = 0;
+      int namelike  = 0;
       for (int k = 0; k < shape.count; ++k) {
         const std::ptrdiff_t at =
             static_cast<std::ptrdiff_t>(shape.reference) +
@@ -306,16 +347,19 @@ int ScanColumns(const unsigned char* block, std::size_t size,
 
         std::size_t length = 0;
         bool space = false;
+        bool name  = true;
         while (static_cast<std::size_t>(at) + length < size &&
                length < kMaxFieldLength && block[at + length] != 0) {
           if (!Printable(block[at + length])) { length = 0; break; }
           if (block[at + length] == 0x20) space = true;
+          if (!NameByte(block[at + length])) name = false;
           ++length;
         }
         if (length == 0) continue;
         ++hits;
         total += static_cast<int>(length);
         if (length >= kSentenceLength && space) ++sentences;
+        if (name && length >= 2 && length <= kMaxNameLength) ++namelike;
       }
       // Present in a quarter of the lines or it is not a column.
       if (hits * 4 < shape.strings) continue;
@@ -323,6 +367,7 @@ int ScanColumns(const unsigned char* block, std::size_t size,
       out[written].hits         = hits;
       out[written].sentences    = sentences;
       out[written].total_length = total;
+      out[written].namelike     = namelike;
       ++written;
     }
   } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -330,64 +375,86 @@ int ScanColumns(const unsigned char* block, std::size_t size,
   return written;
 }
 
-// A column of tick counts: the same value never going backwards (or never
-// forwards), all of them recent, and enough different values to rule out a
-// constant. This is the only thing in the entry that says which end of the
-// array is the newest line, so it is worth looking for.
-bool ScanTimestamp(const unsigned char* block, std::size_t size,
-                   const Shape& shape, std::uint32_t now_ticks,
-                   std::int32_t* delta_out, bool* newest_first_out) {
+// Whether a number is a clock reading taken in the last day, on one of the
+// two clocks a client might have used to stamp a line.
+inline bool OnClock(std::uint32_t value, int base, std::uint32_t now_ticks,
+                    std::uint32_t now_seconds) {
+  if (value == 0) return false;
+  const std::uint32_t now = base == kClockTicks ? now_ticks : now_seconds;
+  const std::uint32_t window =
+      base == kClockTicks ? kMaxAgeMs : kMaxAgeMs / 1000;
+  const std::uint32_t gap = value > now ? value - now : now - value;
+  return gap <= window;
+}
+
+// The column that says when each line arrived.
+//
+// Worth more than the timestamp: it is what settles which end of the array is
+// the newest line, and it is the only thing that tells a live entry from a
+// slot the client has not written yet. The buffer is not zeroed, so an unused
+// slot holds whatever the allocator left there - which is how a five-letter
+// scrap of somebody else's memory ended up printed as the last line of chat.
+//
+// So readings outside the window are tolerated rather than fatal. They are
+// precisely the entries we want to find, and demanding that every entry be
+// recent - as the first version did - meant one stale slot rejected the whole
+// column and left us with no way to spot it.
+bool ScanClock(const unsigned char* block, std::size_t size, const Shape& shape,
+               std::uint32_t now_ticks, std::uint32_t now_seconds,
+               std::int32_t* delta_out, int* base_out, bool* newest_first_out) {
   bool found = false;
   __try {
     const std::int32_t span = static_cast<std::int32_t>(shape.stride);
     for (std::int32_t delta = -span + 1; delta < span && !found; ++delta) {
       if ((shape.reference + delta) % 4 != 0) continue;
 
-      std::uint32_t previous = 0;
-      int samples  = 0;
-      int distinct = 0;
-      bool rising  = true;
-      bool falling = true;
-      bool sane    = true;
+      for (int base = kClockTicks; base <= kClockSeconds && !found; ++base) {
+        std::uint32_t previous = 0;
+        int live     = 0;   // entries holding a line
+        int on_clock = 0;   // of those, ones with a plausible reading
+        int distinct = 0;
+        bool rising  = true;
+        bool falling = true;
+        bool readable = true;
 
-      for (int k = 0; k < shape.count && sane; ++k) {
-        const std::ptrdiff_t base =
-            static_cast<std::ptrdiff_t>(shape.reference) +
-            static_cast<std::ptrdiff_t>(k) * shape.stride;
-        // Only entries that hold a line: an unused one is all zeroes and
-        // would look like a timestamp jumping back to nothing.
-        if (base < 0 || static_cast<std::size_t>(base) + 4 > size) continue;
-        if (block[base] == 0) continue;
+        for (int k = 0; k < shape.count && readable; ++k) {
+          const std::ptrdiff_t entry =
+              static_cast<std::ptrdiff_t>(shape.reference) +
+              static_cast<std::ptrdiff_t>(k) * shape.stride;
+          if (entry < 0 || static_cast<std::size_t>(entry) + 4 > size) continue;
+          if (block[entry] == 0) continue;
+          ++live;
 
-        const std::ptrdiff_t at = base + delta;
-        if (at < 0 || static_cast<std::size_t>(at) + 4 > size) {
-          sane = false;
-          break;
-        }
-        std::uint32_t value = 0;
-        std::memcpy(&value, block + at, sizeof(value));
+          const std::ptrdiff_t at = entry + delta;
+          if (at < 0 || static_cast<std::size_t>(at) + 4 > size) {
+            readable = false;
+            break;
+          }
+          std::uint32_t value = 0;
+          std::memcpy(&value, block + at, sizeof(value));
+          if (!OnClock(value, base, now_ticks, now_seconds)) continue;
 
-        if (value == 0) { sane = false; break; }
-        const std::uint32_t age = now_ticks - value;
-        if (age > kMaxAgeMs && now_ticks + kClockSlackMs < value) {
-          sane = false;
-          break;
+          if (on_clock > 0) {
+            if (value < previous) rising = false;
+            if (value > previous) falling = false;
+            if (value != previous) ++distinct;
+          }
+          previous = value;
+          ++on_clock;
         }
-        if (samples > 0) {
-          if (value < previous) rising = false;
-          if (value > previous) falling = false;
-          if (value != previous) ++distinct;
-        }
-        previous = value;
-        ++samples;
+
+        if (!readable) continue;
+        if (on_clock < kMinTimeSamples) continue;
+        // Most of the lines, not a lucky handful: a column of four arbitrary
+        // bytes will occasionally look like a clock in a couple of entries.
+        if (on_clock * 2 < live) continue;
+        if (distinct < kMinTimeDistinct) continue;
+        if (rising == falling) continue;  // constant, or neither
+        *delta_out        = delta;
+        *base_out         = base;
+        *newest_first_out = falling;
+        found = true;
       }
-
-      if (!sane) continue;
-      if (samples < kMinTimeSamples || distinct < kMinTimeSamples / 2) continue;
-      if (rising == falling) continue;  // constant, or neither
-      *delta_out        = delta;
-      *newest_first_out = falling;
-      found = true;
     }
   } __except (EXCEPTION_EXECUTE_HANDLER) {
   }
@@ -619,6 +686,9 @@ void Describe(const Candidate& candidate, const Shape& shape,
       continue;
     if (columns[i].hits == 0) continue;
     if (columns[i].total_length / columns[i].hits >= message_average) continue;
+    // And it has to hold names. Without this the colour of each line wins:
+    // four bytes, shorter than any message, printable often enough to pass.
+    if (columns[i].namelike * 2 < columns[i].hits) continue;
     if (speaker == nullptr || columns[i].hits > speaker->hits ||
         (columns[i].hits == speaker->hits &&
          columns[i].total_length > speaker->total_length))
@@ -645,10 +715,12 @@ void Describe(const Candidate& candidate, const Shape& shape,
   layout->prefix_delta = speaker ? speaker->delta - text_delta : 0;
 
   std::int32_t time_delta = 0;
+  int  time_base = kClockTicks;
   bool newest_first = false;
-  if (ScanTimestamp(block, candidate.span, shape, GetTickCount(), &time_delta,
-                    &newest_first)) {
-    layout->has_time = true;
+  if (ScanClock(block, candidate.span, shape, GetTickCount(), NowSeconds(),
+                &time_delta, &time_base, &newest_first)) {
+    layout->has_time  = true;
+    layout->time_base = time_base;
     // Recorded against the message column, so a reader never has to know
     // where the entry formally begins.
     layout->time_delta   = time_delta - text_delta;
@@ -894,8 +966,10 @@ json ReadChat(int limit) {
                      ? (layout.newest_first ? "newest first" : "oldest first")
                      : "unknown";
 
-  const std::uint32_t now_ticks = GetTickCount();
+  const std::uint32_t now_ticks   = GetTickCount();
+  const std::uint32_t now_seconds = NowSeconds();
   std::vector<json> lines;
+  int stale = 0;
   lines.reserve(static_cast<std::size_t>(layout.entries));
   for (int i = 0; i < layout.entries; ++i) {
     const std::uintptr_t at =
@@ -903,20 +977,34 @@ json ReadChat(int limit) {
     const std::string text = ReadField(at);
     if (text.empty()) continue;
 
+    // A slot the client has not written yet still holds whatever the
+    // allocator left in it, and some of that reads as text. When there is a
+    // clock column, it says which slots are lines and which are leftovers -
+    // the only test that tells them apart, since a real line is allowed to be
+    // short and meaningless too.
+    std::int64_t age_ms = -1;
+    if (layout.has_time) {
+      std::uint32_t stamp = 0;
+      if (!asi::mem::Read<std::uint32_t>(at + layout.time_delta, &stamp) ||
+          !OnClock(stamp, layout.time_base, now_ticks, now_seconds)) {
+        ++stale;
+        continue;
+      }
+      age_ms = layout.time_base == kClockTicks
+                   ? static_cast<std::int64_t>(now_ticks - stamp)
+                   : static_cast<std::int64_t>(now_seconds - stamp) * 1000;
+    }
+
     json line;
     line["text"] = ToUtf8(text);
     if (layout.has_prefix) {
       const std::string from = ReadField(at + layout.prefix_delta);
       if (!from.empty()) line["from"] = ToUtf8(from);
     }
-    if (layout.has_time) {
-      std::uint32_t stamp = 0;
-      if (asi::mem::Read<std::uint32_t>(at + layout.time_delta, &stamp) &&
-          stamp != 0)
-        line["age_ms"] = static_cast<std::int64_t>(now_ticks - stamp);
-    }
+    if (age_ms >= 0) line["age_ms"] = age_ms;
     lines.push_back(std::move(line));
   }
+  out["stale_slots"] = stale;
 
   // Oldest first, whichever way the array runs.
   if (layout.newest_first) std::reverse(lines.begin(), lines.end());
@@ -945,8 +1033,11 @@ bool DumpChat() {
       layout.has_prefix ? std::to_string(layout.prefix_delta) + " bytes from it"
                         : std::string("none found");
   const std::string stamp =
-      layout.has_time ? std::to_string(layout.time_delta) + " bytes from it"
-                      : std::string("none found");
+      layout.has_time
+          ? std::to_string(layout.time_delta) + " bytes from it, " +
+                (layout.time_base == kClockTicks ? "ticks since boot"
+                                                 : "seconds since 1970")
+          : std::string("none found");
   const std::string order =
       layout.order_known
           ? std::string(layout.newest_first ? "newest first" : "oldest first")

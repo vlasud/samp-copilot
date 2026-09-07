@@ -344,9 +344,12 @@ void DrawPanel() {
   // column was labelled right is to read it against what is on screen.
   const samp::ChatLayout& chat = samp::CachedChat();
   if (chat.valid) {
-    char shape[96];
-    std::snprintf(shape, sizeof(shape), "%d lines, %s", chat.populated,
-                  chat.anchored ? "anchored" : "by shape only");
+    char shape[128];
+    std::snprintf(shape, sizeof(shape), "%d lines, %s, %s", chat.populated,
+                  chat.anchored ? "anchored" : "by shape only",
+                  chat.order_known
+                      ? (chat.newest_first ? "newest first" : "oldest first")
+                      : "no clock column");
     Label("chat", shape, chat.anchored ? kGreen : kAmber);
     for (const json& line : cached_chat.value("lines", json::array())) {
       const std::string from = line.value("from", std::string{});

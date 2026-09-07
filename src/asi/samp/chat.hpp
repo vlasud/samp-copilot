@@ -59,6 +59,9 @@ struct ChatLayout {
   // A tick count, when one is there. It is what settles the ordering.
   bool           has_time     = false;
   std::int32_t   time_delta   = 0;
+  // Which clock the column keeps: 0 for ticks since boot, 1 for seconds since
+  // 1970. Decided by which one the numbers fall on.
+  int            time_base    = 0;
   bool           newest_first = false;
   bool           order_known  = false;
   // How many candidate blocks were tried before this one, so a failure says
