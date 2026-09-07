@@ -43,6 +43,7 @@ namespace gtabot::samp {
 struct SignatureColumn {
   std::int32_t  delta = 0;   // from the message column
   std::uint32_t value = 0;
+  int           agree = 0;   // entries holding this value
 };
 
 struct ChatLayout {

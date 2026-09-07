@@ -1163,6 +1163,14 @@ bool DumpChat() {
                 speaker.c_str(), stamp.c_str(), signature.c_str(),
                 order.c_str());
   file << header << "\n";
+  for (int c = 0; c < layout.signature_count; ++c) {
+    char line[96];
+    std::snprintf(line, sizeof(line),
+                  "  signature %+5d  %08X  in %d entries\n",
+                  static_cast<int>(layout.signature[c].delta),
+                  layout.signature[c].value, layout.signature[c].agree);
+    file << line;
+  }
 
   // The raw bytes of the entries that hold something, so a column this pass
   // got wrong can be read off by hand rather than guessed at again. By index
