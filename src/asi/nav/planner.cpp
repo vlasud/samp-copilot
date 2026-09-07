@@ -48,6 +48,21 @@ constexpr float kSmoothMaxLeg    = 35.0f;
 constexpr int kCallBudget = 8000;
 
 int g_calls = 0;
+// A wall clock as well as a count. The count bounds how much work is asked
+// for; only a clock bounds how long it takes, and everything here runs on the
+// game thread, where a long answer is a frame nobody draws and a message
+// nobody pumps - which looks exactly like the input being taken away.
+unsigned long long g_deadline_ms = 0;
+constexpr unsigned long long kBudgetMs = 8;
+
+bool PastDeadline() {
+  return g_deadline_ms != 0 && GetTickCount64() > g_deadline_ms;
+}
+
+void StartBudget() {
+  g_calls = 0;
+  g_deadline_ms = GetTickCount64() + kBudgetMs;
+}
 
 float Distance2D(const Vec3& a, const Vec3& b) {
   const float dx = b.x - a.x;
@@ -69,11 +84,13 @@ std::string Metres(float value) {
 }
 
 bool GroundAt(const Vec3& p, float* ground) {
+  if (PastDeadline()) return false;
   ++g_calls;
   return game::GroundBelow(Vec3{p.x, p.y, p.z + kMaxGroundAbove}, ground);
 }
 
 bool Clear(const Vec3& a, const Vec3& b) {
+  if (PastDeadline()) return false;
   ++g_calls;
   return game::LineClear(a, b);
 }
@@ -290,30 +307,51 @@ Leg MakeLeg(const Vec3& from, const Vec3& to, bool via_graph) {
 std::mutex g_debug_mutex;
 DebugState g_debug;
 
+// One place every exit from a plan passes through, so the log always has the
+// other half of the pair.
+void Report(const Plan& plan, unsigned long long began) {
+  bool controls_after = false;
+  game::ControlsDisabled(&controls_after);
+  LOG_INFO("plan: finished in {} ms, {} calls, {} - controls {}",
+           GetTickCount64() - began, plan.game_calls,
+           plan.ok ? std::string("ok") : plan.note,
+           controls_after ? "DISABLED" : "enabled");
+}
+
 }  // namespace
 
 Verdict Standable(const Vec3& p) {
-  g_calls = 0;
+  StartBudget();
   Verdict verdict = StandableInner(p);
   verdict.calls = g_calls;
   return verdict;
 }
 
 Verdict Walkable(const Vec3& a, const Vec3& b) {
-  g_calls = 0;
+  StartBudget();
   Verdict verdict = WalkableInner(a, b);
   verdict.calls = g_calls;
   return verdict;
 }
 
 Plan PlanPath(const Vec3& from, const Vec3& to) {
-  g_calls = 0;
+  StartBudget();
   Plan plan;
+  // Said before the work and after it, because the log flushes every line: a
+  // "starting" with no "finished" is the game thread stuck inside this, which
+  // no amount of reasoning about it has settled.
+  const unsigned long long began = GetTickCount64();
+  bool controls_before = false;
+  game::ControlsDisabled(&controls_before);
+  LOG_INFO("plan: starting ({:.1f}, {:.1f}, {:.1f}) -> ({:.1f}, {:.1f}, {:.1f}), "
+           "controls {}", from.x, from.y, from.z, to.x, to.y, to.z,
+           controls_before ? "already disabled" : "enabled");
 
   const Verdict start = StandableInner(from);
   if (!start.ok) {
     plan.note = "start: " + start.why;
     plan.game_calls = g_calls;
+    Report(plan, began);
     return plan;
   }
   const Verdict end = StandableInner(to);
@@ -324,6 +362,7 @@ Plan PlanPath(const Vec3& from, const Vec3& to) {
                            " away - beyond what the game has streamed in)"
                      : "");
     plan.game_calls = g_calls;
+    Report(plan, began);
     return plan;
   }
   const Vec3 a{from.x, from.y, start.ground_z + kPedOrigin};
@@ -343,6 +382,7 @@ Plan PlanPath(const Vec3& from, const Vec3& to) {
     plan.ok = true;
     plan.note = "straight line";
     plan.game_calls = g_calls;
+    Report(plan, began);
     return plan;
   }
 
@@ -352,6 +392,7 @@ Plan PlanPath(const Vec3& from, const Vec3& to) {
     plan.note = "straight line " + direct.why +
                 ", and the path graph is not available: " + graph.note;
     plan.game_calls = g_calls;
+    Report(plan, began);
     return plan;
   }
   game::PathNode start_node, goal_node;
@@ -359,11 +400,13 @@ Plan PlanPath(const Vec3& from, const Vec3& to) {
   if (!JoinToGraph(a, &start_node, &why)) {
     plan.note = "straight line " + direct.why + "; start: " + why;
     plan.game_calls = g_calls;
+    Report(plan, began);
     return plan;
   }
   if (!JoinToGraph(b, &goal_node, &why)) {
     plan.note = "straight line " + direct.why + "; target: " + why;
     plan.game_calls = g_calls;
+    Report(plan, began);
     return plan;
   }
 
@@ -374,6 +417,7 @@ Plan PlanPath(const Vec3& from, const Vec3& to) {
                 "; no route through the loaded graph after " +
                 std::to_string(expanded) + " nodes";
     plan.game_calls = g_calls;
+    Report(plan, began);
     return plan;
   }
   plan.graph_nodes = static_cast<int>(route.size());
@@ -421,6 +465,7 @@ Plan PlanPath(const Vec3& from, const Vec3& to) {
                            std::to_string(tight.size() - 1) + " legs"
                      : "a leg of the route is blocked";
   plan.game_calls = g_calls;
+  Report(plan, began);
   return plan;
 }
 
