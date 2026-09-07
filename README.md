@@ -311,7 +311,17 @@ Three findings cost a day between them and are worth not rediscovering:
    looks. "Most players are on exactly 100" found nothing, because two of six
    were. Health is stored in a float but arrives as a byte, so it is always a
    whole number - that holds whatever state the players are in.
-5. A reader must not be stricter than the search that found the field for it.
+5. How often the game is called matters more than whether the call is right.
+   A reach fan making three hundred collision queries a second out of the
+   frame hook took the player's input away and did not give it back; the same
+   calls a few times a second, for an hour, did nothing. The call was correct
+   the whole time - it passes a self-check against where the player is
+   standing. Six mechanisms were reasoned out and all six were wrong, and what
+   settled it was recording the state instead: which window had the focus,
+   what mode the panel was in, whose cursor it was, what the game said about
+   its own controls, and - the field that ended the argument - how far the
+   player actually moved with the keys held.
+6. A reader must not be stricter than the search that found the field for it.
    Insisting health be above zero discarded the offset the moment one player
    was dead, and discarded it for everyone else in the same pass.
 
