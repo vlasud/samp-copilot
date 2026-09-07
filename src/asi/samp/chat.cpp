@@ -684,12 +684,12 @@ int FindSignature(const unsigned char* block, std::size_t size,
           static_cast<std::ptrdiff_t>(shape.reference) +
           static_cast<std::ptrdiff_t>(k) * shape.stride + text_delta;
       if (at < 0 || static_cast<std::size_t>(at) + 4 > size) continue;
-      if (block[at] == 0) continue;
+      // A proper field, not merely a non-zero byte: garbage should not get a
+      // vote in the measurement it is about to be judged against.
+      if (!FieldStart(block, size, static_cast<std::size_t>(at))) continue;
       live[live_count++] = k;
     }
     if (live_count < kMinSignatureVoters) return 0;
-    // One entry may be a stranger; that is the entire point of looking.
-    const int allowed = live_count / 5 + 1;
 
     const std::int32_t span = static_cast<std::int32_t>(shape.stride);
     // Not stopping at max_out: the list is kept by strength, so it has to
@@ -742,10 +742,32 @@ int FindSignature(const unsigned char* block, std::size_t size,
       }
 
       if (!readable) continue;
-      if (best_matches + allowed < live_count) continue;
-      out[written].delta = delta;
-      out[written].value = best_value;
-      ++written;
+      // Half the entries, not nearly all of them. How many strangers the run
+      // picked up is not knowable in advance - insisting on all but one found
+      // nothing at all, because the run had walked into a table of command
+      // names and collected several.
+      if (best_matches * 2 < live_count) continue;
+      if (best_matches < kMinSignatureVoters) continue;
+
+      // Kept by strength rather than by whichever offsets came first: the
+      // scan starts a whole record before the message, and a coincidence out
+      // there would otherwise hold a place the record needs.
+      int slot;
+      if (written < max_out) {
+        slot = written++;
+      } else {
+        slot = -1;
+        int weakest = best_matches;
+        for (int i = 0; i < max_out; ++i)
+          if (out[i].agree < weakest) {
+            weakest = out[i].agree;
+            slot = i;
+          }
+        if (slot < 0) continue;
+      }
+      out[slot].delta = delta;
+      out[slot].value = best_value;
+      out[slot].agree = best_matches;
     }
   } __except (EXCEPTION_EXECUTE_HANDLER) {
   }
