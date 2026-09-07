@@ -59,6 +59,12 @@ class Overlay {
   // debug overlays off. Bound to a hotkey polled off the game thread so it
   // works even when the panel cannot be clicked.
   static void Disarm();
+
+  // Watches for the player having lost his input while the game calls are
+  // armed - keys held, and he has not moved for a while, with the game window
+  // in front. Disarms and says what had been called by then. Called off the
+  // game thread, so it keeps working when that thread does not.
+  static void WatchForLostInput();
 };
 
 }  // namespace gtabot::asi

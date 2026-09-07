@@ -824,6 +824,41 @@ std::string Overlay::InputState() {
   return text;
 }
 
+void Overlay::WatchForLostInput() {
+  if (!game::Enabled()) return;
+  if (GetForegroundWindow() != g_window) return;
+  const bool held = (GetAsyncKeyState('W') & 0x8000) ||
+                    (GetAsyncKeyState('A') & 0x8000) ||
+                    (GetAsyncKeyState('S') & 0x8000) ||
+                    (GetAsyncKeyState('D') & 0x8000);
+
+  static float last_x = 0, last_y = 0, last_z = 0;
+  static bool  had = false;
+  static int   still = 0;
+  float x = 0, y = 0, z = 0;
+  if (!LastLocalPosition(&x, &y, &z)) return;
+  if (!had) {
+    had = true;
+    last_x = x; last_y = y; last_z = z;
+    return;
+  }
+  const float dx = x - last_x, dy = y - last_y, dz = z - last_z;
+  const float moved = std::sqrt(dx * dx + dy * dy + dz * dz);
+  last_x = x; last_y = y; last_z = z;
+
+  // A key down and nowhere gone. One sample is standing against a wall; six
+  // in a row, a second and a half, is the input not arriving.
+  still = (held && moved < 0.05f) ? still + 1 : 0;
+  if (still < 6) return;
+  still = 0;
+
+  LOG_ERROR("input lost while armed - keys held and he has not moved. "
+            "Calls since arming: {} ground, {} line of sight, {} screen. "
+            "Disarming; press the checkbox to try again",
+            game::GroundCalls(), game::LineOfSightCalls(), game::ScreenCalls());
+  game::SetEnabled(false);
+}
+
 void Overlay::Disarm() {
   game::SetEnabled(false);
   g_show_fan   = false;

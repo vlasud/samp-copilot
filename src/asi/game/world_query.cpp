@@ -54,6 +54,7 @@ std::atomic<unsigned long long> g_second_started{0};
 std::atomic<int> g_calls_this_second{0};
 std::atomic<int> g_calls_last_second{0};
 std::atomic<bool> g_reported_ceiling{false};
+std::atomic<int> g_ground_calls{0}, g_los_calls{0}, g_screen_calls{0};
 
 // True while there is still room this second. Rolls the window over itself,
 // so no frame hook has to remember to.
@@ -114,7 +115,12 @@ bool CallScreen(ScreenFn fn, const Vec3* world, Vec3* screen) {
 void SetEnabled(bool on) {
   const bool was = g_enabled.exchange(on, std::memory_order_acq_rel);
   if (was == on) return;
-  if (on) g_armed_ms.store(GetTickCount64(), std::memory_order_release);
+  if (on) {
+    g_armed_ms.store(GetTickCount64(), std::memory_order_release);
+    g_ground_calls.store(0);
+    g_los_calls.store(0);
+    g_screen_calls.store(0);
+  }
   LOG_INFO("game calls {}{}", on ? "ENABLED" : "disabled",
            on ? " - stage 1, ground only" : "");
 }
@@ -175,12 +181,17 @@ bool SelfCheck(const Vec3& player, const char** why) {
   return true;
 }
 
+int GroundCalls()      { return g_ground_calls.load(); }
+int LineOfSightCalls() { return g_los_calls.load(); }
+int ScreenCalls()      { return g_screen_calls.load(); }
+
 int CallsInLastSecond() { return g_calls_last_second.load(); }
 int CallsPerSecondCeiling() { return kCallsPerSecond; }
 
 bool GroundBelow(const Vec3& at, float* ground_z) {
   if (!CallsTrusted()) return false;
   if (!TakeCallSlot()) return false;
+  g_ground_calls.fetch_add(1, std::memory_order_relaxed);
   const auto fn = reinterpret_cast<FindGroundFn>(At(kFindGroundZFor3DCoord));
   return fn != nullptr && CallGround(fn, at.x, at.y, at.z, ground_z);
 }
@@ -261,6 +272,7 @@ bool LineClear(const Vec3& a, const Vec3& b) {
   if (!g_los_trusted.load(std::memory_order_acquire)) return false;
   if (CurrentStage() < Stage::kAndLineOfSight) return false;
   if (!TakeCallSlot()) return false;
+  g_los_calls.fetch_add(1, std::memory_order_relaxed);
   bool clear = false;
   return RawLineClear(a, b, &clear) && clear;
 }
@@ -279,6 +291,7 @@ bool ToScreen(const Vec3& world, float* sx, float* sy) {
   if (!CallsTrusted()) return false;
   if (CurrentStage() < Stage::kAndScreen) return false;
   if (!TakeCallSlot()) return false;
+  g_screen_calls.fetch_add(1, std::memory_order_relaxed);
   const auto fn = reinterpret_cast<ScreenFn>(At(kCalcScreenCoors));
   if (fn == nullptr) return false;
   Vec3 screen;

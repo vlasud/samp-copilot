@@ -144,6 +144,10 @@ DWORD WINAPI Worker(LPVOID) {
       }
     }
 
+    // If the player has stopped answering his keys while the calls are armed,
+    // stand them down rather than leave him stuck.
+    Overlay::WatchForLostInput();
+
     // The way out. Everything else that could turn the panel off needs the
     // panel to be clickable, and the whole problem is that sometimes it is
     // not.

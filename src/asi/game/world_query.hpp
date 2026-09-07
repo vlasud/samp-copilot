@@ -51,6 +51,12 @@ Stage CurrentStage();
 // hook - and the one session that armed everything without it kept its input
 // through all three stages. Rate is what does it, so rate is what is capped:
 // past the ceiling every call answers "no" until the second turns over.
+// How many of each kind have been made since arming, so a report of the
+// input going away can name what had been called by then.
+int GroundCalls();
+int LineOfSightCalls();
+int ScreenCalls();
+
 int CallsInLastSecond();
 int CallsPerSecondCeiling();
 const char* StageName();
