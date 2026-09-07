@@ -8,11 +8,16 @@
 // of those failures recoverable. And a small window is simply what a person
 // developing this wants in front of them.
 //
-// It is done the way windowed-mode mods have always done it: force
-// Windowed=TRUE in the presentation parameters at the one moment the device
-// is created (and again on every reset, so it stays), then give the window a
-// border and a sensible size. Nothing in the game's code is touched - only
-// the parameters our own D3D hook is handed, and the window's own style.
+// It is applied at exactly one moment: when the game resets its own device.
+// Forcing it when the device is first created does not work here - GTA checks
+// the device against the exclusive video mode RenderWare selected and quits
+// when it does not match, which it did, twice. A reset is different: the game
+// has finished initialising, has released its own resources, and is asking
+// for the device back, so a windowed one is a change it is already built to
+// absorb. The practical consequence is that the game starts fullscreen and
+// becomes a window the first time the device resets - which is what alt-tab
+// does. Nothing in the game's code is touched: only the parameters our own
+// D3D hook is handed, and the window's own style.
 //
 // A setting, because it changes how the game presents and this is a server
 // with an anticheat: bot.cfg beside the module holds `window=on`, `window=off`
