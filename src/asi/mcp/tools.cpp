@@ -364,7 +364,12 @@ void RegisterTools(Server* server) {
       "legs have been planned, and whether it is heading for the destination "
       "or for a staging point on the way to it.",
       NoArguments(),
-      [](const json&) { return TravelStatusJson(); },
+      [](const json&) {
+        // On the game thread: this reads SA-MP's structures, and resolving
+        // those is game-thread work that keeps state of its own.
+        return Rpc::RunOnGameThread([] { return TravelStatusJson(); },
+                                    kFastTimeoutMs);
+      },
   });
 
   server->AddTool({
@@ -372,7 +377,10 @@ void RegisterTools(Server* server) {
       "How the current walk is going, or why the last one ended: arrived, "
       "stuck, out of time, or stopped.",
       NoArguments(),
-      [](const json&) { return WalkStatus(); },
+      [](const json&) {
+        return Rpc::RunOnGameThread([] { return WalkStatus(); },
+                                    kFastTimeoutMs);
+      },
   });
 
   server->AddTool({
@@ -381,9 +389,13 @@ void RegisterTools(Server* server) {
       "player's own input passes through untouched again.",
       NoArguments(),
       [](const json&) {
-        act::CancelTravel("stopped on request");
-        act::Stop("stopped on request");
-        return TravelStatusJson();
+        return Rpc::RunOnGameThread(
+            [] {
+              act::CancelTravel("stopped on request");
+              act::Stop("stopped on request");
+              return TravelStatusJson();
+            },
+            kFastTimeoutMs);
       },
   });
 

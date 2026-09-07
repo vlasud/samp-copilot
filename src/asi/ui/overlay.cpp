@@ -663,9 +663,15 @@ void DrawPanel() {
       ImGui::SetNextItemWidth(180.0f);
       ImGui::InputFloat2("##target", target, "%.0f");
       ImGui::SameLine();
-      if (ImGui::Button("Travel there"))
-        act::TravelTo(game::Vec3{target[0], target[1],
-                                 self.valid ? self.z : 0.0f});
+      if (ImGui::Button("Travel there")) {
+        const float dx = target[0] - (self.valid ? self.x : 0.0f);
+        const float dy = target[1] - (self.valid ? self.y : 0.0f);
+        if (std::sqrt(dx * dx + dy * dy) < 5.0f)
+          SetReportSummary("that is where he already is - type somewhere else");
+        else
+          act::TravelTo(game::Vec3{target[0], target[1],
+                                   self.valid ? self.z : 0.0f});
+      }
       ImGui::SameLine();
       if (ImGui::Button("Here")) {
         if (self.valid) {
@@ -896,11 +902,15 @@ std::string Overlay::InputState() {
 
   char who[128] = "";
   if (!ours) {
+    // The class name only. Asking another process's window for its title is
+    // a cross-process WM_GETTEXT that blocks until that process answers, and
+    // an application that is busy or wedged never does. This runs on the
+    // worker thread - the one carrying the watchdog and the hotkey that gets
+    // the player out of trouble - so it is the last thread in the module that
+    // may wait on somebody else's message loop.
     char cls[64] = "";
-    char title[64] = "";
     GetClassNameA(foreground, cls, sizeof(cls));
-    GetWindowTextA(foreground, title, sizeof(title));
-    std::snprintf(who, sizeof(who), " foreground=%s '%s'", cls, title);
+    std::snprintf(who, sizeof(who), " foreground=%s", cls);
   }
 
   bool controls = false;
