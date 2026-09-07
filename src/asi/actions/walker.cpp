@@ -41,9 +41,10 @@ constexpr float kProgress = 0.4f;
 // forever.
 constexpr unsigned long long kWalkLimitMs = 120000;
 
-// Measuring the transform rather than trusting it. After this far travelled,
-// where he actually went is compared with where he was sent.
-constexpr float kCalibrateAfter = 1.5f;
+// Long enough to push straight forward and see which way that turned out to
+// be, and short enough that a walk does not visibly start in the wrong
+// direction.
+constexpr unsigned long long kBootstrapMs = 450;
 
 // Meeting something in the way. A person does not stop dead at a bin and
 // abandon the errand; he steps round it and carries on, and tries the other
@@ -77,16 +78,18 @@ float             g_best_distance = 0;
 float             g_to_next = 0;
 float             g_remaining = 0;
 
-// The camera-relative transform's one uncertain sign, and the evidence for
-// it. Sideways is the axis a convention can be backwards about; forward is
-// not, because walking away from a target is obvious in the first metre.
-bool  g_flip_sideways = false;
-bool  g_calibrated = false;
-bool  g_calibrate_started = false;
+// The measured transform from stick to world, and the one thing measuring it
+// cannot settle on its own: whether the sideways axis runs the other way. A
+// mirrored axis makes every correction push him further out, so it shows up
+// as an error that will not come down, and that is what is watched for.
+float g_offset = 0;
+bool  g_offset_seen = false;
+float g_last_emit = 0;
+float g_hand = 1.0f;
+unsigned long long g_bootstrap_until = 0;
+unsigned long long g_wrong_since = 0;
 bool  g_corrected = false;
 float g_error_deg = 0;
-Vec3  g_calibrate_from;
-float g_calibrate_heading = 0;
 
 // Stepping round something, and the eased stick.
 int   g_sidesteps = 0;
@@ -195,50 +198,56 @@ bool DecideStick(short* out_x, short* out_y) {
              g_sidestep_left ? "left" : "right", g_sidesteps);
   }
 
-  float camera = 0;
-  if (!game::CameraHeading(&camera)) {
-    StopLocked("stopped - the camera cannot be read, so nothing can be steered");
-    LOG_WARN("walk: {}", g_note);
-    return false;
-  }
-
-  // While stepping round something, that is where he is going.
+  // Where he is going, and where he is going to be sent.
   const bool stepping = now < g_sidestep_until;
   const Vec3& aim = stepping ? g_sidestep_target : target;
   const float wanted = std::atan2(aim.y - here.y, aim.x - here.x);
 
-  // The reference for the check below is taken once, on the first frame of a
-  // walk. Retaking it every frame - which is what this did - keeps the
-  // distance travelled from it at zero, so the check never fires and the
-  // safeguard is dead while looking like it is there.
-  if (!g_calibrated && !g_calibrate_started) {
-    g_calibrate_started = true;
-    g_calibrate_from = here;
-    g_calibrate_heading = wanted;
-  }
+  // The stick is camera-relative, and the camera is the player's business -
+  // he turns it when he likes and it is wanted for aiming later. So the
+  // transform is not read out of the camera; it is measured off the
+  // character. He turns to face wherever the stick sends him, and his facing
+  // is already being read, so the offset between the two is observable and
+  // self-correcting - it follows the camera around without ever asking it,
+  // and a player spinning the view mid-walk is just another correction.
+  //
+  // The first fraction of a second of a walk is spent pushing straight
+  // forward and watching where he ends up pointing, which is the offset
+  // outright.
+  const bool bootstrapping = now < g_bootstrap_until;
+  const float emit = bootstrapping ? 0.0f : Normalise(wanted - g_offset);
 
-  // Where he actually went against where he was sent. Done once, after enough
-  // ground has been covered for the answer to mean something.
-  if (!g_calibrated && g_calibrate_started &&
-      Distance2D(g_calibrate_from, here) >= kCalibrateAfter) {
-    const float went = std::atan2(here.y - g_calibrate_from.y,
-                                  here.x - g_calibrate_from.x);
-    const float error = Normalise(went - g_calibrate_heading);
-    g_error_deg = error * 57.2957795f;
-    g_calibrated = true;
-    if (std::fabs(error) > 1.0472f) {   // more than sixty degrees out
-      g_flip_sideways = !g_flip_sideways;
+  // What the last press implied, folded in slowly. Slowly because he takes a
+  // few frames to come round, and a fast estimate would chase its own tail.
+  if (g_offset_seen) {
+    const float implied = Normalise(self.heading - g_last_emit);
+    const float step = Normalise(implied - g_offset);
+    g_offset = Normalise(g_offset + step * (bootstrapping ? 0.35f : 0.08f));
+  }
+  g_last_emit  = emit;
+  g_offset_seen = true;
+
+  // How far his facing is from where he is meant to be going. Kept for the
+  // panel, and used to notice the one thing measurement cannot fix by
+  // itself: a sideways axis that is the other way round makes every
+  // correction push him further out, so the error never comes down.
+  const float heading_error = Normalise(wanted - self.heading);
+  g_error_deg = heading_error * 57.2957795f;
+  if (!bootstrapping && std::fabs(heading_error) > 1.7453f) {
+    if (g_wrong_since == 0) g_wrong_since = now;
+    else if (now - g_wrong_since > 2000) {
+      g_hand = -g_hand;
       g_corrected = true;
-      LOG_INFO("walk: he went {:.0f} degrees off where he was sent, so the "
-               "sideways axis is the other way round - corrected", g_error_deg);
-    } else {
-      LOG_INFO("walk: heading agrees to within {:.0f} degrees", g_error_deg);
+      g_wrong_since = 0;
+      g_offset_seen = false;
+      g_bootstrap_until = now + kBootstrapMs;
+      LOG_INFO("walk: still pointing {:.0f} degrees away after correcting, so "
+               "the sideways axis is the other way round - flipped",
+               g_error_deg);
     }
+  } else {
+    g_wrong_since = 0;
   }
-
-  const float relative = Normalise(wanted - camera);
-  const float sideways = std::sin(relative) * (g_flip_sideways ? 1.0f : -1.0f);
-  const float forward  = std::cos(relative);
 
   // Ease off over the last few metres of the last leg.
   float pace = 1.0f;
@@ -246,8 +255,8 @@ bool DecideStick(short* out_x, short* out_y) {
   if (final_leg && !stepping && distance < kEaseInFrom)
     pace = kSlowest + (1.0f - kSlowest) * (distance / kEaseInFrom);
 
-  const float want_x = sideways * kFullStick * pace;
-  const float want_y = -forward * kFullStick * pace;
+  const float want_x = std::sin(emit) * g_hand * kFullStick * pace;
+  const float want_y = -std::cos(emit) * kFullStick * pace;
   g_stick_x += (want_x - g_stick_x) * kStickEase;
   g_stick_y += (want_y - g_stick_y) * kStickEase;
   *out_x = static_cast<short>(g_stick_x);
@@ -330,16 +339,15 @@ void WalkTo(std::vector<Vec3> route) {
   g_started_ms = GetTickCount64();
   g_progress_ms = g_started_ms;
   g_best_distance = 0;
-  g_calibrated = false;
-  g_calibrate_started = false;
+  g_offset_seen = false;
+  g_bootstrap_until = GetTickCount64() + kBootstrapMs;
+  g_wrong_since = 0;
   g_corrected = false;
+  g_error_deg = 0;
   g_sidesteps = 0;
   g_sidestep_until = 0;
   g_stick_x = 0;
   g_stick_y = 0;
-  g_error_deg = 0;
-  const samp::LocalPed self = samp::ReadLocalPed();
-  g_calibrate_from = self.valid ? Vec3{self.x, self.y, self.z} : g_route.front();
   LOG_INFO("walk: {} legs, first at ({:.1f}, {:.1f})", g_route.size(),
            g_route.front().x, g_route.front().y);
 }
