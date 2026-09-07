@@ -245,6 +245,25 @@ These only know about what is streamed in. "No ground" a few hundred metres
 away is the game saying how far it can see, and the planner says so rather
 than calling it a hole.
 
+### Where the offsets came from
+
+The reversed source at gitlab.com/gtahackers/gta-reversed settled in one
+reading what shape-searching had failed at for a day, and corrected a mistake
+that had been quietly steering the whole investigation:
+
+- `CPathFind` has **seventy-two** areas, not sixty-four - sixty-four of map and
+  eight of interiors - so the stride between its arrays is 288 bytes, and its
+  node counts are 32-bit. The search was looking for three 64-entry arrays 256
+  bytes apart, which is not a thing that exists there.
+- `CPad::DisablePlayerControls` is at **0x10E**. This module read 0xF6, which
+  lands inside `PCTempMouseState`, so every "the game says its controls are
+  enabled" it logged was reading mouse bytes. That reading was the reason the
+  game disabling the player's controls kept being ruled out.
+
+Both were confirmed against data already collected before being trusted: the
+node counts against the numbers walking each area's array had measured, and
+the layout arithmetic against `field_EA4`, which names its own offset.
+
 ### The path graph
 
 GTA keeps its roads and pavements as a graph of nodes in an 8x8 grid of
