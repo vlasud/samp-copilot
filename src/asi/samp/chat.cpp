@@ -89,6 +89,10 @@ constexpr std::size_t kMaxNameLength = 32;
 constexpr int kClockTicks   = 0;
 constexpr int kClockSeconds = 1;
 
+// Below this there are not enough entries for a repeated value to mean
+// anything: two entries agree on plenty by accident.
+constexpr int kMinSignatureVoters = 4;
+
 // The anchored search sweeps the whole process, which costs the game a visible
 // stutter, so it runs a few times and then gives up rather than every retry
 // for the rest of the session.
@@ -637,6 +641,96 @@ std::vector<Candidate> SweepRoots(const asi::mem::Module& samp,
   return found;
 }
 
+// Reads a four-byte value that need not be aligned. The client's structures
+// are packed, so none of these columns is on a boundary.
+inline std::uint32_t WordAt(const unsigned char* block, std::size_t at) {
+  std::uint32_t value = 0;
+  std::memcpy(&value, block + at, sizeof(value));
+  return value;
+}
+
+// What every entry of this array has in common.
+//
+// The search walks forward while the bytes keep looking like entries, and
+// what follows the chat log in the same allocation looks like one for a
+// while: SA-MP keeps its list of client command names right after it, and one
+// of them landed on exactly the right offset and was printed as the newest
+// line of chat. Nothing about the text could ever have told them apart - a
+// real line is allowed to be short and meaningless too.
+//
+// What tells them apart is the record around the text. Every real entry
+// carries the same handful of values beside its message: a kind, and pointers
+// to the things they are all drawn with. A command name carries none of them.
+// Which values those are is not knowledge about SA-MP - it is whatever turns
+// out to repeat.
+int FindSignature(const unsigned char* block, std::size_t size,
+                  const Shape& shape, std::int32_t text_delta,
+                  SignatureColumn* out, int max_out) {
+  int written = 0;
+  __try {
+    // Entries holding text, which are the ones that can vote.
+    int live[kMaxEntries];
+    int live_count = 0;
+    for (int k = 0; k < shape.count && live_count < kMaxEntries; ++k) {
+      const std::ptrdiff_t at =
+          static_cast<std::ptrdiff_t>(shape.reference) +
+          static_cast<std::ptrdiff_t>(k) * shape.stride + text_delta;
+      if (at < 0 || static_cast<std::size_t>(at) + 4 > size) continue;
+      if (block[at] == 0) continue;
+      live[live_count++] = k;
+    }
+    if (live_count < kMinSignatureVoters) return 0;
+    // One entry may be a stranger; that is the entire point of looking.
+    const int allowed = live_count / 5 + 1;
+
+    const std::int32_t span = static_cast<std::int32_t>(shape.stride);
+    for (std::int32_t delta = -span; delta < span && written < max_out;
+         ++delta) {
+      std::uint32_t best_value = 0;
+      int best_matches = 0;
+      bool readable = true;
+
+      for (int a = 0; a < live_count && readable; ++a) {
+        const std::ptrdiff_t at =
+            static_cast<std::ptrdiff_t>(shape.reference) +
+            static_cast<std::ptrdiff_t>(live[a]) * shape.stride + text_delta +
+            delta;
+        if (at < 0 || static_cast<std::size_t>(at) + 4 > size) {
+          readable = false;
+          break;
+        }
+        const std::uint32_t value = WordAt(block, static_cast<std::size_t>(at));
+        // Zero repeats in padding and in anything that was never written, so
+        // it is the one value that proves nothing.
+        if (value == 0) continue;
+
+        int matches = 0;
+        for (int b = 0; b < live_count; ++b) {
+          const std::ptrdiff_t other =
+              static_cast<std::ptrdiff_t>(shape.reference) +
+              static_cast<std::ptrdiff_t>(live[b]) * shape.stride + text_delta +
+              delta;
+          if (other < 0 || static_cast<std::size_t>(other) + 4 > size) continue;
+          if (WordAt(block, static_cast<std::size_t>(other)) == value)
+            ++matches;
+        }
+        if (matches > best_matches) {
+          best_matches = matches;
+          best_value   = value;
+        }
+      }
+
+      if (!readable) continue;
+      if (best_matches + allowed < live_count) continue;
+      out[written].delta = delta;
+      out[written].value = best_value;
+      ++written;
+    }
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+  }
+  return written;
+}
+
 // Turns a shape into a layout: which column is the message, which is the
 // speaker, and which way round the array runs.
 void Describe(const Candidate& candidate, const Shape& shape,
@@ -1038,6 +1132,11 @@ bool DumpChat() {
                 (layout.time_base == kClockTicks ? "ticks since boot"
                                                  : "seconds since 1970")
           : std::string("none found");
+  const std::string signature =
+      layout.signature_count > 0
+          ? std::to_string(layout.signature_count) +
+                " columns every entry shares"
+          : std::string("none - nothing repeats across the entries");
   const std::string order =
       layout.order_known
           ? std::string(layout.newest_first ? "newest first" : "oldest first")
@@ -1053,6 +1152,7 @@ bool DumpChat() {
                 "message    at the reference column\n"
                 "speaker    %s\n"
                 "timestamp  %s\n"
+                "signature  %s\n"
                 "order      %s\n",
                 static_cast<unsigned>(layout.block),
                 static_cast<unsigned>(layout.span), layout.root_rva,
@@ -1060,28 +1160,50 @@ bool DumpChat() {
                 layout.sentences,
                 layout.anchored ? "yes - the connect line is in it"
                                 : "no - shape only",
-                speaker.c_str(), stamp.c_str(), order.c_str());
+                speaker.c_str(), stamp.c_str(), signature.c_str(),
+                order.c_str());
   file << header << "\n";
 
-  // The raw bytes of the last few entries, so a column this pass got wrong
-  // can be read off by hand rather than guessed at again.
-  constexpr int kDumpEntries = 8;
-  const int from =
-      layout.entries > kDumpEntries ? layout.entries - kDumpEntries : 0;
-  for (int i = from; i < layout.entries; ++i) {
+  // The raw bytes of the entries that hold something, so a column this pass
+  // got wrong can be read off by hand rather than guessed at again. By index
+  // was useless: the last entries of the array are empty, which is the one
+  // thing about them nobody needed a dump to learn.
+  constexpr int kDumpEntries = 6;
+  int with_text[kDumpEntries] = {};
+  int shown = 0;
+  int holding = 0;
+  for (int i = 0; i < layout.entries; ++i) {
     const std::uintptr_t at =
         layout.first_text + static_cast<std::uintptr_t>(i) * layout.stride;
-    char title[96];
-    std::snprintf(title, sizeof(title), "\n--- entry %d at 0x%08X\n", i,
-                  static_cast<unsigned>(at));
+    if (ReadField(at).empty()) continue;
+    ++holding;
+    // The first few and the last few: the first are certainly lines, and
+    // whatever is wrong is at the end.
+    if (shown < kDumpEntries) {
+      with_text[shown++] = i;
+    } else {
+      for (int k = kDumpEntries / 2; k + 1 < kDumpEntries; ++k)
+        with_text[k] = with_text[k + 1];
+      with_text[kDumpEntries - 1] = i;
+    }
+  }
+
+  file << holding << " entries hold text; showing " << shown
+       << " of them, a whole record either side of the message column.\n";
+
+  for (int n = 0; n < shown; ++n) {
+    const int i = with_text[n];
+    const std::uintptr_t at =
+        layout.first_text + static_cast<std::uintptr_t>(i) * layout.stride;
+    const std::string text = ReadField(at);
+    char title[256];
+    std::snprintf(title, sizeof(title), "\n--- entry %d at 0x%08X: %.60s\n", i,
+                  static_cast<unsigned>(at), text.c_str());
     file << title;
 
-    const std::int32_t begin = layout.has_prefix && layout.prefix_delta < 0
-                                   ? layout.prefix_delta
-                                   : -16;
-    for (std::int32_t offset = begin;
-         offset < static_cast<std::int32_t>(layout.stride); offset += 16) {
-      char line[160];
+    const std::int32_t span = static_cast<std::int32_t>(layout.stride);
+    for (std::int32_t offset = -span; offset < span; offset += 16) {
+      char line[192];
       char ascii[17] = {};
       unsigned bytes[16] = {};
       for (int b = 0; b < 16; ++b) {

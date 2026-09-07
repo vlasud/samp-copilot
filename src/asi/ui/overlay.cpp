@@ -345,7 +345,10 @@ void DrawPanel() {
   const samp::ChatLayout& chat = samp::CachedChat();
   if (chat.valid) {
     char shape[128];
-    std::snprintf(shape, sizeof(shape), "%d lines, %s, %s", chat.populated,
+    // The count the reader actually produced, not the number of slots that
+    // held bytes: the two differ by whatever the signature threw out.
+    std::snprintf(shape, sizeof(shape), "%d lines, %s, %s",
+                  cached_chat.value("count", 0),
                   chat.anchored ? "anchored" : "by shape only",
                   chat.order_known
                       ? (chat.newest_first ? "newest first" : "oldest first")

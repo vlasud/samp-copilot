@@ -32,6 +32,19 @@
 
 namespace gtabot::samp {
 
+// A column that holds the same value in every entry of the array.
+//
+// Entries of a real array share whatever their record carries besides the
+// text - a kind, a vtable, pointers to the things they are all drawn with.
+// Those repeated values are the array's signature, and they are what says
+// where it ends: the search walks forward while the bytes keep looking like
+// entries, and what follows the chat log in the same allocation can look like
+// one for a while.
+struct SignatureColumn {
+  std::int32_t  delta = 0;   // from the message column
+  std::uint32_t value = 0;
+};
+
 struct ChatLayout {
   bool           valid = false;
   // The structure holding the ring, and where in samp.dll the pointer to it
@@ -67,6 +80,11 @@ struct ChatLayout {
   // How many candidate blocks were tried before this one, so a failure says
   // whether it looked in the wrong place or found nothing anywhere.
   int            roots_tried = 0;
+  // What every entry of this array has in common. An entry that shares none
+  // of it is not an entry of this array.
+  static constexpr int kMaxSignature = 16;
+  SignatureColumn signature[kMaxSignature] = {};
+  int             signature_count = 0;
   std::string    note;
 };
 
