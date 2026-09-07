@@ -9,6 +9,7 @@ add_library(bot MODULE
   game/paths.cpp
   nav/planner.cpp
   hooks/cursor.cpp
+  hooks/windowmode.cpp
   hooks/frame.cpp
   samp/version.cpp
   samp/discovery.cpp

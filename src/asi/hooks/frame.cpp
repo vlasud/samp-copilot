@@ -10,6 +10,7 @@
 
 #include "log.hpp"
 #include "state/memory.hpp"
+#include "hooks/windowmode.hpp"
 #include "ui/overlay.hpp"
 
 namespace gtabot::asi {
@@ -25,10 +26,18 @@ using PresentFn  = HRESULT(APIENTRY*)(IDirect3DDevice9*, const RECT*, const RECT
 using EndSceneFn = HRESULT(APIENTRY*)(IDirect3DDevice9*);
 using ResetFn    = HRESULT(APIENTRY*)(IDirect3DDevice9*, D3DPRESENT_PARAMETERS*);
 using CreateFn   = IDirect3D9*(WINAPI*)(UINT);
+// IDirect3D9::CreateDevice, so windowed mode can be forced at the one moment
+// the game's device is born. Slot 16 of the IDirect3D9 vtable.
+using D3DCreateDeviceFn = HRESULT(APIENTRY*)(IDirect3D9*, UINT, D3DDEVTYPE, HWND,
+                                             DWORD, D3DPRESENT_PARAMETERS*,
+                                             IDirect3DDevice9**);
+constexpr int kD3DCreateDeviceSlot = 16;
 
 PresentFn  g_original_present  = nullptr;
 EndSceneFn g_original_endscene = nullptr;
 ResetFn    g_original_reset    = nullptr;
+D3DCreateDeviceFn g_original_create_device = nullptr;
+void*      g_create_device_target = nullptr;
 
 // Entry points we patched, plus the bytes MinHook left there. Comparing the
 // two later is what tells a stalled game apart from an unhooked one.
@@ -144,14 +153,40 @@ HRESULT APIENTRY HookedReset(IDirect3DDevice9* device,
   // resets it. Anything holding D3D resources has to let go first, or the
   // reset fails and the next frame draws with dead handles.
   Overlay::OnLostDevice();
+  // Keep it windowed across every reset the game does - a resolution change or
+  // an alt-tab would otherwise put it back to fullscreen.
+  WindowMode::ForceWindowed(params);
   const HRESULT hr = g_original_reset(device, params);
   LOG_INFO("Reset returned 0x{:08X}", static_cast<unsigned int>(hr));
+  if (SUCCEEDED(hr) && params != nullptr)
+    WindowMode::ApplyWindowStyle(params->hDeviceWindow);
+  return hr;
+}
+
+// The game's own CreateDevice, so the very first device is windowed and the
+// game never enters exclusive fullscreen at all.
+HRESULT APIENTRY HookedCreateDevice(IDirect3D9* self, UINT adapter,
+                                    D3DDEVTYPE type, HWND focus, DWORD flags,
+                                    D3DPRESENT_PARAMETERS* params,
+                                    IDirect3DDevice9** out) {
+  const bool windowed = WindowMode::Enabled() && params != nullptr;
+  HWND window = nullptr;
+  if (windowed) {
+    window = params->hDeviceWindow ? params->hDeviceWindow : focus;
+    WindowMode::ForceWindowed(params);
+    LOG_INFO("forcing the game's device to windowed at creation");
+  }
+  const HRESULT hr =
+      g_original_create_device(self, adapter, type, focus, flags, params, out);
+  if (windowed && SUCCEEDED(hr)) WindowMode::ApplyWindowStyle(window);
   return hr;
 }
 
 // Creates a device only to read its vtable, then tears everything down, so no
 // device of ours lingers to compete with the game's.
-bool ResolveVTable(void** present_out, void** endscene_out, void** reset_out) {
+bool ResolveVTable(void** present_out, void** endscene_out, void** reset_out,
+                   void** create_device_out) {
+  *create_device_out = nullptr;
   HMODULE d3d9 = LoadLibraryW(L"d3d9.dll");
   if (!d3d9) {
     LOG_ERROR("d3d9.dll is not loadable");
@@ -182,6 +217,13 @@ bool ResolveVTable(void** present_out, void** endscene_out, void** reset_out) {
   pp.SwapEffect       = D3DSWAPEFFECT_DISCARD;
   pp.BackBufferFormat = D3DFMT_UNKNOWN;
   pp.hDeviceWindow    = window;
+
+  // The IDirect3D9 vtable is shared with the game's own IDirect3D9, so its
+  // CreateDevice entry is the game's too.
+  {
+    void** d3d_vtable = *reinterpret_cast<void***>(d3d);
+    *create_device_out = d3d_vtable[kD3DCreateDeviceSlot];
+  }
 
   IDirect3DDevice9* device = nullptr;
   HRESULT hr = d3d->CreateDevice(
@@ -224,7 +266,8 @@ bool FrameHook::Install(FrameCallback on_frame) {
   void* present  = nullptr;
   void* endscene = nullptr;
   void* reset    = nullptr;
-  if (!ResolveVTable(&present, &endscene, &reset)) return false;
+  void* create_device = nullptr;
+  if (!ResolveVTable(&present, &endscene, &reset, &create_device)) return false;
   // Which module owns each slot matters: another overlay (NVIDIA, Steam,
   // sampvoice) may already have replaced some of them with its own handlers,
   // in which case we are chaining onto its hook rather than onto d3d9.
@@ -247,6 +290,17 @@ bool FrameHook::Install(FrameCallback on_frame) {
                                     reinterpret_cast<void**>(&g_original_endscene));
   const MH_STATUS r = MH_CreateHook(reset, &HookedReset,
                                     reinterpret_cast<void**>(&g_original_reset));
+  // Only worth hooking if windowed mode is on; if the game already made its
+  // device before we got here, the Reset hook forces windowed on the first
+  // reset instead.
+  MH_STATUS c = MH_ERROR_NOT_CREATED;
+  if (WindowMode::Enabled() && create_device) {
+    c = MH_CreateHook(create_device, &HookedCreateDevice,
+                      reinterpret_cast<void**>(&g_original_create_device));
+    if (c == MH_OK) g_create_device_target = create_device;
+    else LOG_WARN("could not hook CreateDevice ({}) - windowed mode will apply "
+                  "on the first device reset instead", static_cast<int>(c));
+  }
   if (r != MH_OK)
     LOG_ERROR("Reset is unhooked ({}) - the overlay will not survive a device "
               "loss", static_cast<int>(r));
