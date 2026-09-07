@@ -63,6 +63,17 @@ bool CallsTrusted();
 // height below him. Game thread only. Returns the verdict and says why.
 bool SelfCheck(const Vec3& player_position, const char** why);
 
+// The same treatment for the line-of-sight call, which never had it.
+//
+// It is the one call no successful session ever made and every failing one
+// made in bulk, and it answers "no headroom" for a man standing upright -
+// which is not an answer a working line-of-sight test gives. So it has to
+// earn its place against two facts about where the player is standing: the
+// space between his knees and his head is clear, and a line from above him to
+// below the ground is not. Until it passes, it is never called.
+bool SelfCheckLineOfSight(const Vec3& player_position, const char** why);
+bool LineOfSightTrusted();
+
 // The ground below (x, y, z), searching downwards from z. False when the
 // game finds none - which is also the answer for anywhere not streamed in.
 bool GroundBelow(const Vec3& at, float* ground_z);

@@ -512,6 +512,8 @@ void DrawPanel() {
       Label("game", "movement OFF - tick to arm the game calls", kGrey);
     } else if (!game::CallsTrusted()) {
       Label("game", "armed, verifying (on foot, on the ground?)", kAmber);
+    } else if (!game::LineOfSightTrusted()) {
+      Label("game", "armed - ground only, line of sight not verified", kAmber);
     } else {
       Label("game", "armed and verified", kGreen);
     }

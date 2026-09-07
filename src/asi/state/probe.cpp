@@ -112,6 +112,8 @@ json BuildWorldSnapshot() {
     const game::Vec3 at{self.x, self.y, self.z};
     const char* why = "";
     if (!game::CallsTrusted()) game::SelfCheck(at, &why);
+    if (game::CallsTrusted() && !game::LineOfSightTrusted())
+      game::SelfCheckLineOfSight(at, &why);
     if (game::CallsTrusted()) {
       game::ResolvePaths(at);
       float ground = 0;

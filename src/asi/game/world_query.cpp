@@ -40,6 +40,8 @@ constexpr float kPedHeightMin = 0.3f;
 constexpr float kPedHeightMax = 1.8f;
 
 std::atomic<bool> g_trusted{false};
+std::atomic<bool> g_los_trusted{false};
+std::atomic<bool> g_los_refused{false};
 std::atomic<bool> g_enabled{false};
 // When arming happened, so the stages can advance from it.
 std::atomic<unsigned long long> g_armed_ms{0};
@@ -183,13 +185,84 @@ bool GroundBelow(const Vec3& at, float* ground_z) {
   return fn != nullptr && CallGround(fn, at.x, at.y, at.z, ground_z);
 }
 
+namespace {
+bool RawLineClear(const Vec3& a, const Vec3& b, bool* clear) {
+  const auto fn = reinterpret_cast<LineClearFn>(At(kGetIsLineOfSightClear));
+  return fn != nullptr && CallLineClear(fn, &a, &b, clear);
+}
+}  // namespace
+
+bool LineOfSightTrusted() {
+  return g_los_trusted.load(std::memory_order_acquire);
+}
+
+bool SelfCheckLineOfSight(const Vec3& player, const char** why) {
+  if (g_los_trusted.load()) {
+    *why = "already verified";
+    return true;
+  }
+  if (g_los_refused.load()) {
+    *why = "refused earlier";
+    return false;
+  }
+  if (!CallsTrusted()) {
+    *why = "the ground call is not verified yet";
+    return false;
+  }
+  float ground = 0;
+  const auto ground_fn =
+      reinterpret_cast<FindGroundFn>(At(kFindGroundZFor3DCoord));
+  if (ground_fn == nullptr ||
+      !CallGround(ground_fn, player.x, player.y, player.z + 1.0f, &ground)) {
+    *why = "no ground under the player to measure against";
+    return false;
+  }
+
+  // Where he is standing is clear from knee to head, or nobody could stand
+  // there.
+  bool standing_clear = false;
+  if (!RawLineClear(Vec3{player.x, player.y, ground + 0.4f},
+                    Vec3{player.x, player.y, ground + 1.6f}, &standing_clear)) {
+    *why = "the call faulted";
+    g_los_refused.store(true);
+    return false;
+  }
+  // And a line from above him to well under the ground is not clear, because
+  // the ground is in the way.
+  bool through_ground = false;
+  if (!RawLineClear(Vec3{player.x, player.y, ground + 4.0f},
+                    Vec3{player.x, player.y, ground - 4.0f}, &through_ground)) {
+    *why = "the call faulted";
+    g_los_refused.store(true);
+    return false;
+  }
+
+  if (!standing_clear || through_ground) {
+    g_los_refused.store(true);
+    LOG_ERROR("line of sight refused: where the player stands reads {}, and a "
+              "line through the ground reads {}. That is not what a working "
+              "line-of-sight test says, so it is not being called - which is "
+              "what was taking the player's input away",
+              standing_clear ? "clear" : "BLOCKED",
+              through_ground ? "CLEAR" : "blocked");
+    *why = "it disagrees with where the player is standing";
+    return false;
+  }
+
+  g_los_trusted.store(true, std::memory_order_release);
+  LOG_INFO("line of sight verified: clear where he stands, blocked through "
+           "the ground");
+  *why = "it agrees with where the player is standing";
+  return true;
+}
+
 bool LineClear(const Vec3& a, const Vec3& b) {
   if (!CallsTrusted()) return false;
+  if (!g_los_trusted.load(std::memory_order_acquire)) return false;
   if (CurrentStage() < Stage::kAndLineOfSight) return false;
   if (!TakeCallSlot()) return false;
-  const auto fn = reinterpret_cast<LineClearFn>(At(kGetIsLineOfSightClear));
   bool clear = false;
-  return fn != nullptr && CallLineClear(fn, &a, &b, &clear) && clear;
+  return RawLineClear(a, b, &clear) && clear;
 }
 
 bool ControlsDisabled(bool* disabled) {
