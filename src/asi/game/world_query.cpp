@@ -6,6 +6,7 @@
 #include <cmath>
 
 #include "game/exe.hpp"
+#include "state/memory.hpp"
 #include "log.hpp"
 
 namespace gtabot::game {
@@ -16,6 +17,12 @@ namespace {
 constexpr std::uint32_t kFindGroundZFor3DCoord = 0x5696C0;
 constexpr std::uint32_t kGetIsLineOfSightClear = 0x56A490;
 constexpr std::uint32_t kCalcScreenCoors       = 0x71DA00;
+
+// CPad for the first player, and the member the game consults before it
+// lets him move. Not a call - a read, so it needs no self-check beyond the
+// build fingerprint.
+constexpr std::uint32_t kPad0                   = 0xB73458;
+constexpr std::uint32_t kPadDisablePlayerControls = 0xF6;
 
 using FindGroundFn = float(__cdecl*)(float x, float y, float z, bool* found,
                                      void** entity);
@@ -114,6 +121,16 @@ bool LineClear(const Vec3& a, const Vec3& b) {
   const auto fn = reinterpret_cast<LineClearFn>(At(kGetIsLineOfSightClear));
   bool clear = false;
   return fn != nullptr && CallLineClear(fn, &a, &b, &clear) && clear;
+}
+
+bool ControlsDisabled(bool* disabled) {
+  const std::uintptr_t pad = At(kPad0);
+  if (pad == 0) return false;
+  std::uint16_t value = 0;
+  if (!asi::mem::Read<std::uint16_t>(pad + kPadDisablePlayerControls, &value))
+    return false;
+  *disabled = value != 0;
+  return true;
 }
 
 bool ToScreen(const Vec3& world, float* sx, float* sy) {

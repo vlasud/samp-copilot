@@ -131,14 +131,15 @@ bool IsKeyboardMessage(UINT message) {
 LRESULT CALLBACK HookedWndProc(HWND window, UINT message, WPARAM wparam,
                                LPARAM lparam) {
   if (g_mode == Mode::kInteractive && ImGui::GetCurrentContext()) {
-    ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
-    const ImGuiIO& io = ImGui::GetIO();
-    if (io.WantCaptureMouse && IsMouseMessage(message)) return TRUE;
-    // Keys reach the game unless the panel is actually taking text. The game
-    // reads its keyboard from these messages, so swallowing them is the
-    // character standing still - and WantCaptureKeyboard is true whenever
-    // any item is active, which is a far wider net than typing.
-    if (io.WantTextInput && IsKeyboardMessage(message)) return TRUE;
+    // The panel never sees a key. It has nothing to type into, the game
+    // reads its keyboard from these very messages, and keeping ImGui out of
+    // that path entirely is the only way to be sure it is not the panel
+    // standing between a key and the character.
+    if (!IsKeyboardMessage(message)) {
+      ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
+      const ImGuiIO& io = ImGui::GetIO();
+      if (io.WantCaptureMouse && IsMouseMessage(message)) return TRUE;
+    }
   }
   return CallWindowProcW(g_previous_wndproc, window, message, wparam, lparam);
 }
@@ -535,17 +536,38 @@ void DrawPanel() {
       Label("plan", "none - ask for one below or via plan_path", kGrey);
     }
 
-    // Who has the input right now. If the character will not move, this
-    // line is the first thing to read.
+    // Who has the input right now. If the character will not move, these
+    // two lines are the first thing to read: the second is the game's own
+    // switch, the one SA-MP throws for a dialog and the server throws to
+    // freeze a player - and a character held by that is not held by us.
     {
-      const ImGuiIO& io = ImGui::GetIO();
       char text[128];
-      std::snprintf(text, sizeof(text), "%s, mouse %s, keys %s%s",
+      const bool w = (GetAsyncKeyState('W') & 0x8000) != 0;
+      const bool a = (GetAsyncKeyState('A') & 0x8000) != 0;
+      const bool s_ = (GetAsyncKeyState('S') & 0x8000) != 0;
+      const bool d = (GetAsyncKeyState('D') & 0x8000) != 0;
+      std::snprintf(text, sizeof(text), "%s, mouse %s, keys to the game%s%s%s%s%s",
                     g_mode == Mode::kInteractive ? "interactive" : "passive",
                     g_mode == Mode::kInteractive ? "ours" : "the game's",
-                    io.WantTextInput ? "ours (typing)" : "the game's",
-                    g_show_fan ? "" : "");
+                    (w || a || s_ || d) ? "  held:" : "", w ? " W" : "",
+                    a ? " A" : "", s_ ? " S" : "", d ? " D" : "");
       Label("input", text, g_mode == Mode::kInteractive ? kAmber : kGrey);
+
+      bool disabled = false;
+      if (game::ControlsDisabled(&disabled)) {
+        Label("controls", disabled ? "DISABLED by the game (dialog, or the "
+                                     "server froze the player)"
+                                   : "enabled by the game",
+              disabled ? kRed : kGrey);
+        static bool last = false;
+        static bool known = false;
+        if (!known || disabled != last) {
+          known = true;
+          last  = disabled;
+          LOG_INFO("the game reports player controls {}",
+                   disabled ? "DISABLED" : "enabled");
+        }
+      }
       if (g_show_fan) {
         std::snprintf(text, sizeof(text), "%d calls, %llu ms per refresh",
                       g_fan_calls.load(),

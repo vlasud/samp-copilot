@@ -48,4 +48,10 @@ bool LineClear(const Vec3& a, const Vec3& b);
 // the camera.
 bool ToScreen(const Vec3& world, float* sx, float* sy);
 
+// Whether the game itself has switched the player's controls off. This is
+// the flag SA-MP sets while a dialog is up, and the one the server sets by
+// freezing a player. A character that will not move while this is set is not
+// an input problem of ours. Read-only; false when the build is unknown.
+bool ControlsDisabled(bool* disabled);
+
 }  // namespace gtabot::game

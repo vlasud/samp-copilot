@@ -6,10 +6,13 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
+#include <string>
 
 #include "game/exe.hpp"
 #include "log.hpp"
 #include "state/memory.hpp"
+#include "types.hpp"
 
 namespace gtabot::game {
 namespace {
@@ -155,6 +158,74 @@ std::uintptr_t FindNodeArray(std::uintptr_t begin, std::uintptr_t end,
     if (got < want) break;
   }
   return 0;
+}
+
+// How many nodes an area's array actually holds, read off the array itself:
+// every node carries its own index, so the array ends where that stops
+// matching. This needs no count table at all.
+std::uint32_t WalkedCount(std::uintptr_t pointer, int area) {
+  std::uint32_t n = 0;
+  PathNode node;
+  while (n < kMaxNodesPerArea &&
+         ReadNodeAt(pointer + n * kNodeSize, &node) && node.area == area &&
+         node.index == n)
+    ++n;
+  return n;
+}
+
+// Written once when the counts cannot be found: every 64-word row around
+// the node array, with the entries for the loaded areas shown - the count
+// tables are the rows whose entries for exactly those areas are the numbers
+// the arrays were just measured to hold.
+void DumpAround(std::uintptr_t nodes, const std::uint32_t* node_pointers) {
+  static bool written = false;
+  if (written) return;
+  written = true;
+
+  const std::string path = ModuleDirectory() + "bot.paths-dump.txt";
+  std::ofstream file(path, std::ios::trunc);
+  if (!file) return;
+
+  const std::uintptr_t base = Detect().base;
+  file << "gtabot path graph dump" << std::endl
+       << "======================" << std::endl << std::endl
+       << "node array at gta_sa.exe+0x" << std::hex << (nodes - base) << std::dec
+       << std::endl << std::endl << "loaded areas, with the node count walked "
+       << "off each array:" << std::endl;
+  int loaded[kPathAreas];
+  int loaded_count = 0;
+  for (int i = 0; i < kPathAreas; ++i) {
+    if (node_pointers[i] == 0) continue;
+    loaded[loaded_count++] = i;
+    file << "  area " << i << "  nodes at 0x" << std::hex << node_pointers[i]
+         << std::dec << "  holds " << WalkedCount(node_pointers[i], i)
+         << " nodes" << std::endl;
+  }
+
+  file << std::endl << "64-word rows around the node array (offset from it, "
+       << "how many entries are non-zero, then the entries for the loaded "
+       << "areas):" << std::endl;
+  for (std::ptrdiff_t offset = -0x1000; offset <= 0x1800; offset += 0x100) {
+    std::uint32_t row[kPathAreas];
+    if (asi::mem::ReadGuarded(nodes + offset, row, sizeof(row)) != sizeof(row))
+      continue;
+    int nonzero = 0;
+    for (int i = 0; i < kPathAreas; ++i)
+      if (row[i] != 0) ++nonzero;
+    char head[64];
+    std::snprintf(head, sizeof(head), "  %+6d  nonzero %2d  ",
+                  static_cast<int>(offset), nonzero);
+    file << head;
+    for (int k = 0; k < loaded_count; ++k) {
+      char cell[48];
+      std::snprintf(cell, sizeof(cell), "[%d]=0x%08X ", loaded[k],
+                    row[loaded[k]]);
+      file << cell;
+    }
+    file << std::endl;
+  }
+  file << std::endl;
+  LOG_INFO("wrote {}", path);
 }
 
 // Said once per distinct reason, so a graph that never resolves leaves a
@@ -354,6 +425,7 @@ const PathLayout& ResolvePaths(const Vec3& player) {
     layout.note = "node array found, but no three count arrays where one is "
                   "the sum of the other two" + std::string(where);
     NoteFailure(layout.note);
+    DumpAround(nodes, node_pointers);
     g_layout = layout;
     return g_layout;
   }
