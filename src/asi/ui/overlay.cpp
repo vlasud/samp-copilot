@@ -232,10 +232,16 @@ void PollToggle() {
 
 void DrawPanel() {
   static json               cached;
+  static json               cached_chat;
   static unsigned long long cached_at = 0;
   const unsigned long long now = GetTickCount64();
   if (cached.is_null() || now - cached_at >= kRefreshMs) {
     cached    = BuildStatusSnapshot();
+    // Cached alongside the status for the same reason: reading the ring means
+    // validating an address per entry, and doing that ninety times a second
+    // for six lines a person is reading is pure waste.
+    cached_chat = samp::CachedChat().valid ? samp::ReadChat(kChatLines)
+                                           : json::object();
     cached_at = now;
   }
 
@@ -302,14 +308,14 @@ void DrawPanel() {
   const samp::ChatLayout& chat = samp::CachedChat();
   if (chat.valid) {
     char shape[96];
-    std::snprintf(shape, sizeof(shape), "%d lines, stride %u, %s",
+    std::snprintf(shape, sizeof(shape), "%d lines, stride %u, %s, %s",
                   chat.populated, chat.stride,
+                  chat.anchored ? "anchored" : "shape only",
                   chat.order_known
                       ? (chat.newest_first ? "newest first" : "oldest first")
                       : "order unknown");
     Label("chat", shape, kGreen);
-    const json lines = samp::ReadChat(kChatLines);
-    for (const json& line : lines.value("lines", json::array())) {
+    for (const json& line : cached_chat.value("lines", json::array())) {
       const std::string from = line.value("from", std::string{});
       ImGui::TextWrapped("  %s%s", from.empty() ? "" : (from + "  ").c_str(),
                          line.value("text", std::string{}).c_str());

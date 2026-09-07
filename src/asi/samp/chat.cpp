@@ -46,12 +46,29 @@ constexpr std::size_t kMaxFieldLength = 256;
 // structure has, bounded so the sweep cannot run away.
 constexpr int kReferencesPrimary  = 512;
 constexpr int kReferencesFallback = 128;
-constexpr int kMaxRoots     = 512;
+constexpr int kMaxRoots     = 256;
 constexpr int kMaxColumns   = 192;
+// Candidates that get the full stride search. The cheap filter below decides
+// which ones, and this caps what the expensive half can ever cost.
+constexpr int kMaxSearches  = 48;
 // A block too small to hold a chat log is not one, and rejecting it up front
 // is what keeps the fallback sweep affordable.
 constexpr std::size_t kMinBlockSpan = 16u * 1024;
-constexpr int         kMinBlockStrings = 24;
+constexpr int         kMinBlockStrings = 16;
+constexpr std::size_t kFilterScan   = 8u * 1024;
+// How far into a swept candidate to look. The documented pointer gets the full
+// window because there is only one of it.
+constexpr std::size_t kSweepScan    = 32u * 1024;
+
+// The whole of resolution runs inside a frame, so it gets a deadline. Without
+// one a search that turns out to be expensive on some build does not slow the
+// game down, it stops it - which is exactly what an unbounded sweep of
+// samp.dll's pointers did here.
+constexpr unsigned long long kResolveBudgetMs = 40;
+// The anchored search sweeps the heap, which no budget can make quick. It is
+// allowed a visible stutter because it only runs a few times in a session and
+// only when the cheap search has already failed.
+constexpr unsigned long long kAnchorBudgetMs = 2000;
 
 // A tick count in a chat entry is minutes or hours old, never days, and never
 // in the future.
@@ -65,6 +82,9 @@ constexpr int kMinTimeSamples = 8;
 constexpr std::size_t kScanBudget    = 768u * 1024 * 1024;
 constexpr std::size_t kMaxAnchorHits = 64;
 constexpr int         kMaxAnchoredAttempts = 3;
+// Confirming a stride means reading every entry of the ring it implies, so
+// the number of strides allowed to get that far is capped too.
+constexpr int         kMaxConfirmations = 8;
 
 // Resolution walks a lot of memory, so a failure backs off rather than
 // re-running on every frame.
@@ -154,11 +174,11 @@ int CountSentences(const unsigned char* block, std::size_t size,
 // not be able to take the game down for that. No C++ objects here, which is
 // what __try requires.
 bool SearchRing(const unsigned char* block, std::size_t size,
-                int max_references, Shape* best) {
+                std::size_t scan, int max_references, Shape* best) {
   Shape winner;
   bool found = false;
   __try {
-    const std::size_t limit = size < kBlockScan ? size : kBlockScan;
+    const std::size_t limit = size < scan ? size : scan;
     int references = 0;
     for (std::size_t at = 0; at + 4 < limit && references < max_references;
          ++at) {
@@ -436,10 +456,10 @@ std::size_t ReadableSpan(std::uintptr_t base, std::size_t max) {
 // A cheap first pass over a candidate block, so the fallback sweep does not
 // run the full stride search on every pointer samp.dll happens to hold.
 int CountFieldStarts(const unsigned char* block, std::size_t size,
-                     int stop_at) {
+                     std::size_t scan, int stop_at) {
   int count = 0;
   __try {
-    const std::size_t limit = size < 0x10000u ? size : 0x10000u;
+    const std::size_t limit = size < scan ? size : scan;
     for (std::size_t at = 0; at + 4 < limit && count < stop_at; ++at)
       if (FieldStart(block, limit, at)) ++count;
   } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -453,32 +473,63 @@ struct Candidate {
   std::uint32_t  rva   = 0;
 };
 
-// Every pointer samp.dll holds that leads somewhere big enough and texty
-// enough to be a chat log.
-std::vector<Candidate> SweepRoots(const asi::mem::Module& samp) {
-  std::vector<Candidate> found;
-  const std::vector<asi::mem::Region> regions = asi::mem::ReadableRegions(&samp);
+// Which committed region an address falls in, by binary search over a list
+// taken once. The sweep looks at hundreds of thousands of words, and asking
+// the kernel about each one is the difference between a search and a freeze -
+// the first version did exactly that and hung the game on the loading screen.
+const asi::mem::Region* RegionFor(const std::vector<asi::mem::Region>& regions,
+                                  std::uintptr_t address) {
+  std::size_t low = 0;
+  std::size_t high = regions.size();
+  while (low < high) {
+    const std::size_t mid = (low + high) / 2;
+    if (address < regions[mid].base) {
+      high = mid;
+    } else if (address >= regions[mid].base + regions[mid].size) {
+      low = mid + 1;
+    } else {
+      return &regions[mid];
+    }
+  }
+  return nullptr;
+}
 
-  for (const asi::mem::Region& region : regions) {
+// Every pointer samp.dll holds that leads somewhere big enough and texty
+// enough to be a chat log. Bounded twice over - by a count and by a clock -
+// because this runs inside a frame.
+std::vector<Candidate> SweepRoots(const asi::mem::Module& samp,
+                                  unsigned long long deadline) {
+  std::vector<Candidate> found;
+  const std::vector<asi::mem::Region> everything = asi::mem::ReadableRegions();
+  const std::vector<asi::mem::Region> data = asi::mem::ReadableRegions(&samp);
+
+  for (const asi::mem::Region& region : data) {
     if (!region.is_writable) continue;  // a root pointer lives in writable data
     const auto* words = reinterpret_cast<const std::uint32_t*>(region.base);
     const std::size_t count = region.size / sizeof(std::uint32_t);
 
     for (std::size_t i = 0; i < count; ++i) {
       if (found.size() >= static_cast<std::size_t>(kMaxRoots)) return found;
-      const std::uintptr_t value = words[i];
-      if (!IsHeapPointer(value)) continue;
+      if ((i & 0x3FF) == 0 && GetTickCount64() > deadline) return found;
 
-      const std::size_t span = ReadableSpan(value, kBlockScan);
+      const std::uintptr_t value = words[i];
+      if (value < 0x00010000u || value >= 0xC0000000u) continue;
+      if (value % 4 != 0) continue;
+
+      const asi::mem::Region* target = RegionFor(everything, value);
+      if (target == nullptr) continue;
+      if (!target->is_private || !target->is_writable) continue;
+      const std::size_t span = target->base + target->size - value;
       if (span < kMinBlockSpan) continue;
-      if (CountFieldStarts(reinterpret_cast<const unsigned char*>(value), span,
-                           kMinBlockStrings) < kMinBlockStrings)
-        continue;
 
       bool already = false;
       for (const Candidate& seen : found)
         if (seen.block == value) { already = true; break; }
       if (already) continue;
+
+      if (CountFieldStarts(reinterpret_cast<const unsigned char*>(value), span,
+                           kFilterScan, kMinBlockStrings) < kMinBlockStrings)
+        continue;
 
       Candidate candidate;
       candidate.block = value;
@@ -550,11 +601,11 @@ void Describe(const Candidate& candidate, const Shape& shape,
   }
 }
 
-bool TryCandidate(const Candidate& candidate, int max_references,
-                  ChatLayout* layout) {
+bool TryCandidate(const Candidate& candidate, std::size_t scan,
+                  int max_references, ChatLayout* layout) {
   Shape shape;
   if (!SearchRing(reinterpret_cast<const unsigned char*>(candidate.block),
-                  candidate.span, max_references, &shape))
+                  candidate.span, scan, max_references, &shape))
     return false;
   Describe(candidate, shape, layout);
   return true;
@@ -579,14 +630,22 @@ bool ContainsHost(const ChatLayout& layout, const std::string& host) {
 // off the launcher command line and was confirmed against CNetGame. So a copy
 // of it that is neither the command line nor CNetGame is a line of chat, and
 // the array it sits in is the chat log - no shape argument required.
-bool SearchByConnectLine(const std::string& host, ChatLayout* layout) {
+bool SearchByConnectLine(const std::string& host, unsigned long long deadline,
+                         ChatLayout* layout) {
   if (host.empty()) return false;
 
-  const std::vector<asi::mem::Region> regions = asi::mem::ReadableRegions();
+  // Private regions only. The chat log is a heap allocation, and skipping
+  // everything the process merely mapped - images, textures, fonts - takes
+  // most of the address space out of the scan without taking anything that
+  // could hold the line we are after.
+  std::vector<asi::mem::Region> regions;
+  for (const asi::mem::Region& region : asi::mem::ReadableRegions())
+    if (region.is_private && region.is_writable) regions.push_back(region);
   const std::vector<asi::mem::Hit> hits =
       asi::mem::Scan(regions, host, kMaxAnchorHits, kScanBudget);
 
   for (const asi::mem::Hit& hit : hits) {
+    if (GetTickCount64() > deadline) break;
     MEMORY_BASIC_INFORMATION mbi{};
     if (!VirtualQuery(reinterpret_cast<LPCVOID>(hit.address), &mbi,
                       sizeof(mbi)))
@@ -606,7 +665,9 @@ bool SearchByConnectLine(const std::string& host, ChatLayout* layout) {
     std::size_t at = hit.address - candidate.block;
     while (at > 0 && Printable(block[at - 1])) --at;
 
+    int confirmations = 0;
     for (std::uint32_t stride = kMinStride; stride <= kMaxStride; stride += 4) {
+      if (confirmations >= kMaxConfirmations) break;
       std::size_t first = at;
       int count = 0;
       ExpandRun(block, candidate.span, at, stride, &first, &count);
@@ -625,6 +686,7 @@ bool SearchByConnectLine(const std::string& host, ChatLayout* layout) {
 
       ChatLayout attempt;
       Describe(candidate, shape, &attempt);
+      ++confirmations;
       // The stride is only right if the connect line is still in the column
       // the description settled on. A stride that is a multiple of the true
       // one passes every test above and reads every other line.
@@ -664,7 +726,19 @@ const ChatLayout& ResolveChat() {
     g_layout    = layout;
     return g_layout;
   }
-  const std::string host = ResolveLayout().host;
+
+  // Nothing runs until the client is actually in a server. There is no chat to
+  // find before that, and searching for it anyway is what hung the game on the
+  // loading screen - the sweep has no reason to be cheap when it is guaranteed
+  // to find nothing.
+  const Layout& client = ResolveLayout();
+  if (!client.valid) {
+    layout.note = "waiting to be in a server: " + client.note;
+    g_layout    = layout;
+    return g_layout;
+  }
+  const std::string host = client.host;
+  const unsigned long long deadline = GetTickCount64() + kResolveBudgetMs;
 
   // The documented pointer first. It costs one read to try, and when it is
   // right nothing else has to run.
@@ -677,18 +751,22 @@ const ChatLayout& ResolveChat() {
     candidate.rva   = kChatPointerRva;
     layout.roots_tried = 1;
     if (candidate.span >= kMinBlockSpan &&
-        TryCandidate(candidate, kReferencesPrimary, &layout)) {
+        TryCandidate(candidate, kBlockScan, kReferencesPrimary, &layout)) {
       layout.valid = true;
       layout.note  = "chat found through the documented pointer";
     }
   }
 
   if (!layout.valid) {
-    const std::vector<Candidate> roots = SweepRoots(samp);
+    const std::vector<Candidate> roots = SweepRoots(samp, deadline);
     layout.roots_tried += static_cast<int>(roots.size());
+    int searched = 0;
     for (const Candidate& candidate : roots) {
+      if (++searched > kMaxSearches) break;
+      if (GetTickCount64() > deadline) break;
       ChatLayout attempt;
-      if (!TryCandidate(candidate, kReferencesFallback, &attempt)) continue;
+      if (!TryCandidate(candidate, kSweepScan, kReferencesFallback, &attempt))
+        continue;
       // The best of the sweep, not the first: several blocks hold text at a
       // regular stride, and the chat log is the one full of sentences.
       if (attempt.sentences <= layout.sentences) continue;
@@ -710,7 +788,7 @@ const ChatLayout& ResolveChat() {
       g_anchored_attempts < kMaxAnchoredAttempts && !host.empty()) {
     ++g_anchored_attempts;
     ChatLayout anchored;
-    if (SearchByConnectLine(host, &anchored)) {
+    if (SearchByConnectLine(host, deadline + kAnchorBudgetMs, &anchored)) {
       anchored.roots_tried = layout.roots_tried;
       layout = anchored;
     }
