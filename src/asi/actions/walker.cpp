@@ -66,6 +66,7 @@ float             g_remaining = 0;
 // not, because walking away from a target is obvious in the first metre.
 bool  g_flip_sideways = false;
 bool  g_calibrated = false;
+bool  g_calibrate_started = false;
 bool  g_corrected = false;
 float g_error_deg = 0;
 Vec3  g_calibrate_from;
@@ -162,9 +163,20 @@ bool DecideStick(short* out_x, short* out_y) {
 
   const float wanted = std::atan2(target.y - here.y, target.x - here.x);
 
+  // The reference for the check below is taken once, on the first frame of a
+  // walk. Retaking it every frame - which is what this did - keeps the
+  // distance travelled from it at zero, so the check never fires and the
+  // safeguard is dead while looking like it is there.
+  if (!g_calibrated && !g_calibrate_started) {
+    g_calibrate_started = true;
+    g_calibrate_from = here;
+    g_calibrate_heading = wanted;
+  }
+
   // Where he actually went against where he was sent. Done once, after enough
   // ground has been covered for the answer to mean something.
-  if (!g_calibrated && Distance2D(g_calibrate_from, here) >= kCalibrateAfter) {
+  if (!g_calibrated && g_calibrate_started &&
+      Distance2D(g_calibrate_from, here) >= kCalibrateAfter) {
     const float went = std::atan2(here.y - g_calibrate_from.y,
                                   here.x - g_calibrate_from.x);
     const float error = Normalise(went - g_calibrate_heading);
@@ -178,10 +190,6 @@ bool DecideStick(short* out_x, short* out_y) {
     } else {
       LOG_INFO("walk: heading agrees to within {:.0f} degrees", g_error_deg);
     }
-  }
-  if (!g_calibrated) {
-    g_calibrate_from = here;
-    g_calibrate_heading = wanted;
   }
 
   const float relative = Normalise(wanted - camera);
@@ -268,6 +276,7 @@ void WalkTo(std::vector<Vec3> route) {
   g_progress_ms = g_started_ms;
   g_best_distance = 0;
   g_calibrated = false;
+  g_calibrate_started = false;
   g_corrected = false;
   g_error_deg = 0;
   const samp::LocalPed self = samp::ReadLocalPed();
