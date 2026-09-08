@@ -107,6 +107,10 @@ struct Graph {
   // Ped nodes within `radius` of a point, nearest first.
   std::vector<PathNode> PedNodesNear(const Vec3& at, float radius,
                                      std::size_t max) const;
+  // The other half of the same graph: the road network the game's own
+  // traffic drives. Vehicle nodes come before the ped ones in each area.
+  std::vector<PathNode> VehicleNodesNear(const Vec3& at, float radius,
+                                         std::size_t max) const;
   // Ped nodes within `radius` of a point, nearest first, by reference and
   // fast: the squares, not a sweep. Radius up to 24 m.
   std::vector<PathLink> PedNodesAround(const Vec3& at, float radius,

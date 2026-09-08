@@ -1,6 +1,7 @@
 #include "actions/walker.hpp"
 
 #include "samp/input_state.hpp"
+#include "samp/keys.hpp"
 #include "game/mouse_watch.hpp"
 #include "ui/overlay.hpp"
 
@@ -261,6 +262,14 @@ unsigned long long g_last_jump_ms = 0;
 unsigned long long g_hop_gap_ms = kHopIntervalMs;
 unsigned long long g_landed_ms = 0;
 bool  g_was_airborne = false;
+// Hanging off something. A jump at a wall ends with his hands on the ledge,
+// and if it is too high to pull up he stays there for as long as forward is
+// held. Letting go of everything drops him.
+unsigned long long g_hanging_since = 0;
+unsigned long long g_letting_go_until = 0;
+int   g_lets_go = 0;
+constexpr unsigned long long kHangingMs = 2200;
+constexpr unsigned long long kLetGoForMs = 900;
 int   g_jumps = 0;
 
 float Normalise(float radians) {
@@ -320,19 +329,6 @@ void ReadBindings() {
            game::KeyName(g_key_sprint), game::KeyName(g_key_jump));
 }
 
-// One key down or up, through the system: the same road a finger takes.
-void SendKey(int vk, bool down) {
-  INPUT input{};
-  input.type = INPUT_KEYBOARD;
-  input.ki.wVk = static_cast<WORD>(vk);
-  input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC));
-  input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
-  if (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT ||
-      vk == VK_RCONTROL || vk == VK_RMENU)
-    input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
-  SendInput(1, &input, sizeof(input));
-}
-
 // Whether keys may go out at all: the game window has to be the one in
 // front - the keys go to whatever is - and the panel's own menu must not
 // be up, since it eats key messages.
@@ -376,15 +372,13 @@ unsigned DirectionKeys(short x, short y) {
 // the player's own hand on W is left alone. Only the changes are sent -
 // a held key is held by the system until its up.
 void HoldKeys(unsigned want) {
-  const unsigned release = g_held & ~want;
-  const unsigned press   = want & ~g_held;
   const int keys[6] = {g_key_fwd, g_key_back, g_key_left, g_key_right,
                        g_key_sprint, g_key_jump};
   const unsigned bits[6] = {kFwd, kBack, kLeft, kRight, kSprintKey, kJumpKey};
-  for (int i = 0; i < 6; ++i) {
-    if (release & bits[i]) { SendKey(keys[i], false); g_key_events.fetch_add(1); }
-    if (press & bits[i])   { SendKey(keys[i], true);  g_key_events.fetch_add(1); }
-  }
+  std::vector<int> down;
+  for (int i = 0; i < 6; ++i)
+    if (want & bits[i]) down.push_back(keys[i]);
+  samp::KeysHold(down);
   g_held = want;
 }
 // What was last written, for the line logged when the keyboard is taken.
@@ -712,6 +706,23 @@ bool DecideStick(short* out_x, short* out_y) {
     g_landed_ms = now;
   }
   const bool settled = !airborne && now - g_landed_ms >= kSettleAfterLandMs;
+
+  // Off the ground and going nowhere: he is holding on to a ledge. Nothing
+  // pressed for a moment and he drops, which is the only way down.
+  if (now < g_letting_go_until) return false;
+  if (airborne && std::fabs(vz) < kStillVertical) {
+    if (g_hanging_since == 0) g_hanging_since = now;
+    if (now - g_hanging_since > kHangingMs) {
+      g_hanging_since = 0;
+      g_letting_go_until = now + kLetGoForMs;
+      ++g_lets_go;
+      g_landed_ms = now + kLetGoForMs;
+      LOG_INFO("walk: hanging off something - letting go (time {})", g_lets_go);
+      return false;
+    }
+  } else {
+    g_hanging_since = 0;
+  }
 
   // Getting anywhere at all?
   if (g_best_distance == 0 || distance < g_best_distance - kCloser) {
@@ -1103,6 +1114,9 @@ void WalkTo(std::vector<Vec3> route) {
   g_wall = false;
   g_jumps = 0;
   g_jump_countdown = -1;
+  g_hanging_since = 0;
+  g_letting_go_until = 0;
+  g_lets_go = 0;
   g_on_ground = true;
   for (int i = 0; i < kWhiskers; ++i) {
     g_whisker_clear[i] = true;

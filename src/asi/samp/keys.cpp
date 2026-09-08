@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <atomic>
 #include <mutex>
 #include <vector>
 
@@ -24,6 +26,8 @@ struct Step {
 std::mutex g_mutex;
 std::vector<Step> g_script;
 std::size_t g_at = 0;
+std::vector<int> g_held;
+std::atomic<unsigned long long> g_events{0};
 
 void Wipe() {
   if (!g_script.empty())
@@ -86,6 +90,35 @@ void KeysPress(int virtual_key, int times) {
   }
 }
 
+void KeysHold(const std::vector<int>& keys) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  for (int held : g_held)
+    if (std::find(keys.begin(), keys.end(), held) == keys.end()) {
+      SendKey(held, false);
+      g_events.fetch_add(1, std::memory_order_relaxed);
+    }
+  for (int want : keys)
+    if (std::find(g_held.begin(), g_held.end(), want) == g_held.end()) {
+      SendKey(want, true);
+      g_events.fetch_add(1, std::memory_order_relaxed);
+    }
+  g_held = keys;
+}
+
+void KeysReleaseAll() { KeysHold({}); }
+
+unsigned long long KeysEventsSent() {
+  return g_events.load(std::memory_order_relaxed);
+}
+
+void KeysPressFor(int virtual_key, int frames) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_script.push_back(Step{Kind::kKeyDown, 0, virtual_key});
+  for (int f = 0; f < frames; ++f)
+    g_script.push_back(Step{Kind::kWait, 0, 0});
+  g_script.push_back(Step{Kind::kKeyUp, 0, virtual_key});
+}
+
 void KeysTick() {
   Step step;
   {
@@ -102,6 +135,7 @@ void KeysTick() {
     case Kind::kKeyUp:     SendKey(step.vk, false); break;
     case Kind::kWait:      break;
   }
+  if (step.kind != Kind::kWait) g_events.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool KeysBusy() {

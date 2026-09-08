@@ -18,6 +18,7 @@
 #include <set>
 #include <string>
 
+#include "actions/driver.hpp"
 #include "actions/experiments.hpp"
 #include "actions/travel.hpp"
 #include "actions/walker.hpp"
@@ -338,6 +339,7 @@ void OnFrame() {
   state::WatchEvents();
   samp::WatchLogin();
   act::TravelTick();
+  act::DriveTick();
   act::PadFrame();
   act::ExperimentTick();
   RecordFrame();

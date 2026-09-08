@@ -4,6 +4,7 @@ add_library(bot MODULE
   log.cpp
   crash_log.cpp
   bridge.cpp
+  actions/driver.cpp
   actions/experiments.cpp
   actions/travel.cpp
   actions/walker.cpp
@@ -19,6 +20,7 @@ add_library(bot MODULE
   game/api_trace.cpp
   game/paths.cpp
   nav/planner.cpp
+  nav/roads.cpp
   hooks/cursor.cpp
   hooks/windowmode.cpp
   hooks/frame.cpp

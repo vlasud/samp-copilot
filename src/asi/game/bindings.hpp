@@ -25,7 +25,8 @@ enum Action {
   kVehicleSteerRight = 21,
   kVehicleAccelerate = 24,
   kVehicleBrake = 25,
-  kVehicleHandbrake = 32,
+  kVehicleHorn = 29,
+  kVehicleHandbrake = 31,
 };
 
 // The virtual key for an action, or `fallback` when the table cannot be read

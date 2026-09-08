@@ -10,6 +10,7 @@
 #include "log.hpp"
 #include "mcp/rpc.hpp"
 #include "mcp/server.hpp"
+#include "actions/driver.hpp"
 #include "actions/travel.hpp"
 #include "actions/walker.hpp"
 #include "game/bindings.hpp"
@@ -124,6 +125,19 @@ json WalkStatus() {
            {"sidesteps", walk.sidesteps}};
   if (walk.corrected) out["steering_corrected_deg"] = walk.error_deg;
   return out;
+}
+
+json DriveStatusJson() {
+  const act::DriveStatus drive = act::DriveGet();
+  return json{{"driving", drive.driving},
+              {"note", drive.note},
+              {"leg", drive.leg},
+              {"legs", drive.legs},
+              {"to_next_m", drive.to_next_m},
+              {"remaining_m", drive.remaining_m},
+              {"speed_kmh", drive.speed_kmh},
+              {"heading_error_deg", drive.heading_error_deg},
+              {"times_stuck", drive.times_stuck}};
 }
 
 json TravelStatusJson() {
@@ -517,6 +531,95 @@ void RegisterTools(Server* server) {
   });
 
   server->AddTool({
+      "press_key",
+      "Holds one key down for a moment, the way a hand does. Names the "
+      "player's own bindings rather than keys: 'horn' is what opens a barrier "
+      "that listens for one, 'accelerate', 'brake', 'left', 'right', "
+      "'enter_exit', 'jump', 'sprint', 'handbrake'. A single character (\"y\", "
+      "\"2\") presses that key instead, which is how a server's own prompts "
+      "are answered.",
+      {{"type", "object"},
+       {"properties",
+        {{"key",
+          {{"type", "string"},
+           {"description", "A binding name, or one character to press."}}},
+         {"ms",
+          {{"type", "integer"}, {"minimum", 30}, {"maximum", 5000},
+           {"description", "How long to hold it. Defaults to 200."}}}}},
+       {"required", json::array({"key"})}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              const std::string name = args.value("key", std::string{});
+              const int ms = args.value("ms", 200);
+              int vk = 0;
+              if (name == "horn")        vk = game::KeyForAction(game::kVehicleHorn, 'H');
+              else if (name == "accelerate") vk = game::KeyForAction(game::kVehicleAccelerate, 'W');
+              else if (name == "brake")  vk = game::KeyForAction(game::kVehicleBrake, 'S');
+              else if (name == "left")   vk = game::KeyForAction(game::kVehicleSteerLeft, VK_LEFT);
+              else if (name == "right")  vk = game::KeyForAction(game::kVehicleSteerRight, VK_RIGHT);
+              else if (name == "enter_exit") vk = game::KeyForAction(game::kVehicleEnterExit, VK_RETURN);
+              else if (name == "jump")   vk = game::KeyForAction(game::kJumping, VK_LSHIFT);
+              else if (name == "sprint") vk = game::KeyForAction(game::kSprint, VK_SPACE);
+              else if (name == "handbrake") vk = game::KeyForAction(game::kVehicleHandbrake, VK_SPACE);
+              else if (name.size() == 1) {
+                const char c = name[0];
+                vk = (c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c;
+              }
+              if (vk == 0) throw std::runtime_error("no key called \"" + name + "\"");
+              if (samp::KeysBusy())
+                throw std::runtime_error("keys are still being played - try again");
+              samp::KeysPressFor(vk, ms / 16);
+              return json{{"pressed", game::KeyName(vk)}, {"held_ms", ms}};
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "drive_to",
+      "Drives the car he is sitting in to a point, along the roads the game's "
+      "own traffic uses. Nothing is asked of the world for this: a link "
+      "between two road nodes is a road. He must already be in a vehicle - "
+      "travel_to the car, use_vehicle, then this. Returns at once; poll "
+      "drive_status.",
+      {{"type", "object"},
+       {"properties",
+        {{"x", {{"type", "number"}}},
+         {"y", {{"type", "number"}}}}},
+       {"required", json::array({"x", "y"})}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              const samp::LocalPed self = samp::ReadLocalPed();
+              if (!self.valid)
+                throw std::runtime_error("the local player is not readable");
+              game::Vec3 target;
+              if (!PointFrom(args, self, &target))
+                throw std::runtime_error("x and y are required");
+              std::string note;
+              if (!act::DriveTo(target, &note)) throw std::runtime_error(note);
+              json out = DriveStatusJson();
+              out["route"] = note;
+              return out;
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "drive_status",
+      "How the drive is going: which point of the road route he is heading "
+      "for, how far is left, how fast he is going, how far off the line he is "
+      "pointed, and how many times he has had to back out of something.",
+      NoArguments(),
+      [](const json&) {
+        return Rpc::RunOnGameThread([] { return DriveStatusJson(); },
+                                    kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
       "use_vehicle",
       "Presses the key the player has bound to getting in and out of a "
       "vehicle. Standing beside one he gets in; sitting in one he gets out - "
@@ -683,6 +786,7 @@ void RegisterTools(Server* server) {
             [] {
               act::CancelTravel("stopped on request");
               act::Stop("stopped on request");
+              act::DriveStop("stopped on request");
               return TravelStatusJson();
             },
             kFastTimeoutMs);
@@ -756,13 +860,27 @@ void RegisterTools(Server* server) {
            {"maxLength", 128},
            {"description", "The line to send, including any leading slash."}}}}},
        {"required", json::array({"text"})}},
-      [](const json& args) -> json {
-        const std::string text = args.value("text", std::string{});
-        if (text.empty()) throw std::runtime_error("text must not be empty");
-        // Deliberately explicit: reporting success for something that did not
-        // happen would have the agent build on a lie.
-        throw std::runtime_error(
-            std::string("action not implemented yet: ") + action::kChatSend);
+      [](const json& args) {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              const std::string text = args.value("text", std::string{});
+              if (text.empty()) throw std::runtime_error("text must not be empty");
+              if (samp::KeysBusy())
+                throw std::runtime_error("keys are still being played - try again");
+              const samp::Dialog dialog = samp::CurrentDialog();
+              if (dialog.shown)
+                throw std::runtime_error(
+                    "a dialog is on screen and takes the keys - answer it first");
+              // The way a player says something: the chat key, the words, and
+              // Enter. Nothing is written into the client.
+              samp::KeysPress('T');
+              samp::KeysType(text);
+              samp::KeysPress(VK_RETURN);
+              return json{{"sent", text},
+                          {"note", "typed into the chat and entered; read the "
+                                   "chat or events for the server's answer"}};
+            },
+            kFastTimeoutMs);
       },
   });
 }

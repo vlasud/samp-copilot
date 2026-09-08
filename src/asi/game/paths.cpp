@@ -603,6 +603,45 @@ std::vector<PathLink> Graph::PedNodesAround(const Vec3& at, float radius,
   return found;
 }
 
+namespace {
+// The two searches differ only in which half of an area they walk.
+std::vector<PathNode> NodesNear(const Graph& graph, const Vec3& at, float radius,
+                                std::size_t max, bool ped) {
+  std::vector<PathNode> found;
+  if (!graph.valid) return found;
+  struct Hit {
+    float distance;
+    const PathNode* node;
+  };
+  std::vector<Hit> hits;
+  const float radius_squared = radius * radius;
+  for (const Graph::Area& a : graph.areas) {
+    if (!a.loaded) continue;
+    const std::size_t first = ped ? a.vehicle : 0;
+    const std::size_t last  = ped ? a.nodes.size() : a.vehicle;
+    for (std::size_t n = first; n < last && n < a.nodes.size(); ++n) {
+      const PathNode& node = a.nodes[n];
+      const float dx = node.pos.x - at.x, dy = node.pos.y - at.y,
+                  dz = node.pos.z - at.z;
+      const float d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > radius_squared) continue;
+      hits.push_back(Hit{std::sqrt(d2), &node});
+    }
+  }
+  std::sort(hits.begin(), hits.end(),
+            [](const Hit& a, const Hit& b) { return a.distance < b.distance; });
+  if (hits.size() > max) hits.resize(max);
+  found.reserve(hits.size());
+  for (const Hit& hit : hits) found.push_back(*hit.node);
+  return found;
+}
+}  // namespace
+
+std::vector<PathNode> Graph::VehicleNodesNear(const Vec3& at, float radius,
+                                              std::size_t max) const {
+  return NodesNear(*this, at, radius, max, /*ped=*/false);
+}
+
 std::vector<PathNode> Graph::PedNodesNear(const Vec3& at, float radius,
                                           std::size_t max) const {
   std::vector<PathNode> found;
