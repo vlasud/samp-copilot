@@ -23,12 +23,14 @@ add_library(bot MODULE
   hooks/frame.cpp
   samp/version.cpp
   samp/dialog.cpp
+  samp/keys.cpp
   samp/login.cpp
   samp/discovery.cpp
   samp/chat.cpp
   samp/world.cpp
   samp/input_state.cpp
   state/memory.cpp
+  state/events.cpp
   state/probe.cpp
   mcp/server.cpp
   mcp/rpc.cpp

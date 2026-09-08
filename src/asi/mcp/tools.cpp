@@ -1,5 +1,7 @@
 #include "mcp/tools.hpp"
 
+#include <windows.h>
+
 #include <cmath>
 #include <stdexcept>
 #include <string>
@@ -16,10 +18,12 @@
 #include "samp/chat.hpp"
 #include "samp/dialog.hpp"
 #include "samp/input_state.hpp"
+#include "samp/keys.hpp"
 #include "samp/login.hpp"
 #include "samp/world.hpp"
 #include "samp/discovery.hpp"
 #include "samp/version.hpp"
+#include "state/events.hpp"
 #include "state/probe.hpp"
 #include "types.hpp"
 
@@ -448,6 +452,40 @@ void RegisterTools(Server* server) {
   });
 
   server->AddTool({
+      "events",
+      "What has happened since you last looked: lines of chat, a dialog "
+      "opening or closing, spawning, dying, a journey ending. Pass the 'next' "
+      "from the previous call as 'since' and this returns only what came "
+      "after it, oldest first. This is the call to poll - everything else "
+      "describes how things are now, and a dialog that opened and closed "
+      "between two of those is a dialog you never saw.",
+      {{"type", "object"},
+       {"properties",
+        {{"since",
+          {{"type", "integer"},
+           {"description", "The 'next' from the previous call. Zero, or "
+                           "absent, means everything still remembered."}}},
+         {"limit",
+          {{"type", "integer"}, {"minimum", 1}, {"maximum", 200},
+           {"description", "At most this many. Defaults to fifty."}}},
+         {"kinds",
+          {{"type", "array"},
+           {"items", {{"type", "string"}}},
+           {"description", "Only these kinds: chat, dialog, spawn, unspawn, "
+                           "death, travel, login. A busy server's chat drowns "
+                           "everything else, so name what you care about."}}}}}},
+      [](const json& args) {
+        const long long since = args.value("since", 0LL);
+        const int limit = args.value("limit", 50);
+        std::vector<std::string> kinds;
+        if (args.contains("kinds") && args["kinds"].is_array())
+          for (const json& kind : args["kinds"])
+            if (kind.is_string()) kinds.push_back(kind.get<std::string>());
+        return state::EventsSince(since, limit, kinds);
+      },
+  });
+
+  server->AddTool({
       "get_dialog",
       "What the server is showing, if anything: the style, the caption and "
       "the text. A character at a dialog cannot move, so this is the first "
@@ -466,6 +504,77 @@ void RegisterTools(Server* server) {
                 out["text"]    = dialog.text;
               }
               return out;
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "answer_dialog",
+      "Answers the dialog the server is showing, the way a player answers it: "
+      "arrow keys to move a list selection, characters into an input, then "
+      "Enter for the first button or Escape for the second. Almost everything "
+      "a role-play server offers is behind one of these, so this is how the "
+      "character uses a menu, a bank, a job or a phone. Read it with "
+      "get_dialog first; the rows of a list are the lines of its text, counted "
+      "from zero. The server's own login dialog is answered by 'login' "
+      "instead, which is where the password lives.",
+      {{"type", "object"},
+       {"properties",
+        {{"item",
+          {{"type", "integer"},
+           {"minimum", 0},
+           {"description", "Row of a list dialog to choose, counted from zero."}}},
+         {"text",
+          {{"type", "string"},
+           {"description", "What to type into an input dialog."}}},
+         {"button",
+          {{"type", "integer"},
+           {"enum", json::array({1, 2})},
+           {"description", "1 presses the first button (Enter), 2 the second "
+                           "(Escape). Defaults to 1."}}}}}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              if (samp::KeysBusy())
+                throw std::runtime_error("keys are still being played - try again");
+              const samp::Dialog dialog = samp::CurrentDialog();
+              if (!dialog.valid)
+                throw std::runtime_error("the client's dialog could not be read");
+              if (!dialog.shown)
+                throw std::runtime_error("no dialog is on screen");
+              json did = json::array();
+
+              if (args.contains("item") && args["item"].is_number_integer()) {
+                const int item = args["item"].get<int>();
+                // The rows are the lines of the text. Where the selection
+                // sits now is the client's business, so it is walked to the
+                // top first and counted down from there.
+                int rows = 1;
+                for (char c : dialog.text) if (c == 0x0A) ++rows;
+                if (item < 0 || item >= rows)
+                  throw std::runtime_error("that row is not in the list, which has " +
+                                           std::to_string(rows));
+                samp::KeysPress(VK_UP, rows);
+                if (item > 0) samp::KeysPress(VK_DOWN, item);
+                did.push_back("chose row " + std::to_string(item) + " of " +
+                              std::to_string(rows));
+              }
+              if (args.contains("text") && args["text"].is_string()) {
+                samp::KeysType(args["text"].get<std::string>());
+                did.push_back("typed the text");
+              }
+              const int button = args.value("button", 1);
+              samp::KeysPress(button == 2 ? VK_ESCAPE : VK_RETURN);
+              did.push_back(button == 2 ? "pressed the second button"
+                                        : "pressed the first button");
+
+              return json{{"answered", did},
+                          {"dialog", json{{"id", dialog.id},
+                                          {"caption", dialog.caption},
+                                          {"style", samp::DialogStyleName(dialog.style)}}},
+                          {"note", "the keys are played one a frame; read "
+                                   "get_dialog or events to see what came of it"}};
             },
             kFastTimeoutMs);
       },

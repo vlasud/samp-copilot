@@ -14,6 +14,7 @@
 #include "log.hpp"
 #include "samp/dialog.hpp"
 #include "samp/input_state.hpp"
+#include "samp/keys.hpp"
 #include "types.hpp"
 
 #pragma comment(lib, "crypt32.lib")
@@ -26,9 +27,6 @@ namespace {
 // are answered, and only ever before the character has first spawned.
 constexpr int kPasswordStyle = 3;
 constexpr int kInputStyle = 1;
-// One character a frame. Fast enough to be over in a fifth of a second, slow
-// enough that nothing drops it.
-constexpr int kFramesBetween = 1;
 
 std::wstring g_password;          // wiped the moment it has been typed
 std::string  g_caption_filter;    // optional: only a dialog whose caption has this
@@ -38,12 +36,6 @@ bool g_have = false;
 
 std::atomic<bool> g_sent{false};
 std::string g_last_note = "nothing has been asked of it yet";
-
-// The typing itself.
-bool  g_typing = false;
-std::size_t g_at = 0;
-int   g_wait = 0;
-bool  g_enter_next = false;
 
 bool IsHex(const std::string& text) {
   if (text.size() < 64 || (text.size() & 1) != 0) return false;
@@ -134,26 +126,6 @@ void ReadFile() {
   g_last_note = "waiting for the server to ask";
 }
 
-void SendUnicode(wchar_t ch) {
-  INPUT in[2] = {};
-  in[0].type = INPUT_KEYBOARD;
-  in[0].ki.wScan = static_cast<WORD>(ch);
-  in[0].ki.dwFlags = KEYEVENTF_UNICODE;
-  in[1] = in[0];
-  in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
-  SendInput(2, in, sizeof(INPUT));
-}
-
-void SendReturn() {
-  INPUT in[2] = {};
-  in[0].type = INPUT_KEYBOARD;
-  in[0].ki.wVk = VK_RETURN;
-  in[0].ki.wScan = static_cast<WORD>(MapVirtualKeyW(VK_RETURN, MAPVK_VK_TO_VSC));
-  in[1] = in[0];
-  in[1].ki.dwFlags = KEYEVENTF_KEYUP;
-  SendInput(2, in, sizeof(INPUT));
-}
-
 bool WindowInFront() {
   HWND window = game::GameWindow();
   return window != nullptr && GetForegroundWindow() == window;
@@ -182,49 +154,23 @@ bool Answerable(const Dialog& dialog, std::string* why) {
   return true;
 }
 
+// The password goes into the shared key player, followed by the Enter that
+// answers the dialog, and this module's own copy is gone at once.
 void StartTyping() {
-  g_typing = true;
-  g_at = 0;
-  g_wait = 0;
-  g_enter_next = false;
-}
-
-// One character a frame, then Enter, then the password is gone from memory.
-void TypeOneFrame() {
-  if (!g_typing) return;
-  if (g_wait > 0) {
-    --g_wait;
-    return;
-  }
-  g_wait = kFramesBetween;
-  if (g_enter_next) {
-    SendReturn();
-    g_typing = false;
-    g_enter_next = false;
-    g_sent.store(true);
-    SecureZeroMemory(g_password.data(), g_password.size() * sizeof(wchar_t));
-    g_password.clear();
-    g_have = false;
-    g_last_note = "the password has been typed and the dialog answered";
-    LOG_INFO("login: {}", g_last_note);
-    return;
-  }
-  if (g_at >= g_password.size()) {
-    g_enter_next = true;
-    return;
-  }
-  SendUnicode(g_password[g_at++]);
+  KeysTypeWide(g_password);
+  KeysPress(VK_RETURN);
+  g_sent.store(true);
+  SecureZeroMemory(g_password.data(), g_password.size() * sizeof(wchar_t));
+  g_password.clear();
+  g_have = false;
+  g_last_note = "the password has been typed and the dialog answered";
 }
 
 }  // namespace
 
 void WatchLogin() {
   ReadFile();
-  if (g_typing) {
-    TypeOneFrame();
-    return;
-  }
-  if (!g_have || !g_auto || g_sent.load()) return;
+  if (!g_have || !g_auto || g_sent.load() || KeysBusy()) return;
 
   // Before the first spawn only: later on, a password dialog belongs to
   // something else entirely.
@@ -264,7 +210,7 @@ void WatchLogin() {
 
 std::string LoginNow() {
   ReadFile();
-  if (g_typing) return "already typing it";
+  if (KeysBusy()) return "keys are still being played";
   if (g_sent.load()) return "the password was already sent this session";
   if (!g_have) return g_last_note;
   std::string why;
@@ -281,7 +227,6 @@ bool LoginSent() { return g_sent.load(); }
 
 std::string LoginLine() {
   if (g_sent.load()) return " login:sent";
-  if (g_typing) return " login:typing";
   ReadFile();
   return g_have ? " login:ready" : " login:none";
 }

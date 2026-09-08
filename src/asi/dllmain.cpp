@@ -28,6 +28,7 @@
 #include "game/api_trace.hpp"
 #include "game/watchpoint.hpp"
 #include "samp/input_state.hpp"
+#include "samp/keys.hpp"
 #include "samp/login.hpp"
 #include "game/pad_watch.hpp"
 #include "game/world_query.hpp"
@@ -40,6 +41,7 @@
 #include "samp/discovery.hpp"
 #include "samp/version.hpp"
 #include "state/memory.hpp"
+#include "state/events.hpp"
 #include "state/probe.hpp"
 #include "types.hpp"
 #include "ui/overlay.hpp"
@@ -332,6 +334,8 @@ void OnFrame() {
 
   // The journey decides what to do next only when the walker has stopped, so
   // this costs a comparison on almost every frame.
+  samp::KeysTick();
+  state::WatchEvents();
   samp::WatchLogin();
   act::TravelTick();
   act::PadFrame();

@@ -1922,18 +1922,26 @@ void Overlay::WatchForLostInput() {
   if (still < 6) return;
   still = 0;
 
+  // Said, not acted on. This was written when the module wrote into the pad
+  // and the client answered by taking the input away: disarming was the only
+  // way out. It presses the player's own keys now, and a character held up
+  // against a wall, stepping round something or wedged in a corner looks
+  // exactly like this - so standing the journey down for it threw away good
+  // walks and left the journey waiting on a switch nobody had touched.
+  // The walk has its own stuck handling; this only writes down what it saw.
+  static int said = 0;
+  if (said >= 3) return;
+  ++said;
   bool controls = false;
   const bool known = game::ControlsDisabled(&controls);
-  LOG_ERROR("input lost while armed - keys held and he has not moved. "
-            "The game says its player controls are {}. Calls since arming: "
-            "{} ground, {} line of sight, {} screen. Disarming",
-            !known ? "unreadable" : controls ? "DISABLED" : "enabled",
-            game::GroundCalls(), game::LineOfSightCalls(), game::ScreenCalls());
-  LOG_ERROR("input lost: picture{}",
-            game::InputPipelineFull(LastLocalPedPointer(), g_window));
-  LOG_ERROR("input lost: code {}", game::CodeIntegrityReport());
-  LOG_ERROR("input lost: {} threads in the process", game::ThreadCount());
-  game::SetEnabled(false);
+  LOG_WARN("keys held and he has not moved for a second and a half. The game "
+           "says its player controls are {}. Calls since arming: {} ground, "
+           "{} line of sight, {} screen. Left alone - the walk decides what to "
+           "do about being stuck",
+           !known ? "unreadable" : controls ? "DISABLED" : "enabled",
+           game::GroundCalls(), game::LineOfSightCalls(), game::ScreenCalls());
+  LOG_WARN("not moving: picture{}",
+           game::InputPipelineFull(LastLocalPedPointer(), g_window));
 }
 
 unsigned long long Overlay::KeyMessages() {

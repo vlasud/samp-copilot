@@ -387,7 +387,10 @@ void TravelTick() {
     static unsigned long long said_ms = 0;
     if (now - said_ms > 5000) {
       said_ms = now;
-      LOG_WARN("travel: waiting for the world to read under the player");
+      LOG_WARN("travel: {}", game::Enabled()
+                                 ? "waiting for the world to read under the player"
+                                 : "movement is off - nothing will move until it "
+                                   "is armed again");
     }
     return;
   }
