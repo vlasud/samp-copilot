@@ -30,6 +30,7 @@
 #include "samp/login.hpp"
 #include "samp/world.hpp"
 #include "samp/discovery.hpp"
+#include "samp/talk.hpp"
 #include "samp/version.hpp"
 #include "state/events.hpp"
 #include "state/memory.hpp"
@@ -282,7 +283,11 @@ void RegisterTools(Server* server) {
       "The chat log as the player sees it: server messages, other players "
       "talking, and anything the server printed. Oldest first. 'order' says "
       "whether the module could establish the direction of the array from "
-      "timestamps or is assuming it.",
+      "timestamps or is assuming it. Every line also carries 'kind' - say, "
+      "shout, action, advert, admin, news, ooc, server - the speaker where "
+      "the line names one, 'plain' with the colour codes taken out, and "
+      "'to_me' when somebody else used this character's name. Adverts look "
+      "like speech and are not, which is what the kinds are for.",
       {{"type", "object"},
        {"properties",
         {{"limit",
@@ -290,11 +295,47 @@ void RegisterTools(Server* server) {
            {"minimum", 1},
            {"maximum", 200},
            {"description", "How many of the most recent lines to return. "
-                           "Defaults to 40."}}}}}},
+                           "Defaults to 40."}}},
+         {"only_to_me",
+          {{"type", "boolean"},
+           {"description", "Only the lines where somebody used this "
+                           "character's name - what actually wants an "
+                           "answer."}}}}}},
       [](const json& args) {
         const int limit = args.value("limit", 40);
-        return Rpc::RunOnGameThread([limit] { return samp::ReadChat(limit); },
-                                    kFastTimeoutMs);
+        const bool only_to_me = args.value("only_to_me", false);
+        return Rpc::RunOnGameThread(
+            [limit, only_to_me]() -> json {
+              // Read more than was asked for when only some of it will be
+              // kept, or "the last ten lines addressed to me" turns into
+              // "whichever of the last ten lines were".
+              json out = samp::ReadChat(only_to_me ? 200 : limit);
+              const samp::LocalPed self = samp::ReadLocalPed();
+              std::string me;
+              const json world = asi::Bridge::GetWorld(nullptr);
+              if (world.contains("self") && world["self"].contains("name"))
+                me = world["self"].value("name", std::string{});
+              json kept = json::array();
+              for (json& line : out["lines"]) {
+                const samp::TalkLine said =
+                    samp::Classify(line.value("text", std::string{}),
+                                   line.value("from", std::string{}), me);
+                line["kind"] = said.kind;
+                line["plain"] = said.plain;
+                if (!said.speaker.empty()) line["speaker"] = said.speaker;
+                if (said.to_me) line["to_me"] = true;
+                if (said.from_me) line["from_me"] = true;
+                if (!only_to_me || said.to_me) kept.push_back(line);
+              }
+              if (only_to_me && kept.size() > static_cast<std::size_t>(limit))
+                kept.erase(kept.begin(),
+                           kept.end() - static_cast<std::ptrdiff_t>(limit));
+              if (only_to_me) out["lines"] = std::move(kept);
+              if (!me.empty()) out["me"] = me;
+              (void)self;
+              return out;
+            },
+            kFastTimeoutMs);
       },
   });
 
