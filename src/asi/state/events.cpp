@@ -9,6 +9,7 @@
 #include "actions/travel.hpp"
 #include "samp/chat.hpp"
 #include "samp/dialog.hpp"
+#include "samp/dialog_path.hpp"
 #include "samp/input_state.hpp"
 #include "samp/login.hpp"
 #include "samp/talk.hpp"
@@ -81,6 +82,9 @@ void WatchEvents() {
   const unsigned long long now = GetTickCount64();
   if (now - g_looked_ms < kEveryMs) return;
   g_looked_ms = now;
+
+  // A menu being walked, if one is.
+  samp::DialogPathTick();
 
   // The dialog on screen.
   const samp::Dialog dialog = samp::CurrentDialog();

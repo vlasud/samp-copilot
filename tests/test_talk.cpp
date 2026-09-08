@@ -10,6 +10,9 @@
 #include "samp/talk.hpp"
 
 using gtabot::samp::Classify;
+using gtabot::samp::Mentions;
+using gtabot::samp::RowSaying;
+using gtabot::samp::Rows;
 using gtabot::samp::TalkLine;
 using gtabot::samp::WithoutColours;
 
@@ -85,6 +88,28 @@ void TestTalk() {
       Classify("- да, живой {FFFFFF}(Lo_Vlasuddd)", "", kMe);
   check::True(by_me.from_me, "his own line is from him");
   check::True(!by_me.to_me, "and is not addressed to him");
+
+  // Naming a row of a menu instead of counting to it. The text is the real
+  // one from /menu > Список команд, colours and numbering included.
+  const std::string menu =
+      "1. Общие команды (часть 1)\n"
+      "2. Общие команды (часть 2)\n"
+      "3. Управление транспортом\n"
+      "12. {00cc66}Мин. здравоохранения\n"
+      "16. Служебные команды";
+  const std::vector<std::string> rows = Rows(menu);
+  check::Is(static_cast<int>(rows.size()), 5, "five rows");
+  check::Is(rows[3], "12. Мин. здравоохранения", "the colour is off the row");
+  check::Is(RowSaying(rows, "здравоохранения"), 3, "named, not numbered");
+  check::Is(RowSaying(rows, "Управление транспортом"), 2, "matched in full");
+  check::Is(RowSaying(rows, "нет такой строки"), -1, "nothing says that");
+  check::Is(RowSaying(rows, "Общие команды"), -2, "two rows say that");
+  check::True(Mentions("12. Мин. ЗДРАВООХРАНЕНИЯ", "здравоохранения"),
+              "matching ignores case");
+  check::True(Mentions("Управление", "управление"),
+              "the capital that crosses the lead byte folds too");
+  check::True(!Mentions("anything at all", ""),
+              "an empty step matches nothing");
 
   // No name to compare against: nothing is claimed either way.
   const TalkLine nameless =

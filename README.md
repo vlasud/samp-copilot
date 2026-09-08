@@ -115,6 +115,18 @@ what a menu row says, adding up what is known about a stranger - and that part
 was being shipped on the strength of one look at the screen. It runs off the
 game now, against lines pasted out of the real server's chat unchanged.
 
+### Walking a menu
+
+`follow_dialog` takes a path - `["Список команд", "Мин. здравоохранения"]` -
+and walks it, optionally opening the chain first with `open_with: "/menu"`.
+Each step names a row rather than counting to it, because a server renumbers
+its menus between updates and orders them differently for a player of a
+different rank. Answering one dialog at a time means pressing and then polling
+until the server has sent the next one, which is a round trip each time, and
+getting that wait wrong is how a step lands in the wrong menu. `follow_dialog`
+does the waiting; `dialog_path_status` says where it got to, and lists what
+was on screen when a step named something that was not there.
+
 ### Who is who
 
 `get_people` keeps a record of everyone seen or heard and puts a standing on

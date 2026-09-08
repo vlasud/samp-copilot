@@ -70,6 +70,73 @@ std::string WithoutColours(const std::string& text) {
   return out;
 }
 
+// Lower case, in the two alphabets a Russian server writes its menus in.
+//
+// Latin is a byte. Cyrillic is two, in UTF-8: А-П are D0 90..D0 9F and lower
+// to D0 B0..D0 BF, Р-Я are D0 A0..D0 AF and lower across the lead byte to
+// D1 80..D1 8F, and Ё is D0 81 to ё's D1 91. Folding only the Latin half is
+// what made a step naming "Мин. здравоохранения" miss a row that shouted it.
+std::string Folded(const std::string& text) {
+  std::string out;
+  out.reserve(text.size());
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const auto byte = static_cast<unsigned char>(text[i]);
+    if (byte >= 'A' && byte <= 'Z') {
+      out += static_cast<char>(byte - 'A' + 'a');
+      continue;
+    }
+    if (byte == 0xD0 && i + 1 < text.size()) {
+      const auto next = static_cast<unsigned char>(text[i + 1]);
+      if (next >= 0x90 && next <= 0x9F) {
+        out += static_cast<char>(0xD0);
+        out += static_cast<char>(next + 0x20);
+        ++i;
+        continue;
+      }
+      if (next >= 0xA0 && next <= 0xAF) {
+        out += static_cast<char>(0xD1);
+        out += static_cast<char>(next - 0x20);
+        ++i;
+        continue;
+      }
+      if (next == 0x81) {          // Ё
+        out += static_cast<char>(0xD1);
+        out += static_cast<char>(0x91);
+        ++i;
+        continue;
+      }
+    }
+    out += text[i];
+  }
+  return out;
+}
+
+bool Mentions(const std::string& line, const std::string& want) {
+  if (want.empty()) return false;
+  return Folded(line).find(Folded(want)) != std::string::npos;
+}
+
+std::vector<std::string> Rows(const std::string& dialog_text) {
+  std::vector<std::string> rows;
+  std::string row;
+  for (const char c : dialog_text) {
+    if (c == 0x0A) { rows.push_back(WithoutColours(row)); row.clear(); }
+    else row += c;
+  }
+  rows.push_back(WithoutColours(row));
+  return rows;
+}
+
+int RowSaying(const std::vector<std::string>& rows, const std::string& want) {
+  int found = -1;
+  for (std::size_t i = 0; i < rows.size(); ++i) {
+    if (!Mentions(rows[i], want)) continue;
+    if (found >= 0) return -2;
+    found = static_cast<int>(i);
+  }
+  return found;
+}
+
 TalkLine Classify(const std::string& text, const std::string& from,
                   const std::string& me) {
   TalkLine line;

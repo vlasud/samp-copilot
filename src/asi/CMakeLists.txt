@@ -31,6 +31,7 @@ add_library(bot MODULE
   samp/keys.cpp
   samp/labels.cpp
   samp/objects.cpp
+  samp/dialog_path.cpp
   samp/talk.cpp
   samp/textdraws.cpp
   samp/login.cpp

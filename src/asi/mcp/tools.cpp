@@ -22,6 +22,7 @@
 #include "nav/planner.hpp"
 #include "samp/chat.hpp"
 #include "samp/dialog.hpp"
+#include "samp/dialog_path.hpp"
 #include "samp/input_state.hpp"
 #include "samp/keys.hpp"
 #include "samp/labels.hpp"
@@ -903,6 +904,68 @@ void RegisterTools(Server* server) {
               }
               return result;
         }
+      },
+  });
+
+  server->AddTool({
+      "follow_dialog",
+      "Walks a chain of the server's menus in one call: each step is text one "
+      "row of the dialog then on screen must say. Answering a menu one step "
+      "at a time means pressing, then polling until the server has sent the "
+      "next dialog - a round trip each time - and getting that wait wrong is "
+      "how a step lands in the wrong menu. Steps are named rather than "
+      "numbered because a server renumbers its menus. Optionally opens the "
+      "chain first by typing a command. Returns at once; poll "
+      "dialog_path_status, which lists what was on screen if a step found "
+      "nothing.",
+      {{"type", "object"},
+       {"properties",
+        {{"path",
+          {{"type", "array"},
+           {"items", {{"type", "string"}}},
+           {"description", "What each step's row says, in order."}}},
+         {"open_with",
+          {{"type", "string"},
+           {"description", "A chat line to send first, e.g. \"/menu\"."}}}}},
+       {"required", json::array({"path"})}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              std::vector<std::string> steps;
+              for (const json& step : args["path"])
+                if (step.is_string()) steps.push_back(step.get<std::string>());
+              if (steps.empty())
+                throw std::runtime_error("the path is empty");
+              const std::string open = args.value("open_with", std::string{});
+              if (!open.empty()) {
+                samp::KeysPress('T');   // the same key send_chat uses
+                samp::KeysType(open);
+                samp::KeysPress(VK_RETURN);
+              }
+              samp::WalkDialogs(steps);
+              return json{{"walking", true},
+                          {"steps", steps.size()},
+                          {"opened_with", open},
+                          {"note", "poll dialog_path_status"}};
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "dialog_path_status",
+      "How the menu walk is going: how many steps have been answered, and "
+      "why it stopped. When a step named something that was not there, the "
+      "rows that were there are listed.",
+      NoArguments(),
+      [](const json&) -> json {
+        const samp::PathStatus status = samp::DialogPathGet();
+        json out{{"walking", status.walking},
+                 {"step", status.step},
+                 {"steps", status.steps},
+                 {"note", status.note}};
+        if (!status.rows.empty()) out["rows_on_screen"] = status.rows;
+        return out;
       },
   });
 

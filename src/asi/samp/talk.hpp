@@ -42,4 +42,16 @@ TalkLine Classify(const std::string& text, const std::string& from,
 // the like. What is left is what a person reads on the screen.
 std::string WithoutColours(const std::string& text);
 
+// Whether a line says what was asked for: a case-insensitive containment.
+// Naming a menu row amounts to that, because the server writes the row with
+// a number in front, a colour in the middle and a space at the end.
+bool Mentions(const std::string& line, const std::string& want);
+
+// The rows of a list dialog: its text, split on the newlines, each with its
+// colour codes taken out.
+std::vector<std::string> Rows(const std::string& dialog_text);
+
+// Which row says `want`, or -1 when none does and -2 when several do.
+int RowSaying(const std::vector<std::string>& rows, const std::string& want);
+
 }  // namespace gtabot::samp
