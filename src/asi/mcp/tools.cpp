@@ -22,6 +22,8 @@
 #include "samp/input_state.hpp"
 #include "samp/keys.hpp"
 #include "samp/labels.hpp"
+#include "samp/objects.hpp"
+#include "samp/textdraws.hpp"
 #include "samp/login.hpp"
 #include "samp/world.hpp"
 #include "samp/discovery.hpp"
@@ -530,6 +532,75 @@ void RegisterTools(Server* server) {
               return out;
             },
             kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "get_textdraws",
+      "What the server has written on the screen: the money in the corner, "
+      "the hunger bar, the prompt saying which key opens the thing in front "
+      "of him. Many servers put their whole interface there and none of it "
+      "reaches the chat. 'for_me' marks the ones addressed to this player "
+      "rather than shown to everybody.",
+      {{"type", "object"},
+       {"properties",
+        {{"limit",
+          {{"type", "integer"}, {"minimum", 1}, {"maximum", 300},
+           {"description", "At most this many. Defaults to eighty."}}}}}},
+      [](const json& args) -> json {
+        const std::size_t limit = args.value("limit", 80);
+        json out = json::array();
+        for (const samp::TextDraw& draw : samp::TextDraws(limit)) {
+          json one{{"id", draw.id},
+                   {"for_me", draw.for_me},
+                   {"text", draw.text},
+                   {"x", draw.x},
+                   {"y", draw.y}};
+          if (draw.model != 0) one["model"] = draw.model;
+          out.push_back(std::move(one));
+        }
+        return json{{"textdraws", std::move(out)}, {"note", samp::TextDrawsNote()}};
+      },
+  });
+
+  server->AddTool({
+      "get_object_texts",
+      "The words the server has painted onto things: the sign over a shop, "
+      "the number on a house, the notice on a barrier saying which key opens "
+      "it. Set on an object's material rather than hung in the air, so "
+      "get_labels does not see them.",
+      {{"type", "object"},
+       {"properties",
+        {{"radius",
+          {{"type", "number"}, {"minimum", 1}, {"maximum", 1000},
+           {"description", "How far to look. Defaults to eighty metres."}}},
+         {"limit",
+          {{"type", "integer"}, {"minimum", 1}, {"maximum", 100},
+           {"description", "At most this many. Defaults to twenty."}}}}}},
+      [](const json& args) -> json {
+        const float radius = args.value("radius", 80.0f);
+        const std::size_t limit = args.value("limit", 20);
+        std::int64_t age_ms = -1;
+        const json world = asi::Bridge::GetWorld(&age_ms);
+        const json pos = world.value("self", json::object()).value("pos", json::array());
+        if (pos.size() < 3)
+          throw std::runtime_error("where the character is is not known yet");
+        const game::Vec3 here{pos[0].get<float>(), pos[1].get<float>(),
+                              pos[2].get<float>()};
+        json out = json::array();
+        for (const samp::ObjectText& painted :
+             samp::ObjectTextsNear(here, radius, limit))
+          out.push_back(json{{"object_id", painted.object_id},
+                             {"material", painted.material},
+                             {"model", painted.model},
+                             {"text", painted.text},
+                             {"font", painted.font},
+                             {"away_m", painted.away_m},
+                             {"at", json{{"x", painted.at.x},
+                                         {"y", painted.at.y},
+                                         {"z", painted.at.z}}}});
+        return json{{"object_texts", std::move(out)},
+                    {"note", samp::ObjectTextsNote()}};
       },
   });
 

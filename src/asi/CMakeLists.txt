@@ -28,6 +28,8 @@ add_library(bot MODULE
   samp/dialog.cpp
   samp/keys.cpp
   samp/labels.cpp
+  samp/objects.cpp
+  samp/textdraws.cpp
   samp/login.cpp
   samp/discovery.cpp
   samp/chat.cpp
