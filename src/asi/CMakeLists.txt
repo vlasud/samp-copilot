@@ -22,6 +22,8 @@ add_library(bot MODULE
   hooks/windowmode.cpp
   hooks/frame.cpp
   samp/version.cpp
+  samp/dialog.cpp
+  samp/login.cpp
   samp/discovery.cpp
   samp/chat.cpp
   samp/world.cpp

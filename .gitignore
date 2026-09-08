@@ -2,3 +2,7 @@ build/
 .vs/
 *.user
 __pycache__/
+
+# The player's own password for the server, read by the module and
+# nobody else. Never committed.
+bot.login

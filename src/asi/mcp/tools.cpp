@@ -14,8 +14,12 @@
 #include "game/world_query.hpp"
 #include "nav/planner.hpp"
 #include "samp/chat.hpp"
+#include "samp/dialog.hpp"
+#include "samp/input_state.hpp"
+#include "samp/login.hpp"
 #include "samp/world.hpp"
 #include "samp/discovery.hpp"
+#include "samp/version.hpp"
 #include "state/probe.hpp"
 #include "types.hpp"
 
@@ -380,6 +384,108 @@ void RegisterTools(Server* server) {
       [](const json&) {
         return Rpc::RunOnGameThread([] { return WalkStatus(); },
                                     kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "ready",
+      "One call that says where the session stands and what to do next: "
+      "whether the client is up, whether the character has spawned, what "
+      "dialog the server is showing, whether movement is armed and the world "
+      "reads. Poll this rather than guessing - 'next' names the call to make.",
+      NoArguments(),
+      [](const json&) {
+        return Rpc::RunOnGameThread(
+            []() -> json {
+              const samp::Client client = samp::Detect();
+              const samp::Dialog dialog = samp::CurrentDialog();
+              const samp::InputSwitch state = samp::ReadInputSwitch();
+              const samp::LocalPed self = samp::ReadLocalPed();
+              const bool spawned = state.player_known && state.active != 0;
+              const bool armed = game::Enabled();
+              const bool readable = game::CallsTrusted() && game::LineOfSightAvailable();
+
+              json out;
+              out["client_found"] = client.base != 0;
+              out["spawned"]      = spawned;
+              out["movement_armed"] = armed;
+              out["world_readable"] = readable;
+              out["login"] = samp::LoginSent() ? "sent"
+                             : samp::LoginConfigured() ? "ready" : "none";
+              if (self.valid)
+                out["position"] = json{{"x", self.x}, {"y", self.y}, {"z", self.z}};
+              json shown{{"shown", dialog.shown}};
+              if (dialog.shown) {
+                shown["style"]   = samp::DialogStyleName(dialog.style);
+                shown["caption"] = dialog.caption;
+                shown["id"]      = dialog.id;
+              }
+              out["dialog"] = shown;
+              out["ready_to_travel"] = spawned && armed && readable && !dialog.shown;
+
+              const char* next = "ready: call travel_to with x and y";
+              if (client.base == 0) {
+                next = "the SA-MP client is not loaded yet - wait";
+              } else if (dialog.shown && dialog.style == 3) {
+                next = samp::LoginConfigured()
+                           ? "the server is asking for a password - it is being "
+                             "answered from bot.login; wait, or call login"
+                           : "the server is asking for a password and there is no "
+                             "bot.login - a person has to type it";
+              } else if (dialog.shown) {
+                next = "a dialog is on screen and he cannot move until it is "
+                       "answered - read it in 'dialog'";
+              } else if (!spawned) {
+                next = "the character has not spawned yet - wait";
+              } else if (!armed || !readable) {
+                next = "call set_movement with on true";
+              }
+              out["next"] = next;
+              return out;
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "get_dialog",
+      "What the server is showing, if anything: the style, the caption and "
+      "the text. A character at a dialog cannot move, so this is the first "
+      "thing to look at when he will not.",
+      NoArguments(),
+      [](const json&) {
+        return Rpc::RunOnGameThread(
+            []() -> json {
+              const samp::Dialog dialog = samp::CurrentDialog();
+              json out{{"readable", dialog.valid}, {"shown", dialog.shown}};
+              if (dialog.shown) {
+                out["id"]      = dialog.id;
+                out["style"]   = samp::DialogStyleName(dialog.style);
+                out["style_number"] = dialog.style;
+                out["caption"] = dialog.caption;
+                out["text"]    = dialog.text;
+              }
+              return out;
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "login",
+      "Answers the server's password dialog with the password the player "
+      "keeps in bot.login next to the module, typed the way a hand would. "
+      "Only a dialog the server marked as a password input is answered, and "
+      "only once in a session. The password is never returned, logged or "
+      "sent anywhere; without bot.login this does nothing and says so.",
+      NoArguments(),
+      [](const json&) {
+        return Rpc::RunOnGameThread(
+            []() -> json {
+              return json{{"note", samp::LoginNow()},
+                          {"sent", samp::LoginSent()}};
+            },
+            kFastTimeoutMs);
       },
   });
 

@@ -5,16 +5,18 @@ interface it serves: arm the character, send him somewhere, watch how it
 goes, read what he thinks happened. That makes a route test something a
 script can run - no map marker, no F11 menu, no hand on the keyboard.
 
-    python tools/testrun.py launch          start the game (the login is yours)
+    python tools/testrun.py launch          start the game and wait for the mod
     python tools/testrun.py wait            until the character can be driven
     python tools/testrun.py travel 1468 -1689
+    python tools/testrun.py ready
     python tools/testrun.py status
     python tools/testrun.py stop
     python tools/testrun.py log --grep plan --since 19:08
     python tools/testrun.py quit            close the game
 
-The one step no script does is the server's own login dialog: the password
-is the player's to type. Everything before and after it is here.
+The server's password dialog is answered by the mod itself, from bot.login
+next to it, when the player has put one there. Nothing here ever holds the
+password.
 """
 import argparse
 import json
@@ -73,28 +75,29 @@ def cmd_launch(args):
     except NotRunning as e:
         say("  %s" % e)
         return 1
-    status = client.tool("bot_status")
-    say("  mod up: %s" % json.dumps(status.get("samp", status))[:200])
-    say("the login dialog and the spawn are yours; then: testrun.py wait")
+    state = client.tool("ready")
+    say("  mod up: %s" % state.get("next", state))
+    say("now: testrun.py wait")
     return 0
 
 
 def cmd_wait(args):
-    """Until the character reads and the world reads under him."""
+    """Until the character can be driven. The mod says what it is waiting for."""
     client = connect(10)
     deadline = time.time() + args.timeout
     last = ""
     while time.time() < deadline:
-        armed = client.tool("set_movement", {"on": True})
-        note = armed.get("note", armed.get("error", ""))
-        if armed.get("ready"):
-            world = client.tool("get_world").get("world", {})
-            local = world.get("local_player", {})
-            say("ready: %s" % json.dumps(local)[:200])
-            return 0
+        state = client.tool("ready")
+        note = state.get("next", state.get("error", "?"))
         if note != last:
             last = note
-            say("  waiting: %s" % note)
+            say("  %s" % note)
+        if state.get("ready_to_travel"):
+            say("ready at %s" % json.dumps(state.get("position", {})))
+            return 0
+        # Arming is ours to ask for; everything else is waiting.
+        if state.get("spawned") and not state.get("world_readable"):
+            client.tool("set_movement", {"on": True})
         time.sleep(2)
     say("not ready after %d s" % args.timeout)
     return 1
@@ -138,6 +141,12 @@ def cmd_travel(args):
 def cmd_status(args):
     client = connect(5)
     say(json.dumps(client.tool("travel_status"), indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_ready(args):
+    client = connect(5)
+    say(json.dumps(client.tool("ready"), indent=2, ensure_ascii=False))
     return 0
 
 
@@ -198,6 +207,9 @@ def main():
     p.add_argument("y", type=float)
     p.add_argument("--timeout", type=int, default=420)
     p.set_defaults(run=cmd_travel)
+
+    p = sub.add_parser("ready", help="where the session stands and what to do next")
+    p.set_defaults(run=cmd_ready)
 
     p = sub.add_parser("status", help="what the journey thinks it is doing")
     p.set_defaults(run=cmd_status)

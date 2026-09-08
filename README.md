@@ -82,6 +82,58 @@ is short enough to paste into an agent loop.
 
 The mod also writes `bot.asi.log` beside itself.
 
+### Driving a test run
+
+`tools/testrun.py` does the whole loop from a command line: start the game,
+wait until the character can be driven, send him somewhere and watch him get
+there, read the log, close the game.
+
+```
+python tools/testrun.py launch
+python tools/testrun.py wait
+python tools/testrun.py travel 1468 -1689
+python tools/testrun.py log --grep "plan|walk" --since 19:08
+python tools/testrun.py quit
+```
+
+`ready` is the call worth polling: it answers where the session stands -
+client loaded, character spawned, dialog on screen, movement armed, world
+readable - and names the next call to make in `next`.
+
+### The server's password
+
+A server that asks for a password asks a person. When there is no person
+about, put the password in `bot.login` beside the module and the mod types it
+into the server's password dialog itself, one character a frame through the
+system's own input.
+
+```
+# bot.login - the whole file may be just the password.
+password=whatever it is
+# Optional: only a dialog whose caption contains this is answered.
+caption=Авторизация
+# Optional: auto=off leaves it for an explicit `login` call.
+auto=on
+```
+
+It is deliberately narrow: only a dialog the server marked as a *password
+input* is answered, only before the character first spawns, only once in a
+session, and only while the game's window is in front. A bank PIN asked later
+in the evening is not the account password and does not get one.
+
+The password never reaches the log, the interface or the network, and
+`bot.login` is in `.gitignore`. Plain text is accepted, and so is the output
+of PowerShell's `ConvertFrom-SecureString`, which ties the file to the Windows
+account that wrote it and costs one command:
+
+```
+Read-Host "password" -AsSecureString | ConvertFrom-SecureString |
+    Set-Content D:\SAMPot.login
+```
+
+Either way, anyone who can use your unlocked Windows session can now log into
+your game account. That is what automating a login means.
+
 ## When it crashes
 
 `bot.asi.log` is written before anything else and holds three things worth
