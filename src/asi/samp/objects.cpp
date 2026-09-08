@@ -34,6 +34,16 @@ namespace {
 constexpr std::uint32_t kNetGameRva   = 0x21A0F8;
 constexpr std::uint32_t kPoolsAt      = 0x3CD;
 constexpr std::uint32_t kObjectPoolAt = 0x04;
+constexpr std::uint32_t kPickupPoolAt = 0x20;
+
+// CPickupPool, packed: a count, then four thousand and ninety-six handles,
+// ids, timers and weapon records, and the pickups themselves after all of
+// them. A pickup is a model, a type and a position.
+constexpr int kMaxPickups = 4096;
+constexpr std::uint32_t kPickupIds     = 0x04 + kMaxPickups * 4;          // 0x4004
+constexpr std::uint32_t kPickupObjects = 0x04 + kMaxPickups * (4 + 4 + 4) +
+                                         kMaxPickups * 3;                // 0xF004
+constexpr std::uint32_t kPickupBytes   = 20;
 
 constexpr int kMaxObjects = 1000;
 constexpr std::uint32_t kLargestId = 0x00;
@@ -218,6 +228,74 @@ std::vector<NearObject> ObjectsNear(const Vec3& at, float radius,
             });
   if (found.size() > max) found.resize(max);
   return found;
+}
+
+std::vector<Pickup> PickupsNear(const Vec3& at, float radius, std::size_t max) {
+  std::vector<Pickup> found;
+  const Client client = Detect();
+  if (client.base == 0) return found;
+  std::uint32_t netgame = 0, pools = 0, pool = 0;
+  if (!asi::mem::Read<std::uint32_t>(client.base + kNetGameRva, &netgame) ||
+      netgame == 0 ||
+      !asi::mem::Read<std::uint32_t>(netgame + kPoolsAt, &pools) || pools == 0 ||
+      !asi::mem::Read<std::uint32_t>(pools + kPickupPoolAt, &pool) || pool == 0)
+    return found;
+  if (!asi::mem::IsReadable(pool, kPickupObjects + kMaxPickups * kPickupBytes))
+    return found;
+
+  const float radius_squared = radius * radius;
+  for (int i = 0; i < kMaxPickups; ++i) {
+    std::int32_t id = 0;
+    if (!asi::mem::Read<std::int32_t>(pool + kPickupIds + i * 4, &id) || id <= 0)
+      continue;
+    const std::uintptr_t entry = pool + kPickupObjects +
+                                 static_cast<std::uint32_t>(i) * kPickupBytes;
+    Pickup one;
+    asi::mem::Read<std::int32_t>(entry + 0, &one.model);
+    asi::mem::Read<std::int32_t>(entry + 4, &one.type);
+    asi::mem::Read<float>(entry + 8, &one.at.x);
+    asi::mem::Read<float>(entry + 12, &one.at.y);
+    asi::mem::Read<float>(entry + 16, &one.at.z);
+    if (!(one.at.x == one.at.x) || std::fabs(one.at.x) > kWorldEdge) continue;
+    if (one.model <= 0) continue;
+    const float dx = one.at.x - at.x, dy = one.at.y - at.y, dz = one.at.z - at.z;
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 > radius_squared) continue;
+    one.id = id;
+    one.away_m = std::sqrt(d2);
+    found.push_back(one);
+  }
+  std::sort(found.begin(), found.end(),
+            [](const Pickup& a, const Pickup& b) { return a.away_m < b.away_m; });
+  if (found.size() > max) found.resize(max);
+  return found;
+}
+
+bool IsDoorModel(int model) {
+  // The generic door models, and the swing doors and gates that turn up in
+  // the same places. A server that uses something else of its own will show
+  // up in the log when the walk leans on it, and can be added then.
+  if (model >= 1491 && model <= 1533) return true;
+  switch (model) {
+    case 1569: case 1570:            // gen_doorEXT
+    case 2634: case 2635: case 2636: // swing doors
+    case 3037: case 3089:            // gates
+    case 8674: case 8675: case 8676:
+    case 19302: case 19303: case 19304: case 19305:
+      return true;
+    default:
+      return false;
+  }
+}
+
+std::vector<NearObject> DoorsNear(const Vec3& at, float radius, std::size_t max) {
+  std::vector<NearObject> doors;
+  for (const NearObject& one : ObjectsNear(at, radius, 200)) {
+    if (!IsDoorModel(one.model)) continue;
+    doors.push_back(one);
+    if (doors.size() >= max) break;
+  }
+  return doors;
 }
 
 std::string ObjectTextsNote() { return g_note; }

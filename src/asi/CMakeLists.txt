@@ -19,6 +19,7 @@ add_library(bot MODULE
   game/collision.cpp
   game/api_trace.cpp
   game/paths.cpp
+  nav/indoors.cpp
   nav/planner.cpp
   nav/roads.cpp
   hooks/cursor.cpp

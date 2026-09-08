@@ -279,6 +279,15 @@ int  g_pushes = 0;
 constexpr unsigned long long kPushForMs = 1800;
 constexpr int kPushesPerPlace = 2;
 constexpr float kDoorReach = 3.0f;
+// A door is worth walking to even when it is not straight ahead.
+constexpr float kDoorSearch = 5.0f;
+Vec3 g_push_at{};
+bool g_pushing_at_something = false;
+// The door he is already dealing with, so the same one is not spliced into
+// the route over and over.
+Vec3 g_door_seen{};
+bool g_door_known = false;
+constexpr float kThroughDoor = 3.0f;
 
 unsigned long long g_hanging_since = 0;
 unsigned long long g_letting_go_until = 0;
@@ -767,19 +776,54 @@ bool DecideStick(short* out_x, short* out_y) {
         const float reach = 1.6f;
         const Vec3 ahead_of_him{here.x + std::cos(ahead) * reach,
                                 here.y + std::sin(ahead) * reach, here.z};
-        const std::vector<samp::NearObject> things =
-            samp::ObjectsNear(ahead_of_him, kDoorReach, 3);
+        // A door first, wherever it is within reach, because a door is what
+        // opens; then whatever else is directly in front, because it might
+        // be one the list does not know about.
+        std::vector<samp::NearObject> things =
+            samp::DoorsNear(here, kDoorSearch, 3);
+        bool is_a_door = !things.empty();
+        if (things.empty())
+          things = samp::ObjectsNear(ahead_of_him, kDoorReach, 3);
         if (!things.empty()) {
+          const Vec3 what = things.front().at;
           ++g_pushes;
           g_pushing_until = now + kPushForMs;
           g_closer_ms = now;         // leaning on it is not standing still
           g_follow_side = 0;
           g_lean = 0;
-          LOG_INFO("walk: something of the server's is in the way ({:.1f} m, "
-                   "model {}) - leaning on it, some of them open that way "
-                   "(push {})", things.front().away_m, things.front().model,
-                   g_pushes);
-          return true;   // keep pressing, straight at it
+          g_push_at = what;
+          g_pushing_at_something = true;
+
+          // A door is not somewhere to stand, it is somewhere to go through.
+          // Leaning on it for a second and then heading off to the target
+          // again is how he kept running past it, so the far side of it
+          // becomes the next place he is walking to and the door is on the
+          // way there.
+          const float dx = what.x - here.x, dy = what.y - here.y;
+          const float span = std::sqrt(dx * dx + dy * dy);
+          const bool fresh_door = is_a_door && span > 0.2f &&
+                                  (!g_door_known ||
+                                   Distance2D(what, g_door_seen) > 2.0f);
+          if (fresh_door) {
+            g_door_known = true;
+            g_door_seen = what;
+            const Vec3 beyond{what.x + dx / span * kThroughDoor,
+                              what.y + dy / span * kThroughDoor, what.z};
+            if (g_leg <= g_route.size()) {
+              g_route.insert(g_route.begin() + static_cast<long>(g_leg), beyond);
+              g_best_distance = 0;
+            }
+            LOG_INFO("walk: a door at ({:.0f},{:.0f}), model {} - walking "
+                     "through it to ({:.0f},{:.0f})", what.x, what.y,
+                     things.front().model, beyond.x, beyond.y);
+          } else {
+            LOG_INFO("walk: {} in the way ({:.1f} m, model {}) at ({:.0f},{:.0f}) - "
+                     "leaning on it (push {})",
+                     is_a_door ? "a door" : "something of the server's",
+                     things.front().away_m, things.front().model, what.x, what.y,
+                     g_pushes);
+          }
+          return true;   // keep pressing, at it
         }
       }
       RememberWhatIsAhead(here, ahead, "something he kept walking into");
@@ -819,7 +863,10 @@ bool DecideStick(short* out_x, short* out_y) {
 
   // Where he is going, and where he is going to be sent.
   const bool stepping = now < g_sidestep_until;
-  const Vec3& aim = stepping ? g_sidestep_target : target;
+  if (now >= g_pushing_until) g_pushing_at_something = false;
+  const Vec3& aim = g_pushing_at_something ? g_push_at
+                    : stepping             ? g_sidestep_target
+                                           : target;
   const float wanted = std::atan2(aim.y - here.y, aim.x - here.x);
 
   // Look where he is going, and lean away from what is there.
@@ -1169,6 +1216,7 @@ void WalkTo(std::vector<Vec3> route) {
   g_hanging_since = 0;
   g_pushing_until = 0;
   g_pushes = 0;
+  g_door_known = false;
   g_letting_go_until = 0;
   g_lets_go = 0;
   g_on_ground = true;

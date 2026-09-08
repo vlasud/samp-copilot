@@ -16,6 +16,7 @@
 #include "game/bindings.hpp"
 #include "game/paths.hpp"
 #include "game/world_query.hpp"
+#include "nav/indoors.hpp"
 #include "nav/planner.hpp"
 #include "samp/chat.hpp"
 #include "samp/dialog.hpp"
@@ -579,6 +580,100 @@ void RegisterTools(Server* server) {
           out.push_back(std::move(one));
         }
         return json{{"textdraws", std::move(out)}, {"note", samp::TextDrawsNote()}};
+      },
+  });
+
+  server->AddTool({
+      "get_pickups",
+      "The things the server has put on the floor to be walked into: the way "
+      "out of an interior, a shop counter, a job point, an entrance. Walking "
+      "onto one is how a player uses it, so travel_to its position is how "
+      "this character does.",
+      {{"type", "object"},
+       {"properties",
+        {{"radius",
+          {{"type", "number"}, {"minimum", 1}, {"maximum", 300},
+           {"description", "How far to look. Defaults to forty metres."}}},
+         {"limit",
+          {{"type", "integer"}, {"minimum", 1}, {"maximum", 100},
+           {"description", "At most this many. Defaults to twenty."}}}}}},
+      [](const json& args) -> json {
+        const float radius = args.value("radius", 40.0f);
+        const std::size_t limit = args.value("limit", 20);
+        std::int64_t age_ms = -1;
+        const json world = asi::Bridge::GetWorld(&age_ms);
+        const json pos = world.value("self", json::object()).value("pos", json::array());
+        if (pos.size() < 3)
+          throw std::runtime_error("where the character is is not known yet");
+        const game::Vec3 here{pos[0].get<float>(), pos[1].get<float>(),
+                              pos[2].get<float>()};
+        json out = json::array();
+        for (const samp::Pickup& one : samp::PickupsNear(here, radius, limit))
+          out.push_back(json{{"id", one.id},
+                             {"model", one.model},
+                             {"type", one.type},
+                             {"away_m", one.away_m},
+                             {"at", json{{"x", one.at.x},
+                                         {"y", one.at.y},
+                                         {"z", one.at.z}}}});
+        return json{{"pickups", std::move(out)}};
+      },
+  });
+
+  server->AddTool({
+      "map_room",
+      "Feels out the room he is standing in and draws it. Indoors nothing "
+      "else works: the game's pedestrian graph stops at the door of every "
+      "building, and asking whether a place can be stood in wants a clear "
+      "line from the floor to head height, which a low ceiling refuses "
+      "everywhere. This asks a different question - can a knee and a chest "
+      "pass from here to there - which a wall answers no and a doorway "
+      "answers yes. Returns the room as a picture, the way through it, and "
+      "where it ends nearest wherever you said you were going, which is the "
+      "door whether it is open or shut.",
+      {{"type", "object"},
+       {"properties",
+        {{"x", {{"type", "number"}, {"description", "Where you are trying to get to."}}},
+         {"y", {{"type", "number"}}},
+         {"radius",
+          {{"type", "number"}, {"minimum", 4}, {"maximum", 40},
+           {"description", "How far around him to feel. Defaults to twenty metres."}}},
+         {"picture",
+          {{"type", "boolean"},
+           {"description", "Include the drawing. On by default."}}}}},
+       {"required", json::array({"x", "y"})}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              const samp::LocalPed self = samp::ReadLocalPed();
+              if (!self.valid)
+                throw std::runtime_error("the local player is not readable");
+              const game::Vec3 here{self.x, self.y, self.z};
+              const game::Vec3 towards{args.value("x", self.x),
+                                       args.value("y", self.y), self.z};
+              const nav::Room room =
+                  nav::MapRoom(here, towards, args.value("radius", 20.0f));
+              json out{{"note", room.note},
+                       {"cells_reached", room.cells_reached},
+                       {"cell_m", room.cell_m},
+                       {"reaches_target", room.reaches_target}};
+              if (room.way_out_found)
+                out["way_out"] = json{{"x", room.way_out.x},
+                                      {"y", room.way_out.y},
+                                      {"z", room.way_out.z},
+                                      {"away_from_target_m", room.way_out_away_m}};
+              json path = json::array();
+              for (const game::Vec3& point : room.points)
+                path.push_back(json{{"x", point.x}, {"y", point.y}});
+              out["way_there"] = std::move(path);
+              if (args.value("picture", true)) {
+                json picture = json::array();
+                for (const std::string& row : room.picture) picture.push_back(row);
+                out["picture"] = std::move(picture);
+              }
+              return out;
+            },
+            kSlowTimeoutMs);
       },
   });
 

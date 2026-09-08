@@ -52,4 +52,26 @@ struct NearObject {
 std::vector<NearObject> ObjectsNear(const Vec3& at, float radius,
                                     std::size_t max);
 
+// Whether a model is one of the game's doors. The generic ones a server
+// builds a room out of run from 1491 to 1533 - gen_doorINT and gen_doorEXT -
+// and 1494 is the one that stood between the character and the corridor.
+bool IsDoorModel(int model);
+
+// A pickup: the thing a server puts on the floor to be walked into. The way
+// out of an interior is very often one of these, and so is every shop
+// counter, job point and entrance in the game.
+struct Pickup {
+  int   id = -1;
+  int   model = 0;
+  int   type = 0;
+  Vec3  at;
+  float away_m = 0;
+};
+
+std::vector<Pickup> PickupsNear(const Vec3& at, float radius, std::size_t max);
+
+// Just the doors, nearest first.
+std::vector<NearObject> DoorsNear(const Vec3& at, float radius,
+                                  std::size_t max);
+
 }  // namespace gtabot::samp
