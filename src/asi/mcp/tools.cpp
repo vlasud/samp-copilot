@@ -21,6 +21,7 @@
 #include "samp/dialog.hpp"
 #include "samp/input_state.hpp"
 #include "samp/keys.hpp"
+#include "samp/labels.hpp"
 #include "samp/login.hpp"
 #include "samp/world.hpp"
 #include "samp/discovery.hpp"
@@ -36,6 +37,8 @@ namespace {
 // A scan of samp.dll alone takes a frame or two; sweeping the whole process is
 // a second of memcmp, and it runs inside the game's frame.
 constexpr int kFastTimeoutMs = 5000;
+// The first look for the three-dimensional text walks the client's memory.
+constexpr int kSlowTimeoutMs = 30000;
 constexpr int kScanTimeoutMs = 60000;
 
 json NoArguments() {
@@ -527,6 +530,63 @@ void RegisterTools(Server* server) {
               return out;
             },
             kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "get_labels",
+      "The three-dimensional text the server has hung in the air near the "
+      "character, nearest first. A role-play server says a great deal this "
+      "way and none of it reaches the chat: what a building is, whose house "
+      "this is, what to press at the barrier ahead. Read this when something "
+      "will not let him past and the chat says nothing.",
+      {{"type", "object"},
+       {"properties",
+        {{"radius",
+          {{"type", "number"}, {"minimum", 1}, {"maximum", 500},
+           {"description", "How far to look. Defaults to sixty metres."}}},
+         {"limit",
+          {{"type", "integer"}, {"minimum", 1}, {"maximum", 100},
+           {"description", "At most this many. Defaults to twenty."}}}}}},
+      [](const json& args) -> json {
+        {
+              const float radius = args.value("radius", 60.0f);
+              const std::size_t limit = args.value("limit", 20);
+              // Off the game thread on purpose: this is reading memory, not
+              // touching the client's live structures, and the first look
+              // walks a lot of it. The position comes from the snapshot the
+              // game thread keeps up to date.
+              std::int64_t age_ms = -1;
+              const json world = asi::Bridge::GetWorld(&age_ms);
+              const json me = world.value("self", json::object());
+              const json pos = me.value("pos", json::array());
+              if (pos.size() < 3)
+                throw std::runtime_error("where the character is is not known yet");
+              const game::Vec3 here{pos[0].get<float>(), pos[1].get<float>(),
+                                    pos[2].get<float>()};
+              json out = json::array();
+              for (const samp::Label& label : samp::LabelsNear(here, radius, limit))
+                out.push_back(json{{"text", label.text},
+                                   {"away_m", label.away_m},
+                                   {"at", json{{"x", label.at.x},
+                                               {"y", label.at.y},
+                                               {"z", label.at.z}}},
+                                   {"draw_distance", label.draw_distance}});
+              json result{{"labels", out}, {"note", samp::LabelsNote()}};
+              if (out.empty()) {
+                // Nothing near: say what the table does hold, so the next
+                // question is about the right thing.
+                json sample = json::array();
+                for (const samp::Label& label : samp::LabelsAny(here, 6))
+                  sample.push_back(json{{"text", label.text},
+                                        {"away_m", label.away_m},
+                                        {"at", json{{"x", label.at.x},
+                                                    {"y", label.at.y},
+                                                    {"z", label.at.z}}}});
+                result["nothing_near_but_the_table_holds"] = std::move(sample);
+              }
+              return result;
+        }
       },
   });
 

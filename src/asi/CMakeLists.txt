@@ -27,6 +27,7 @@ add_library(bot MODULE
   samp/version.cpp
   samp/dialog.cpp
   samp/keys.cpp
+  samp/labels.cpp
   samp/login.cpp
   samp/discovery.cpp
   samp/chat.cpp
