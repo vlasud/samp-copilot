@@ -14,6 +14,7 @@
 #include <cstring>
 #include <mutex>
 
+#include "game/bindings.hpp"
 #include "game/exe.hpp"
 #include "hooks/windowmode.hpp"
 #include "log.hpp"
@@ -40,22 +41,8 @@ constexpr std::uint32_t kKeyState   = 0x78;    // CPad::PCTempKeyState
 constexpr std::uint32_t kTempKeyTable = 0xB72CB0;   // CPad::TempKeyState
 constexpr std::uint32_t kStandardKeys = 0x18;
 constexpr short kKeyDown = 255;
-// CControllerConfigManager: which keys the player bound to walking. Type 0
-// is the primary key, type 1 the alternative; arrows and WASD by default.
-constexpr std::uint32_t kControlsManager = 0xB70198;
-constexpr std::uint32_t kActions         = 0xB70;
-constexpr std::uint32_t kActionSize      = 0x20;
-constexpr std::uint32_t kKeySize         = 0x8;
-constexpr int kGoForward = 4, kGoBack = 5, kGoLeft = 6, kGoRight = 7;
-constexpr int kJumping = 12, kSprint = 13;
 constexpr unsigned kFwd = 1, kBack = 2, kRight = 4, kLeft = 8;
 constexpr unsigned kSprintKey = 16, kJumpKey = 32;
-// The game's own key codes above the virtual keys: what a binding to a
-// modifier or an arrow looks like in the controls table.
-constexpr int kRsUp = 1019, kRsDown = 1020, kRsLeft = 1021, kRsRight = 1022;
-constexpr int kRsEnter = 1045, kRsLShift = 1046, kRsRShift = 1047, kRsShift = 1048;
-constexpr int kRsLCtrl = 1049, kRsRCtrl = 1050, kRsLAlt = 1051, kRsRAlt = 1052;
-constexpr int kRsTab = 1043, kRsBackspace = 1042;
 // CPad is 0x134 bytes; NewState is the first member. Its sticks are the first
 // two shorts of it, and the buttons follow in PlayStation order: square is
 // jump, cross is sprint.
@@ -318,78 +305,19 @@ unsigned long long g_jump_release_ms = 0;
 std::atomic<unsigned long long> g_key_events{0};
 std::atomic<bool> g_test_keys{false};
 
-// A binding as a virtual key: letters, digits and space come through as
-// their own codes; the game's codes for the modifiers and arrows are mapped.
-int VirtualKey(int code) {
-  if (code > 0 && code < 256) return code;
-  switch (code) {
-    case kRsUp:     return VK_UP;
-    case kRsDown:   return VK_DOWN;
-    case kRsLeft:   return VK_LEFT;
-    case kRsRight:  return VK_RIGHT;
-    case kRsEnter:  return VK_RETURN;
-    case kRsLShift: case kRsShift: return VK_LSHIFT;
-    case kRsRShift: return VK_RSHIFT;
-    case kRsLCtrl:  return VK_LCONTROL;
-    case kRsRCtrl:  return VK_RCONTROL;
-    case kRsLAlt:   return VK_LMENU;
-    case kRsRAlt:   return VK_RMENU;
-    case kRsTab:    return VK_TAB;
-    case kRsBackspace: return VK_BACK;
-    default:        return 0;
-  }
-}
-
-int BoundKey(int action, int fallback) {
-  const std::uintptr_t table = game::At(kControlsManager) + kActions;
-  // The alternative first: WASD sits there when arrows are the primary.
-  for (int type = 1; type >= 0; --type) {
-    std::uint32_t code = 0;
-    if (!asi::mem::Read<std::uint32_t>(table + action * kActionSize + type * kKeySize,
-                                       &code))
-      continue;
-    const int vk = VirtualKey(static_cast<int>(code));
-    if (vk != 0) return vk;
-  }
-  return fallback;
-}
-
-std::string KeyName(int vk) {
-  if (vk >= '0' && vk <= 'Z') return std::string(1, static_cast<char>(vk));
-  switch (vk) {
-    case VK_SPACE:    return "Space";
-    case VK_LSHIFT:   return "LShift";
-    case VK_RSHIFT:   return "RShift";
-    case VK_LCONTROL: return "LCtrl";
-    case VK_RCONTROL: return "RCtrl";
-    case VK_LMENU:    return "LAlt";
-    case VK_RMENU:    return "RAlt";
-    case VK_UP:       return "Up";
-    case VK_DOWN:     return "Down";
-    case VK_LEFT:     return "Left";
-    case VK_RIGHT:    return "Right";
-    case VK_RETURN:   return "Enter";
-    case VK_TAB:      return "Tab";
-    default: {
-      char text[16];
-      std::snprintf(text, sizeof(text), "vk%02X", vk);
-      return text;
-    }
-  }
-}
-
 void ReadBindings() {
   if (g_keys_read) return;
   g_keys_read = true;
-  g_key_fwd    = BoundKey(kGoForward, 'W');
-  g_key_back   = BoundKey(kGoBack, 'S');
-  g_key_left   = BoundKey(kGoLeft, 'A');
-  g_key_right  = BoundKey(kGoRight, 'D');
-  g_key_sprint = BoundKey(kSprint, VK_SPACE);
-  g_key_jump   = BoundKey(kJumping, VK_LSHIFT);
+  g_key_fwd    = game::KeyForAction(game::kGoForward, 'W');
+  g_key_back   = game::KeyForAction(game::kGoBack, 'S');
+  g_key_left   = game::KeyForAction(game::kGoLeft, 'A');
+  g_key_right  = game::KeyForAction(game::kGoRight, 'D');
+  g_key_sprint = game::KeyForAction(game::kSprint, VK_SPACE);
+  g_key_jump   = game::KeyForAction(game::kJumping, VK_LSHIFT);
   LOG_INFO("walker: keys {} {} {} {} (forward, back, left, right), sprint {}, jump {}",
-           KeyName(g_key_fwd), KeyName(g_key_back), KeyName(g_key_left),
-           KeyName(g_key_right), KeyName(g_key_sprint), KeyName(g_key_jump));
+           game::KeyName(g_key_fwd), game::KeyName(g_key_back),
+           game::KeyName(g_key_left), game::KeyName(g_key_right),
+           game::KeyName(g_key_sprint), game::KeyName(g_key_jump));
 }
 
 // One key down or up, through the system: the same road a finger takes.

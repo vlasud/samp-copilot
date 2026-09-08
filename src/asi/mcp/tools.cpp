@@ -12,6 +12,7 @@
 #include "mcp/server.hpp"
 #include "actions/travel.hpp"
 #include "actions/walker.hpp"
+#include "game/bindings.hpp"
 #include "game/paths.hpp"
 #include "game/world_query.hpp"
 #include "nav/planner.hpp"
@@ -24,6 +25,7 @@
 #include "samp/discovery.hpp"
 #include "samp/version.hpp"
 #include "state/events.hpp"
+#include "state/memory.hpp"
 #include "state/probe.hpp"
 #include "types.hpp"
 
@@ -425,6 +427,11 @@ void RegisterTools(Server* server) {
                 shown["id"]      = dialog.id;
               }
               out["dialog"] = shown;
+              // The ped's own state: fifty is at the wheel or in a seat.
+              int ped_state = -1;
+              if (self.valid && self.game_ped != 0)
+                asi::mem::Read<int>(self.game_ped + 0x530, &ped_state);
+              out["in_vehicle"] = ped_state == 50;
               out["ready_to_travel"] = spawned && armed && readable && !dialog.shown;
 
               const char* next = "ready: call travel_to with x and y";
@@ -504,6 +511,32 @@ void RegisterTools(Server* server) {
                 out["text"]    = dialog.text;
               }
               return out;
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "use_vehicle",
+      "Presses the key the player has bound to getting in and out of a "
+      "vehicle. Standing beside one he gets in; sitting in one he gets out - "
+      "the game decides which, exactly as it does for a person, so walk him "
+      "next to the car first with travel_to and read 'in_vehicle' afterwards "
+      "to see what came of it. Nothing is forced: a locked car stays locked.",
+      NoArguments(),
+      [](const json&) {
+        return Rpc::RunOnGameThread(
+            []() -> json {
+              if (samp::KeysBusy())
+                throw std::runtime_error("keys are still being played - try again");
+              const samp::LocalPed self = samp::ReadLocalPed();
+              if (!self.valid)
+                throw std::runtime_error("the local player is not readable");
+              const int key = game::KeyForAction(game::kVehicleEnterExit, VK_RETURN);
+              samp::KeysPress(key);
+              return json{{"pressed", game::KeyName(key)},
+                          {"note", "read ready or get_world in a second or two - "
+                                   "getting in takes an animation"}};
             },
             kFastTimeoutMs);
       },

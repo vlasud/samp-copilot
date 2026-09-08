@@ -14,6 +14,7 @@ add_library(bot MODULE
   game/map_marker.cpp
   game/mouse_watch.cpp
   game/watchpoint.cpp
+  game/bindings.cpp
   game/collision.cpp
   game/api_trace.cpp
   game/paths.cpp
