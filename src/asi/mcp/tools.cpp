@@ -177,6 +177,19 @@ json TravelStatusJson() {
   return out;
 }
 
+// Whether a row says what was asked for: a case-insensitive containment,
+// which is what naming a menu row amounts to when the server writes it with
+// a number, a colour and a trailing space.
+bool Mentions(const std::string& row, const std::string& want) {
+  if (want.empty()) return false;
+  const auto fold = [](std::string text) {
+    for (char& c : text)
+      if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    return text;
+  };
+  return fold(row).find(fold(want)) != std::string::npos;
+}
+
 json TravelTo(const json& args) {
   const samp::LocalPed self = samp::ReadLocalPed();
   if (!self.valid) throw std::runtime_error("the local player is not readable");
@@ -1116,7 +1129,7 @@ void RegisterTools(Server* server) {
       "a role-play server offers is behind one of these, so this is how the "
       "character uses a menu, a bank, a job or a phone. Read it with "
       "get_dialog first; the rows of a list are the lines of its text, counted "
-      "from zero. The server's own login dialog is answered by 'login' "
+      "from zero, though 'choose' names a row by what it says instead. The server's own login dialog is answered by 'login' "
       "instead, which is where the password lives.",
       {{"type", "object"},
        {"properties",
@@ -1124,6 +1137,14 @@ void RegisterTools(Server* server) {
           {{"type", "integer"},
            {"minimum", 0},
            {"description", "Row of a list dialog to choose, counted from zero."}}},
+         {"choose",
+          {{"type", "string"},
+           {"description", "The row that says this, instead of its number - "
+                           "case-insensitive, matched on the row's text with "
+                           "the colour codes removed. Prefer it: a server "
+                           "renumbers its menus and orders them differently "
+                           "for different players. Says which rows there are "
+                           "when nothing matches."}}},
          {"text",
           {{"type", "string"},
            {"description", "What to type into an input dialog."}}},
@@ -1144,8 +1165,44 @@ void RegisterTools(Server* server) {
                 throw std::runtime_error("no dialog is on screen");
               json did = json::array();
 
-              if (args.contains("item") && args["item"].is_number_integer()) {
-                const int item = args["item"].get<int>();
+              // A row named rather than numbered. A server renumbers its
+              // menus between updates and puts the rows in a different order
+              // for a player of a different rank, so "the row that says
+              // Мин. здравоохранения" survives what "row 11" does not.
+              int item = -1;
+              if (args.contains("choose") && args["choose"].is_string()) {
+                const std::string want =
+                    samp::WithoutColours(args["choose"].get<std::string>());
+                std::vector<std::string> rows;
+                std::string row;
+                for (const char c : dialog.text) {
+                  if (c == 0x0A) { rows.push_back(row); row.clear(); }
+                  else row += c;
+                }
+                rows.push_back(row);
+                std::vector<int> matches;
+                for (std::size_t i = 0; i < rows.size(); ++i)
+                  if (Mentions(samp::WithoutColours(rows[i]), want))
+                    matches.push_back(static_cast<int>(i));
+                if (matches.empty()) {
+                  std::string listed;
+                  for (std::size_t i = 0; i < rows.size() && i < 30; ++i)
+                    listed += std::string("\n  ") + std::to_string(i) +
+                              ": " + samp::WithoutColours(rows[i]);
+                  throw std::runtime_error("no row says \"" + want +
+                                           "\"; the rows are:" + listed);
+                }
+                if (matches.size() > 1)
+                  throw std::runtime_error(
+                      std::to_string(matches.size()) +
+                      " rows say that - name it more exactly");
+                item = matches.front();
+                did.push_back("found \"" + want + "\" on row " +
+                              std::to_string(item));
+              }
+              if (item >= 0 || (args.contains("item") &&
+                                args["item"].is_number_integer())) {
+                if (item < 0) item = args["item"].get<int>();
                 // The rows are the lines of the text. Where the selection
                 // sits now is the client's business, so it is walked to the
                 // top first and counted down from there.
