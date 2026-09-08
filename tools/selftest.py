@@ -10,7 +10,11 @@ import sys
 
 from mcp_http import Client, NotRunning
 
-EXPECTED_TOOLS = ["bot_status", "get_world", "probe_memory", "send_chat"]
+# The ones a test run leans on. The list is not exhaustive on purpose:
+# a tool added since is not a failure.
+EXPECTED_TOOLS = ["bot_status", "get_world", "set_movement", "travel_to",
+                  "travel_status", "walk_status", "stop", "probe_memory",
+                  "send_chat"]
 
 
 class Report:
@@ -38,8 +42,10 @@ def main():
         return 1
     r.check("initialize", info["serverInfo"]["name"] == "gtabot",
             info["serverInfo"])
-    r.check("tools/list", sorted(t["name"] for t in client.tools()) ==
-            EXPECTED_TOOLS)
+    have = sorted(t["name"] for t in client.tools())
+    missing = [t for t in EXPECTED_TOOLS if t not in have]
+    r.check("tools/list", not missing, "missing " + ", ".join(missing) if missing
+            else "%d tools" % len(have))
 
     print("Status", flush=True)
     status = client.tool("bot_status")

@@ -384,6 +384,48 @@ void RegisterTools(Server* server) {
   });
 
   server->AddTool({
+      "set_movement",
+      "Arms the character's movement, or stands it down. Nothing that moves "
+      "him works until this is on: it is off when the game starts, and the "
+      "F11 menu's own switch is the same one. Arming runs the two checks that "
+      "decide whether the world reads correctly here - the ground under him "
+      "must be about a ped's height below him, and the space he stands in "
+      "must read as clear - and reports them, so a test run can wait for "
+      "'ready' rather than guess.",
+      {{"type", "object"},
+       {"properties", {{"on", {{"type", "boolean"},
+                               {"description", "True to arm, false to stand down."}}}}},
+       {"required", json::array({"on"})}},
+      [](const json& args) {
+        const bool on = args.value("on", false);
+        return Rpc::RunOnGameThread(
+            [on]() -> json {
+              if (!on) {
+                act::CancelTravel("stood down over the interface");
+                act::Stop("stood down over the interface");
+                game::SetEnabled(false);
+                return json{{"movement", "off"}, {"ready", false}};
+              }
+              game::SetEnabled(true);
+              const samp::LocalPed self = samp::ReadLocalPed();
+              const char* why = "the local player is not readable yet";
+              bool ground = false, sight = false;
+              if (self.valid) {
+                const game::Vec3 here{self.x, self.y, self.z};
+                ground = game::SelfCheck(here, &why);
+                if (ground) sight = game::SelfCheckLineOfSight(here, &why);
+              }
+              return json{{"movement", "on"},
+                          {"ground_verified", ground},
+                          {"line_of_sight_verified", sight},
+                          {"ready", game::CallsTrusted() && game::LineOfSightAvailable()},
+                          {"note", why}};
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
       "stop",
       "Let go of the controller. The character stops where he is and the "
       "player's own input passes through untouched again.",
