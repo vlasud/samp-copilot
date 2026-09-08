@@ -134,7 +134,7 @@ json WalkStatus() {
 
 json DriveStatusJson() {
   const act::DriveStatus drive = act::DriveGet();
-  return json{{"driving", drive.driving},
+  json out{{"driving", drive.driving},
               {"note", drive.note},
               {"leg", drive.leg},
               {"legs", drive.legs},
@@ -143,6 +143,21 @@ json DriveStatusJson() {
               {"speed_kmh", drive.speed_kmh},
               {"heading_error_deg", drive.heading_error_deg},
               {"times_stuck", drive.times_stuck}};
+  // A car that will not go on is usually being told why, in writing, by
+  // something it is parked in front of.
+  if (drive.times_stuck > 0) {
+    const samp::LocalPed self = samp::ReadLocalPed();
+    if (self.valid) {
+      const game::Vec3 here{self.x, self.y, self.z};
+      json writing = json::array();
+      for (const samp::ObjectText& painted : samp::ObjectTextsNear(here, 60.0f, 6))
+        writing.push_back(json{{"away_m", painted.away_m}, {"text", painted.text}});
+      for (const samp::Label& label : samp::LabelsNear(here, 60.0f, 4))
+        writing.push_back(json{{"away_m", label.away_m}, {"text", label.text}});
+      if (!writing.empty()) out["written_round_about"] = std::move(writing);
+    }
+  }
+  return out;
 }
 
 json TravelStatusJson() {
@@ -432,6 +447,7 @@ void RegisterTools(Server* server) {
 
               json out;
               out["client_found"] = client.base != 0;
+              out["connection"] = samp::ConnectionState();
               out["spawned"]      = spawned;
               out["movement_armed"] = armed;
               out["world_readable"] = readable;
@@ -456,6 +472,9 @@ void RegisterTools(Server* server) {
               const char* next = "ready: call travel_to with x and y";
               if (client.base == 0) {
                 next = "the SA-MP client is not loaded yet - wait";
+              } else if (out["connection"] == "not connected") {
+                next = "the client is not connected - it was kicked or the "
+                       "server dropped it; the game has to be started again";
               } else if (dialog.shown && dialog.style == 3) {
                 next = samp::LoginConfigured()
                            ? "the server is asking for a password - it is being "
@@ -560,6 +579,43 @@ void RegisterTools(Server* server) {
           out.push_back(std::move(one));
         }
         return json{{"textdraws", std::move(out)}, {"note", samp::TextDrawsNote()}};
+      },
+  });
+
+  server->AddTool({
+      "get_objects",
+      "The server's own objects near the character, nearest first, with the "
+      "model each is made of. A room a server has built is these; so is a "
+      "door that opens when it is pushed, a gate, a barrier. When the "
+      "planner says there is no way out of somewhere, this is what is in "
+      "the way.",
+      {{"type", "object"},
+       {"properties",
+        {{"radius",
+          {{"type", "number"}, {"minimum", 1}, {"maximum", 200},
+           {"description", "How far to look. Defaults to fifteen metres."}}},
+         {"limit",
+          {{"type", "integer"}, {"minimum", 1}, {"maximum", 100},
+           {"description", "At most this many. Defaults to twenty."}}}}}},
+      [](const json& args) -> json {
+        const float radius = args.value("radius", 15.0f);
+        const std::size_t limit = args.value("limit", 20);
+        std::int64_t age_ms = -1;
+        const json world = asi::Bridge::GetWorld(&age_ms);
+        const json pos = world.value("self", json::object()).value("pos", json::array());
+        if (pos.size() < 3)
+          throw std::runtime_error("where the character is is not known yet");
+        const game::Vec3 here{pos[0].get<float>(), pos[1].get<float>(),
+                              pos[2].get<float>()};
+        json out = json::array();
+        for (const samp::NearObject& one : samp::ObjectsNear(here, radius, limit))
+          out.push_back(json{{"id", one.id},
+                             {"model", one.model},
+                             {"away_m", one.away_m},
+                             {"at", json{{"x", one.at.x},
+                                         {"y", one.at.y},
+                                         {"z", one.at.z}}}});
+        return json{{"objects", std::move(out)}};
       },
   });
 

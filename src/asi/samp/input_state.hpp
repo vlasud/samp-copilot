@@ -42,6 +42,11 @@ struct InputSwitch {
 
 InputSwitch ReadInputSwitch();
 
+// CNetGame::m_nGameState in words: "connected", "connecting", "waiting to
+// join", "restarting", "not connected". Anything driving this from outside
+// needs to tell a kick from a slow load.
+std::string ConnectionState();
+
 // Worker thread, every quarter second: logs changes, and restores the input
 // when SA-MP has left it off against the player's evident wish.
 void WatchSampInput();

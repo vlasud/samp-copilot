@@ -284,11 +284,11 @@ int CallSlotsLeft() {
   return used >= kCallsPerSecond ? 0 : kCallsPerSecond - used;
 }
 
-bool GroundBelow(const Vec3& at, float* ground_z) {
+bool GroundBelow(const Vec3& at, float* ground_z, bool include_objects) {
   if (!CallsTrusted()) return false;
   if (!TakeCallSlot()) return false;
   g_ground_calls.fetch_add(1, std::memory_order_relaxed);
-  return col::GroundBelow(at.x, at.y, at.z, ground_z);
+  return col::GroundBelow(at.x, at.y, at.z, ground_z, include_objects);
 }
 
 namespace {

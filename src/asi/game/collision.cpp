@@ -610,7 +610,7 @@ bool Ready() {
   return ok;
 }
 
-bool GroundBelow(float x, float y, float z, float* ground_z) {
+bool GroundBelow(float x, float y, float z, float* ground_z, bool include_objects) {
   if (!Ready()) return false;
   EnsureWindow(x, y);
   Query q{};
@@ -618,7 +618,7 @@ bool GroundBelow(float x, float y, float z, float* ground_z) {
   q.b = V{x, y, z - 1000.0f};
   q.nearest = true;
   q.vehicles = false;
-  q.objects = false;   // as the game's own ground probe asks it
+  q.objects = include_objects;
   q.best_t = 2.0f;
   g_queries.fetch_add(1, std::memory_order_relaxed);
   Sweep(&q, x, y, x, y);

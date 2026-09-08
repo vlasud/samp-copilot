@@ -37,4 +37,19 @@ std::vector<ObjectText> ObjectTextsNear(const Vec3& at, float radius,
 
 std::string ObjectTextsNote();
 
+// One of the server's own objects, near something.
+struct NearObject {
+  int   id = -1;
+  int   model = 0;
+  Vec3  at;
+  float away_m = 0;
+};
+
+// The server's objects within `radius`, nearest first. A door that opens
+// when it is pushed is one of these, and so is everything else a server
+// builds a room out of - which is why the walk asks what is in front of it
+// before deciding that the way is shut.
+std::vector<NearObject> ObjectsNear(const Vec3& at, float radius,
+                                    std::size_t max);
+
 }  // namespace gtabot::samp

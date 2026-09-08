@@ -85,7 +85,7 @@ bool LineOfSightAvailable();
 
 // The ground below (x, y, z), searching downwards from z. False when the
 // game finds none - which is also the answer for anywhere not streamed in.
-bool GroundBelow(const Vec3& at, float* ground_z);
+bool GroundBelow(const Vec3& at, float* ground_z, bool include_objects = true);
 
 // The water surface at (x, y), if there is water there at all. The ground
 // call does not know about water - it finds the lake bed and calls it

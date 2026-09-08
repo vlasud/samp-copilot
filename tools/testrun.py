@@ -8,6 +8,7 @@ script can run - no map marker, no F11 menu, no hand on the keyboard.
     python tools/testrun.py launch          start the game and wait for the mod
     python tools/testrun.py wait            until the character can be driven
     python tools/testrun.py travel 1468 -1689
+    python tools/testrun.py session --minutes 60
     python tools/testrun.py ready
     python tools/testrun.py status
     python tools/testrun.py stop
@@ -183,6 +184,58 @@ def cmd_quit(args):
     return 1
 
 
+def cmd_session(args):
+    """Keeps the game up, logged in and past the dialogs, for a while.
+
+    This is what unattended running looks like: start it if it is not up,
+    answer the message boxes the server greets a spawn with, notice a kick
+    and start again. Dialogs that ask for something - a list, a line of
+    text - are left alone and reported: answering one blindly is how a
+    character ends up agreeing to things.
+    """
+    until = time.time() + args.minutes * 60
+    last = ""
+    while time.time() < until:
+        if not game_running():
+            say("the game is not up - starting it")
+            cmd_launch(args)
+            time.sleep(5)
+            continue
+        try:
+            client = connect(30)
+            state = client.tool("ready")
+        except NotRunning:
+            say("the mod stopped answering - closing the game and starting again")
+            cmd_quit(args)
+            continue
+
+        if state.get("connection") == "not connected":
+            say("kicked or dropped - starting the game again")
+            cmd_quit(args)
+            time.sleep(3)
+            continue
+
+        dialog = state.get("dialog", {})
+        if dialog.get("shown"):
+            caption = dialog.get("caption", "")
+            if dialog.get("style") == "message box":
+                say("answering a message box: %s" % caption[:70])
+                client.tool("answer_dialog", {"button": 2})
+            else:
+                say("a %s dialog is waiting and is not mine to answer: %s"
+                    % (dialog.get("style"), caption[:70]))
+            time.sleep(3)
+            continue
+
+        note = state.get("next", "")
+        if note != last:
+            last = note
+            say("  %s" % note)
+        time.sleep(5)
+    say("the session is over")
+    return 0
+
+
 def cmd_log(args):
     if not os.path.exists(LOG):
         say("no log at %s" % LOG)
@@ -233,6 +286,14 @@ def main():
 
     p = sub.add_parser("quit", help="close the game")
     p.set_defaults(run=cmd_quit)
+
+    p = sub.add_parser("session", help="keep the game up and logged in")
+    p.add_argument("--minutes", type=int, default=30)
+    p.add_argument("--timeout", type=int, default=180)
+    p.add_argument("--host", default=HOST)
+    p.add_argument("--port", default=PORT)
+    p.add_argument("--nick", default=NICK)
+    p.set_defaults(run=cmd_session)
 
     p = sub.add_parser("log", help="the mod's log, filtered")
     p.add_argument("--tail", type=int, default=60)

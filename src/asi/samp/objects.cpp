@@ -183,6 +183,43 @@ std::vector<ObjectText> ObjectTextsNear(const Vec3& at, float radius,
   return found;
 }
 
+std::vector<NearObject> ObjectsNear(const Vec3& at, float radius,
+                                    std::size_t max) {
+  std::vector<NearObject> found;
+  const std::uintptr_t pool = Pool();
+  if (pool == 0) return found;
+  const float radius_squared = radius * radius;
+  for (int i = 0; i < kMaxObjects; ++i) {
+    std::uint32_t used = 0;
+    if (!asi::mem::Read<std::uint32_t>(pool + kInUseAt + i * 4, &used) || used == 0)
+      continue;
+    std::uint32_t object = 0;
+    if (!asi::mem::Read<std::uint32_t>(pool + kPointersAt + i * 4, &object) ||
+        object == 0)
+      continue;
+    NearObject one;
+    asi::mem::Read<float>(object + kPositionAt + 0, &one.at.x);
+    asi::mem::Read<float>(object + kPositionAt + 4, &one.at.y);
+    asi::mem::Read<float>(object + kPositionAt + 8, &one.at.z);
+    if (!(one.at.x == one.at.x) || std::fabs(one.at.x) > kWorldEdge) continue;
+    const float dx = one.at.x - at.x, dy = one.at.y - at.y, dz = one.at.z - at.z;
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 > radius_squared) continue;
+    std::int32_t model = 0;
+    asi::mem::Read<std::int32_t>(object + kModelAt, &model);
+    one.id = i;
+    one.model = model;
+    one.away_m = std::sqrt(d2);
+    found.push_back(one);
+  }
+  std::sort(found.begin(), found.end(),
+            [](const NearObject& a, const NearObject& b) {
+              return a.away_m < b.away_m;
+            });
+  if (found.size() > max) found.resize(max);
+  return found;
+}
+
 std::string ObjectTextsNote() { return g_note; }
 
 }  // namespace gtabot::samp

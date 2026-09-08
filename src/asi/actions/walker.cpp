@@ -1,6 +1,7 @@
 #include "actions/walker.hpp"
 
 #include "samp/input_state.hpp"
+#include "samp/objects.hpp"
 #include "samp/keys.hpp"
 #include "game/mouse_watch.hpp"
 #include "ui/overlay.hpp"
@@ -251,6 +252,11 @@ bool  g_wall = false;
 
 // The ground, as of the last probe, and running.
 bool  g_on_ground = true;
+// Whether anything was found under him at all, and how far below it was.
+// "No ground here" is a question the reading could not answer, and treating
+// it as "he is in the air" had him let go of keys he was never holding.
+bool  g_ground_known = false;
+float g_above_ground = 0;
 bool  g_sprint_on = true;
 bool  g_hop_on    = true;
 bool  g_sprinting = false;
@@ -265,6 +271,15 @@ bool  g_was_airborne = false;
 // Hanging off something. A jump at a wall ends with his hands on the ledge,
 // and if it is too high to pull up he stays there for as long as forward is
 // held. Letting go of everything drops him.
+// Leaning on a door. A great many of the things a server builds a room out
+// of swing open when somebody walks into them, and to the whiskers those
+// are a wall like any other - so before going round, he pushes.
+unsigned long long g_pushing_until = 0;
+int  g_pushes = 0;
+constexpr unsigned long long kPushForMs = 1800;
+constexpr int kPushesPerPlace = 2;
+constexpr float kDoorReach = 3.0f;
+
 unsigned long long g_hanging_since = 0;
 unsigned long long g_letting_go_until = 0;
 int   g_lets_go = 0;
@@ -710,7 +725,8 @@ bool DecideStick(short* out_x, short* out_y) {
   // Off the ground and going nowhere: he is holding on to a ledge. Nothing
   // pressed for a moment and he drops, which is the only way down.
   if (now < g_letting_go_until) return false;
-  if (airborne && std::fabs(vz) < kStillVertical) {
+  if (airborne && g_ground_known && g_above_ground > 1.2f &&
+      std::fabs(vz) < kStillVertical) {
     if (g_hanging_since == 0) g_hanging_since = now;
     if (now - g_hanging_since > kHangingMs) {
       g_hanging_since = 0;
@@ -741,10 +757,36 @@ bool DecideStick(short* out_x, short* out_y) {
     const float moved = Distance2D(here, g_window_pos);
     g_window_ms  = now;
     g_window_pos = here;
-    if (moved < kStuckMetres && !airborne && now > g_sidestep_until) {
+    if (moved >= kStuckMetres) g_pushes = 0;   // moving again: the door gave
+    if (moved < kStuckMetres && !airborne && now > g_sidestep_until &&
+        now > g_pushing_until) {
+      // Is it one of the server's own objects he is up against? Those are
+      // what its doors and gates are made of, and a door is opened by
+      // walking into it rather than by walking round it.
+      if (g_pushes < kPushesPerPlace) {
+        const float reach = 1.6f;
+        const Vec3 ahead_of_him{here.x + std::cos(ahead) * reach,
+                                here.y + std::sin(ahead) * reach, here.z};
+        const std::vector<samp::NearObject> things =
+            samp::ObjectsNear(ahead_of_him, kDoorReach, 3);
+        if (!things.empty()) {
+          ++g_pushes;
+          g_pushing_until = now + kPushForMs;
+          g_closer_ms = now;         // leaning on it is not standing still
+          g_follow_side = 0;
+          g_lean = 0;
+          LOG_INFO("walk: something of the server's is in the way ({:.1f} m, "
+                   "model {}) - leaning on it, some of them open that way "
+                   "(push {})", things.front().away_m, things.front().model,
+                   g_pushes);
+          return true;   // keep pressing, straight at it
+        }
+      }
       RememberWhatIsAhead(here, ahead, "something he kept walking into");
-      if (g_whisker_low[0] && now - g_last_jump_ms > 700) {
-        // Standing against something low: over it.
+      if (g_whisker_low[0] && now - g_last_jump_ms > 700 &&
+          !(g_leg + 1 >= g_route.size() && distance < 6.0f)) {
+        // Standing against something low: over it. Unless it is what he was
+        // sent to, in which case standing against it is arriving.
         WantJump(now, "not moving against something low - jumping it");
       } else if (g_follow_side != 0 && g_side_changes < kMaxSideChanges) {
         // Going round it and not moving: that side is a dead end.
@@ -786,10 +828,15 @@ bool DecideStick(short* out_x, short* out_y) {
     g_probe_ms = now;
     // The ground under his own feet, for whether he is standing on it.
     float ground = 0;
-    if (game::GroundBelow(Vec3{here.x, here.y, here.z + 0.5f}, &ground))
+    if (game::GroundBelow(Vec3{here.x, here.y, here.z + 0.5f}, &ground)) {
       g_on_ground = (here.z - 1.0f) - ground < kFeetOnGround;
-    else
+      g_above_ground = (here.z - 1.0f) - ground;
+      g_ground_known = true;
+    } else {
+      // Not knowing what is under him is not the same as being off it.
       g_on_ground = false;
+      g_ground_known = false;
+    }
 
     ProbeWhiskers(here, wanted, descending);
     DecideLean(now);
@@ -903,9 +950,14 @@ bool DecideStick(short* out_x, short* out_y) {
       g_follow_side == 0 && way_clear && !descending &&
       g_remaining > kSprintMinRemaining &&
       std::fabs(heading_error) < kSprintMaxError;
-  if (jump_low_now) {
+  // Not at the door. A person walks the last few steps to a car, and the
+  // car is exactly the low thing the whiskers want to hop over - which is
+  // how he kept jumping past the one he had been sent to.
+  const bool arriving = g_leg + 1 >= g_route.size() && distance < 6.0f;
+  if (jump_low_now && !arriving) {
     WantJump(now, "something low ahead - jumping it");
-  } else if (could_sprint && g_hop_on && settled && distance > kHopMinToNext &&
+  } else if (could_sprint && !arriving && g_hop_on && settled &&
+             distance > kHopMinToNext &&
              now - g_last_jump_ms >= g_hop_gap_ms) {
     WantJump(now, nullptr);
     // The next after a gap of its own, and now and then a longer one. A hop
@@ -1115,6 +1167,8 @@ void WalkTo(std::vector<Vec3> route) {
   g_jumps = 0;
   g_jump_countdown = -1;
   g_hanging_since = 0;
+  g_pushing_until = 0;
+  g_pushes = 0;
   g_letting_go_until = 0;
   g_lets_go = 0;
   g_on_ground = true;

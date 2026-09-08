@@ -226,6 +226,25 @@ void WatchSampInput() {
   LOG_ERROR("samp input: {} - left as it is; F6 then Esc puts it back by hand", why);
 }
 
+std::string ConnectionState() {
+  const Client client = Detect();
+  if (client.base == 0) return "the client is not loaded";
+  std::uint32_t netgame = 0;
+  if (!asi::mem::Read<std::uint32_t>(client.base + 0x21A0F8, &netgame) ||
+      netgame == 0)
+    return "not connected";
+  std::int32_t state = 0;
+  if (!asi::mem::Read<std::int32_t>(netgame + 0x3BD, &state)) return "unreadable";
+  switch (state) {
+    case 9:  return "waiting to connect";
+    case 13: return "connecting";
+    case 14: return "connected";
+    case 15: return "waiting to join";
+    case 18: return "restarting";
+    default: return "not connected";
+  }
+}
+
 bool InputLegitimatelyOff(const char** why) {
   static unsigned long long checked_ms = 0;
   static bool last = false;

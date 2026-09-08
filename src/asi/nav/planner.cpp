@@ -273,6 +273,14 @@ bool GroundAt(const Vec3& p, float* ground) {
   return game::GroundBelow(Vec3{p.x, p.y, p.z + kProbeAbove}, ground);
 }
 
+// From high above, where anything the server has built is a roof between
+// the question and its answer.
+bool GroundAtNoObjects(const Vec3& p, float* ground) {
+  ++g_calls;
+  return game::GroundBelow(Vec3{p.x, p.y, p.z + kProbeAbove}, ground,
+                           /*include_objects=*/false);
+}
+
 // Whether the ground found at (x, y) is under water. The ground call finds
 // the bed of a lake as readily as a pavement; this is what tells them apart.
 bool Drowns(float x, float y, float ground) {
@@ -587,7 +595,7 @@ struct Planner::Job {
     // order matters under an overpass: probing from sixty metres up first
     // would put the target on the road above.
     if (!GroundAt(to, &ground) &&
-        !GroundAt(Vec3{to.x, to.y, to.z + kGoalProbeUp - kMaxGroundAbove},
+        !GroundAtNoObjects(Vec3{to.x, to.y, to.z + kGoalProbeUp - kMaxGroundAbove},
                   &ground)) {
       const float away = Distance2D(from, to);
       Fail("target: no ground there" +

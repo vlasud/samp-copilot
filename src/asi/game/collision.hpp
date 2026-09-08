@@ -38,7 +38,12 @@ bool Ready();
 
 // The first solid surface below (x, y) starting from z, down to a thousand
 // metres under. Buildings, dummies and objects.
-bool GroundBelow(float x, float y, float z, float* ground_z);
+// Objects count by default: a character really does stand on a crate, and a
+// server that builds a station platform out of them expects him to. The
+// game's own ground probe leaves them out, which is what to ask for when the
+// question is where the terrain is rather than what he is standing on.
+bool GroundBelow(float x, float y, float z, float* ground_z,
+                 bool include_objects = true);
 
 // Whether nothing solid lies on the segment from a to b. Buildings, dummies,
 // objects, and vehicles when asked.
