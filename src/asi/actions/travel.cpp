@@ -14,6 +14,7 @@
 #include "actions/walker.hpp"
 #include "game/paths.hpp"
 #include "log.hpp"
+#include "nav/indoors.hpp"
 #include "nav/planner.hpp"
 #include "samp/input_state.hpp"
 #include "samp/world.hpp"
@@ -21,8 +22,9 @@
 namespace gtabot::act {
 namespace {
 
-// Close enough to have got there.
+// Close enough to have got there, by default.
 constexpr float kArrived = 2.5f;
+constexpr float kArrivedFloor = 0.5f;
 // A staging point has to be worth walking to, or the journey stalls on the
 // spot replanning to where it already is.
 constexpr float kMinStagingStep = 12.0f;
@@ -56,6 +58,7 @@ Vec3        g_destination;
 int         g_replans  = 0;
 int         g_failures = 0;
 bool        g_reaching = false;
+float       g_arrived = kArrived;
 std::string g_note = "idle";
 float       g_best_straight = 0;
 unsigned long long g_next_plan_ms = 0;
@@ -64,12 +67,25 @@ Aim         g_aim = Aim::kDestination;
 Vec3        g_aim_point;
 int         g_greedy_legs = 0;
 bool        g_bridged = false;   // a leg was issued to cover the current plan
+// Whether the last thing that got him moving was the room map. Indoors the
+// map's ways out point down corridors and out of doors; the open-ground
+// search has nothing there and answers with whatever node is nearest, which
+// is regularly back the way he came. So indoors he waits for the room rather
+// than being given something to be going on with.
+bool        g_indoors = false;
 bool        g_height_unknown = false;
 nav::Planner g_planner;
 
 // The route the walker was given, for cutting corners on it as he goes.
 std::vector<Vec3> g_route;
 unsigned long long g_next_cut_ms = 0;
+// Feeling a room out costs a fifth of a second, so it is not done twice in
+// the same breath.
+unsigned long long g_room_next_ms = 0;
+constexpr unsigned long long kRoomEveryMs = 2500;
+constexpr float kRoomRadius = 22.0f;
+constexpr float kThroughTheWayOut = 3.5f;
+Vec3 g_room_last_out{};
 constexpr unsigned long long kCutEveryMs = 700;
 constexpr float kCutMaxMetres = 70.0f;
 constexpr int   kCutLookahead = 3;
@@ -196,8 +212,56 @@ bool Progress(float straight) {
   return true;
 }
 
+// The room he is in, walked. True when it gave him somewhere to go.
+bool WalkTheRoom(const Vec3& here) {
+  const unsigned long long now = GetTickCount64();
+  if (now < g_room_next_ms) return false;
+  g_room_next_ms = now + kRoomEveryMs;
+
+  const nav::Room room = nav::MapRoom(here, g_destination, kRoomRadius);
+  if (!room.ok || room.points.size() < 2) return false;
+  // Nowhere better than where he stands is not a route, it is a wall.
+  if (!room.way_out_found) {
+    LOG_INFO("travel: the room he is in goes nowhere nearer ({})", room.note);
+    return false;
+  }
+  g_indoors = true;
+  g_route.assign(room.points.begin() + 1, room.points.end());
+  // The room stops at the door because the door is shut, and stopping there
+  // to feel the room out again gives the same answer for ever. So the walk
+  // is sent a few metres past it, towards where it was going: that puts him
+  // into the door, which is the only thing that opens one.
+  if (!room.reaches_target && !g_route.empty()) {
+    const Vec3 edge = g_route.back();
+    const float dx = g_destination.x - edge.x, dy = g_destination.y - edge.y;
+    const float span = std::sqrt(dx * dx + dy * dy);
+    if (span > 0.5f)
+      g_route.push_back(Vec3{edge.x + dx / span * kThroughTheWayOut,
+                             edge.y + dy / span * kThroughTheWayOut, edge.z});
+  }
+  WalkTo(g_route);
+  SetDoorways(room.doors);
+  // Getting out of one room into the next is progress, even though it is
+  // often sideways or briefly away: the counter that gives up on a journey
+  // measures the straight line to the target, and a corridor does not run
+  // along one. A new way out is a new room, so the counter starts again.
+  if (Distance2D(room.way_out, g_room_last_out) > 2.0f) {
+    g_room_last_out = room.way_out;
+    g_failures = 0;
+  }
+  g_aim = Aim::kGreedy;
+  g_aim_point = room.points.back();
+  g_phase = Phase::kWalking;
+  g_bridged = false;
+  g_note = room.reaches_target ? "across the room to the target"
+                               : "across the room to the way out of it";
+  LOG_INFO("travel: {} - {}", g_note, room.note);
+  return true;
+}
+
 void OnPlanFinished(const Vec3& here) {
   const nav::Plan& plan = g_planner.result();
+  if (plan.ok) g_indoors = false;
   if (plan.ok && plan.waypoints.size() >= 2) {
     nav::SetDebugPlan(g_aim_point, plan);
     // The route itself, so a poor one can be read back off the log: each
@@ -236,6 +300,12 @@ void OnPlanFinished(const Vec3& here) {
     StartPlan(here, Aim::kStaging, staging);
     return;
   }
+  // Indoors the planner is right that it cannot see a way: the game's
+  // pedestrian graph stops at the door of every building. Feel the room out
+  // instead and walk as far through it as it goes - to the target if it is
+  // in here, otherwise to the door, which the walk knows how to open.
+  if (WalkTheRoom(here)) return;
+
   LOG_INFO("travel: no route ({}) - feeling the way", plan.note);
   g_bridged = false;
   WalkGreedy(here, false);
@@ -243,15 +313,22 @@ void OnPlanFinished(const Vec3& here) {
 
 }  // namespace
 
-void TravelTo(const Vec3& destination, bool height_unknown) {
+void TravelTo(const Vec3& destination, bool height_unknown,
+              float stop_within) {
   std::lock_guard<std::mutex> lock(g_mutex);
   Stop("replaced by a journey");
+  g_arrived = stop_within > 0 ? (stop_within < kArrivedFloor ? kArrivedFloor
+                                                             : stop_within)
+                              : kArrived;
+  // The walk itself must not finish further out than the journey wants to be.
+  SetArriveWithin(g_arrived < kArrived ? g_arrived * 0.6f : 0.0f);
   g_destination = destination;
   g_height_unknown = height_unknown;
   g_travelling  = true;
   g_replans     = 0;
   g_failures    = 0;
   g_reaching    = false;
+  g_indoors     = false;
   g_best_straight = 0;
   g_next_plan_ms  = 0;
   g_greedy_legs   = 0;
@@ -318,7 +395,7 @@ void TravelTick() {
   const Vec3 here{self.x, self.y, self.z};
   const float straight = Distance2D(here, g_destination);
 
-  if (straight <= kArrived) {
+  if (straight <= g_arrived) {
     StopLocked("arrived");
     Stop("arrived");
     LOG_INFO("travel: arrived, {} legs planned along the way{}", g_replans,
@@ -365,7 +442,7 @@ void TravelTick() {
   // He is standing. Because a plan is being worked out? Then give him
   // somewhere to go in the meantime - once per plan.
   if (g_planner.active()) {
-    if (!g_bridged) {
+    if (!g_bridged && !g_indoors) {
       g_bridged = true;
       WalkGreedy(here, true);
     }

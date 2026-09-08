@@ -67,6 +67,11 @@ constexpr short kFullStick = 127;
 // route's own legs are metres long. Running, he needs a little more.
 constexpr float kArriveNext = 1.8f;
 constexpr float kArriveLast = 1.4f;
+// The floor: closer than this and he is standing on the point, which is a
+// thing no amount of stick can reliably hold.
+constexpr float kArriveFloor = 0.4f;
+// Near enough to what he was sent to that touching it is the point.
+constexpr float kTouchingDistance = 2.5f;
 
 // Stuck: he has hardly moved at all for this long. Not "no closer to the
 // target" - a man going round a fence is no closer to the target either, and
@@ -197,6 +202,7 @@ std::atomic<bool> g_installed{false};
 std::mutex        g_mutex;
 std::vector<Vec3> g_route;
 std::size_t       g_leg = 0;
+float             g_arrive_last = kArriveLast;
 bool              g_walking = false;
 std::string       g_note = "idle";
 unsigned long long g_started_ms = 0;
@@ -288,6 +294,15 @@ bool g_pushing_at_something = false;
 Vec3 g_door_seen{};
 bool g_door_known = false;
 constexpr float kThroughDoor = 3.0f;
+// Doorways the route is meant to go through, and how near one has to be
+// before the whiskers stop being listened to. Three metres is a stride and
+// a half: near enough that what is ahead is the door frame, far enough that
+// he is already pointed at it when the leaning stops.
+std::vector<Vec3> g_doorways;
+constexpr float kDoorwayNear = 3.0f;
+// And how far off the line to it he may be aiming for it still to be the
+// thing he is walking into: a door beside him is not a door ahead of him.
+constexpr float kDoorwayArc = 1.2f;
 
 unsigned long long g_hanging_since = 0;
 unsigned long long g_letting_go_until = 0;
@@ -425,6 +440,19 @@ float VerticalSpeed(std::uintptr_t ped) {
   float vz = 0;
   if (ped != 0) asi::mem::Read<float>(ped + kMoveSpeed + 8, &vz);
   return vz;
+}
+
+// Is the next thing on the way a door he is meant to walk into?
+bool DoorwayAhead(const Vec3& here, float wanted) {
+  for (const Vec3& door : g_doorways) {
+    const float dx = door.x - here.x, dy = door.y - here.y;
+    const float span = std::sqrt(dx * dx + dy * dy);
+    if (span > kDoorwayNear) continue;
+    if (span < 0.3f) return true;
+    if (std::fabs(Normalise(std::atan2(dy, dx) - wanted)) <= kDoorwayArc)
+      return true;
+  }
+  return false;
 }
 
 void StopLocked(const char* why) {
@@ -577,7 +605,14 @@ void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
       else
         ok = false;   // a wall
     }
-    g_whisker_clear[i] = ok;
+    // Something low is something to go round, not something to run at. A
+    // hospital bed, a bench, a counter: the head passes over it and the
+    // knees do not, and a person walks around such a thing rather than
+    // charging it. The jump is still there for when going round has failed
+    // and he is standing against it - the stuck handler asks for it - but it
+    // is no longer the first answer, which is what had him running into the
+    // furniture in plain sight.
+    g_whisker_clear[i] = ok && !low;
     g_whisker_low[i]   = ok && low;
     g_whisker_end[i] = Vec3{end.x, end.y, ground + 1.0f};
     ends.push_back(g_whisker_end[i]);
@@ -694,7 +729,7 @@ bool DecideStick(short* out_x, short* out_y) {
   while (g_leg < g_route.size()) {
     const bool last = g_leg + 1 == g_route.size();
     const float d = Distance2D(here, g_route[g_leg]);
-    bool done = d <= (last ? kArriveLast : kArriveNext);
+    bool done = d <= (last ? g_arrive_last : kArriveNext);
     if (!done && !last && Distance2D(here, g_route[g_leg + 1]) < d) done = true;
     if (!done) break;
     ++g_leg;
@@ -886,7 +921,36 @@ bool DecideStick(short* out_x, short* out_y) {
     }
 
     ProbeWhiskers(here, wanted, descending);
+    // The last couple of metres of the last leg are different. A person
+    // walking to a counter, a bed, a cash machine ends up touching it: the
+    // thing he was sent to is in front of him, and leaning away from it is
+    // how he circles a bed he was told to lie in. So close to where he was
+    // sent, low things ahead stop being obstacles.
+    const bool at_the_end =
+        g_leg + 1 >= g_route.size() && distance <= kTouchingDistance;
+    if (at_the_end) {
+      for (int i = 0; i < kWhiskers; ++i)
+        if (g_whisker_low[i]) {
+          g_whisker_low[i] = false;
+          g_whisker_clear[i] = true;
+        }
+    }
     DecideLean(now);
+    if (at_the_end) {
+      g_lean = 0;
+      g_wall = false;
+      g_follow_side = 0;
+    }
+    // A door is not a wall to be got round. Within reach of one the route
+    // means to go through, everything the whiskers found is the door frame,
+    // and the only thing that opens it is his shoulder.
+    if (DoorwayAhead(here, wanted)) {
+      g_lean = 0;
+      g_wall = false;
+      g_follow_side = 0;
+      g_whisker_low[0] = false;
+      g_closer_ms = now;
+    }
     if (g_wall) {
       RememberWhatIsAhead(here, wanted, "a wall the plan did not know about");
       StopLocked("blocked - no way round from here, handing back to the journey");
@@ -1186,6 +1250,7 @@ void WalkTo(std::vector<Vec3> route) {
   }
   const unsigned long long now = GetTickCount64();
   g_route = std::move(route);
+  g_doorways.clear();
   g_leg = 0;
   g_walking = true;
   g_note = "walking";
@@ -1235,6 +1300,20 @@ void WalkTo(std::vector<Vec3> route) {
     g_remaining += Distance2D(g_route[i - 1], g_route[i]);
   LOG_INFO("walk: {} legs, first at ({:.1f}, {:.1f})", g_route.size(),
            g_route.front().x, g_route.front().y);
+}
+
+void SetDoorways(std::vector<Vec3> doorways) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_doorways = std::move(doorways);
+}
+
+void SetArriveWithin(float metres) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (metres <= 0) {
+    g_arrive_last = kArriveLast;
+    return;
+  }
+  g_arrive_last = metres < kArriveFloor ? kArriveFloor : metres;
 }
 
 void Stop(const char* why) {

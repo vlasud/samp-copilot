@@ -36,6 +36,10 @@ struct Room {
   bool  way_out_found = false;
   Vec3  way_out;
   float way_out_away_m = 0;
+  // Doors the flood went through. A shut door stops both lines as surely as
+  // a wall does, so a room mapped without knowing about them is a room with
+  // no way out; these are the squares where the wall is a door instead.
+  std::vector<Vec3> doors;
   // The picture, one character a square, for a person or an agent to read.
   std::vector<std::string> picture;
 };

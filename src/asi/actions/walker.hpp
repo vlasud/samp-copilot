@@ -92,8 +92,21 @@ void HoldTestKeys(bool hold);
 // position included or not - whichever, he walks to each in turn.
 void WalkTo(std::vector<Vec3> route);
 
+// Where the route goes through a door rather than round one. The whiskers
+// see a shut door as a wall and lean away from it, which is exactly wrong:
+// a door is opened by walking into it. Within a few metres of one of these
+// the leaning stops and he goes straight at it. Cleared by WalkTo, so it is
+// set after the route it belongs to.
+void SetDoorways(std::vector<Vec3> doorways);
+
 // Let go of the stick. Safe to call when not walking.
 void Stop(const char* why);
+
+// How close the last waypoint has to be before the walk is over. A person
+// stopping at a door needs a metre and a half; a person stepping onto the
+// thing a server put on the floor needs to stand on it. Sticky until set
+// again; zero restores the default.
+void SetArriveWithin(float metres);
 
 // Whether to run rather than walk, and whether to jump while running. Both
 // on by default; the panel can switch either off to compare.

@@ -9,6 +9,7 @@
 // WASD and F.
 //
 #include <string>
+#include <vector>
 
 namespace gtabot::game {
 
@@ -27,7 +28,32 @@ enum Action {
   kVehicleBrake = 25,
   kVehicleHorn = 29,
   kVehicleHandbrake = 31,
+  // The one servers listen for as KEY_WALK, and the one nearly every Russian
+  // roleplay server tells the player to press to use whatever he is standing
+  // in front of. Left Alt on a default setup.
+  kPedWalk = 17,
+  kPedDuck = 15,
+  kPedAnswerPhone = 16,
 };
+
+// One row of the game's controller table.
+struct Binding {
+  int         action = 0;
+  int         primary_vk = 0;
+  int         alternative_vk = 0;
+  std::string primary;
+  std::string alternative;
+};
+
+// Every action the table holds a key for, in the game's own order. Game
+// thread. What this is for: a server's prompt says "press Alt", and which
+// key that actually is on this installation is a question with an answer
+// rather than a guess.
+std::vector<Binding> AllBindings();
+
+// The virtual key behind a name a person would use: "alt", "lalt", "enter",
+// "space", "tab", "f4", "y", "2", "vk1B". Zero when the name means nothing.
+int KeyFromName(const std::string& name);
 
 // The virtual key for an action, or `fallback` when the table cannot be read
 // or holds something with no virtual key of its own. Game thread.

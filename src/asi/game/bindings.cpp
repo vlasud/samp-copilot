@@ -2,8 +2,11 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 
 #include "game/exe.hpp"
 #include "state/memory.hpp"
@@ -61,6 +64,67 @@ int KeyForAction(int action, int fallback) {
     if (vk != 0) return vk;
   }
   return fallback;
+}
+
+std::vector<Binding> AllBindings() {
+  std::vector<Binding> rows;
+  const std::uintptr_t table = At(kControlsManager);
+  if (table == 0) return rows;
+  // The table runs to fifty-nine actions in this build; reading past the end
+  // of what is bound simply gives zeros, which are skipped.
+  for (int action = 0; action < 59; ++action) {
+    const std::uintptr_t entry =
+        table + kActions + static_cast<std::uint32_t>(action) * kActionSize;
+    std::uint32_t primary = 0, alternative = 0;
+    asi::mem::Read<std::uint32_t>(entry, &primary);
+    asi::mem::Read<std::uint32_t>(entry + kKeySize, &alternative);
+    Binding row;
+    row.action = action;
+    row.primary_vk = VirtualKey(static_cast<int>(primary));
+    row.alternative_vk = VirtualKey(static_cast<int>(alternative));
+    if (row.primary_vk == 0 && row.alternative_vk == 0) continue;
+    if (row.primary_vk) row.primary = KeyName(row.primary_vk);
+    if (row.alternative_vk) row.alternative = KeyName(row.alternative_vk);
+    rows.push_back(std::move(row));
+  }
+  return rows;
+}
+
+int KeyFromName(const std::string& name) {
+  std::string lower;
+  lower.reserve(name.size());
+  for (const char c : name)
+    lower += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (lower.empty()) return 0;
+  if (lower.size() == 1) {
+    const char c = lower[0];
+    if (c >= 'a' && c <= 'z') return c - 'a' + 'A';
+    return static_cast<unsigned char>(c);
+  }
+  if (lower == "alt" || lower == "lalt") return VK_LMENU;
+  if (lower == "ralt") return VK_RMENU;
+  if (lower == "shift" || lower == "lshift") return VK_LSHIFT;
+  if (lower == "rshift") return VK_RSHIFT;
+  if (lower == "ctrl" || lower == "lctrl") return VK_LCONTROL;
+  if (lower == "rctrl") return VK_RCONTROL;
+  if (lower == "enter" || lower == "return") return VK_RETURN;
+  if (lower == "space") return VK_SPACE;
+  if (lower == "tab") return VK_TAB;
+  if (lower == "esc" || lower == "escape") return VK_ESCAPE;
+  if (lower == "backspace") return VK_BACK;
+  if (lower == "up") return VK_UP;
+  if (lower == "down") return VK_DOWN;
+  if (lower == "left") return VK_LEFT;
+  if (lower == "right") return VK_RIGHT;
+  if (lower[0] == 'f' && lower.size() <= 3) {
+    const int n = std::atoi(lower.c_str() + 1);
+    if (n >= 1 && n <= 12) return VK_F1 + (n - 1);
+  }
+  if (lower.rfind("vk", 0) == 0) {
+    const int vk = static_cast<int>(std::strtol(lower.c_str() + 2, nullptr, 16));
+    if (vk > 0 && vk < 256) return vk;
+  }
+  return 0;
 }
 
 std::string KeyName(int virtual_key) {

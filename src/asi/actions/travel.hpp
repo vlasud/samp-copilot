@@ -41,7 +41,11 @@ struct TravelStatus {
 // Go there. Replaces any travel or walk already running. A destination whose
 // height is not known - a marker on the map has none - says so, and the
 // ground under it is found once the journey is near enough to ask.
-void TravelTo(const Vec3& destination, bool height_unknown = false);
+// `stop_within` is how near counts as being there. The default is the width
+// of a pavement, which is what "go to that corner" means; a pickup on the
+// floor, a counter, a door handle all want it tighter.
+void TravelTo(const Vec3& destination, bool height_unknown = false,
+              float stop_within = 2.5f);
 void CancelTravel(const char* why);
 
 // Game thread, once a frame. Cheap while the walker is busy; plans only when

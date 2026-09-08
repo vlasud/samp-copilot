@@ -98,7 +98,22 @@ python tools/testrun.py quit
 
 `ready` is the call worth polling: it answers where the session stands -
 client loaded, character spawned, dialog on screen, movement armed, world
-readable - and names the next call to make in `next`.
+readable - and names the next call to make in `next`. `wait` also answers
+message-box dialogs on the way in, since a message box has no way past but
+its button and nothing else happens until it is pressed.
+
+### Looking at the screen
+
+```
+powershell -File tools/screenshot.ps1 -Path shot.png
+```
+
+The tools report positions, models and text, and there are things none of
+that says. A character standing the wrong side of a counter, a server's
+refusal painted across the chat, a prompt drawn over the view: one picture
+settles in a second what an hour of coordinates argues about. It grabs the
+game's own window, so it works with the game behind other windows as long as
+it is not minimised.
 
 ### The server's password
 

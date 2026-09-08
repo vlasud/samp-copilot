@@ -110,6 +110,13 @@ def cmd_wait(args):
         # Arming is ours to ask for; everything else is waiting.
         if state.get("spawned") and not state.get("world_readable"):
             client.tool("set_movement", {"on": True})
+        # A message box has nothing to fill in and no way past but its first
+        # button, and until it is answered nothing else happens. Anything
+        # with a list or a field to type in is left alone: those are choices.
+        dialog = client.tool("get_dialog")
+        if dialog.get("shown") and dialog.get("style_number") == 0:
+            say("  answering the message box: %s" % dialog.get("caption", "")[:60])
+            client.tool("answer_dialog", {"button": 1})
         time.sleep(2)
     say("not ready after %d s" % args.timeout)
     return 1

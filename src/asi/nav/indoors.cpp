@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "log.hpp"
+#include "samp/objects.hpp"
 
 namespace gtabot::nav {
 namespace {
@@ -21,6 +22,10 @@ constexpr float kChest = 1.05f;
 // before it is a different storey rather than the same room.
 constexpr float kSameFloor = 2.0f;
 constexpr int   kMaxTests = 60000;
+// How near a door has to be to the step being taken for the thing stopping
+// him to be that door. A door leaf is about a metre wide.
+constexpr float kDoorReach = 1.4f;
+constexpr float kDoorHeight = 3.0f;
 
 int g_tests = 0;
 
@@ -38,6 +43,24 @@ bool Passable(const Vec3& a, const Vec3& b, float z) {
 float Distance2D(const Vec3& a, const Vec3& b) {
   const float dx = b.x - a.x, dy = b.y - a.y;
   return std::sqrt(dx * dx + dy * dy);
+}
+
+// Whether what stands between these two squares is a door rather than a wall.
+// A door that is shut stops a line of sight exactly the way a wall does, and
+// the difference between the two is the whole difference between a room with
+// a way out and a room without one - so it is asked of the server's own
+// object list rather than of the geometry.
+bool DoorBetween(const std::vector<Vec3>& doors, const Vec3& a, const Vec3& b,
+                 float floor_z, Vec3* which) {
+  const Vec3 middle{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f, floor_z};
+  for (const Vec3& door : doors) {
+    if (std::fabs(door.z - floor_z) > kDoorHeight) continue;
+    if (Distance2D(door, middle) <= kDoorReach) {
+      if (which) *which = door;
+      return true;
+    }
+  }
+  return false;
 }
 
 }  // namespace
@@ -62,6 +85,12 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
     return Vec3{base_x + ix * kCell, base_y + iy * kCell, from.z};
   };
   const auto index = [&](int ix, int iy) { return iy * side + ix; };
+
+  // The doors within reach, once, before any of the feeling starts.
+  std::vector<Vec3> doors;
+  for (const samp::NearObject& door :
+       samp::DoorsNear(from, radius + 4.0f, 48))
+    doors.push_back(door.at);
 
   // The floor of each square, once. A square with no floor within a storey
   // of his own is not part of this room.
@@ -99,7 +128,15 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
       if (nx < 0 || ny < 0 || nx >= side || ny >= side) continue;
       const int next = index(nx, ny);
       if (reached[next] || !has_floor[next]) continue;
-      if (!Passable(centre(hx, hy), centre(nx, ny), floor[here] + 1.0f)) continue;
+      Vec3 door;
+      bool through_a_door = false;
+      if (!Passable(centre(hx, hy), centre(nx, ny), floor[here] + 1.0f)) {
+        if (!DoorBetween(doors, centre(hx, hy), centre(nx, ny), floor[here],
+                         &door))
+          continue;
+        through_a_door = true;
+      }
+      if (through_a_door) room.doors.push_back(door);
       reached[next] = 1;
       came_from[next] = here;
       queue.push_back(next);
@@ -153,13 +190,32 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
     room.picture.push_back(std::move(row));
   }
 
+  // The same door is found from both of its sides; say it once.
+  std::sort(room.doors.begin(), room.doors.end(),
+            [](const Vec3& a, const Vec3& b) {
+              if (a.x != b.x) return a.x < b.x;
+              if (a.y != b.y) return a.y < b.y;
+              return a.z < b.z;
+            });
+  room.doors.erase(std::unique(room.doors.begin(), room.doors.end(),
+                               [](const Vec3& a, const Vec3& b) {
+                                 return Distance2D(a, b) < 0.1f &&
+                                        std::fabs(a.z - b.z) < 0.1f;
+                               }),
+                   room.doors.end());
+
   room.note = std::to_string(reached_count) + " squares of " +
               std::to_string(side * side) + " reachable, " +
               std::to_string(g_tests) + " questions of the world; the room " +
               (room.reaches_target ? "reaches where he was going"
                                    : "ends " + std::to_string(
                                          static_cast<int>(best_away)) +
-                                         " m short of it");
+                                         " m short of it") +
+              (room.doors.empty()
+                   ? ""
+                   : "; " + std::to_string(room.doors.size()) +
+                         " of the ways between squares are doors, which is "
+                         "what he has to walk into rather than round");
   return room;
 }
 

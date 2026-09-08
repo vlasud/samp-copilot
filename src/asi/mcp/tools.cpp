@@ -2,9 +2,11 @@
 
 #include <windows.h>
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "bridge.hpp"
 #include "log.hpp"
@@ -181,7 +183,10 @@ json TravelTo(const json& args) {
   game::Vec3 target;
   if (!PointFrom(args, self, &target))
     throw std::runtime_error("x and y are required");
-  act::TravelTo(target);
+  float stop_within = 2.5f;
+  if (args.contains("stop_within") && args["stop_within"].is_number())
+    stop_within = args["stop_within"].get<float>();
+  act::TravelTo(target, /*height_unknown=*/false, stop_within);
   return TravelStatusJson();
 }
 
@@ -390,12 +395,15 @@ void RegisterTools(Server* server) {
       "allows, walks that, and plans again from wherever it ends up - because "
       "more of the city streams in as you go, and because a car that blocked a "
       "leg a minute ago may have driven off. Returns at once; poll "
-      "travel_status.",
+      "travel_status. stop_within is how near counts as arrived, in metres: "
+      "2.5 by default, which is a pavement's width - pass 0.8 to step onto a "
+      "pickup or up to a counter.",
       {{"type", "object"},
        {"properties",
         {{"x", {{"type", "number"}}},
          {"y", {{"type", "number"}}},
-         {"z", {{"type", "number"}}}}},
+         {"z", {{"type", "number"}}},
+         {"stop_within", {{"type", "number"}}}}},
        {"required", json::array({"x", "y"})}},
       [](const json& args) {
         return Rpc::RunOnGameThread([args] { return TravelTo(args); },
@@ -666,6 +674,11 @@ void RegisterTools(Server* server) {
               for (const game::Vec3& point : room.points)
                 path.push_back(json{{"x", point.x}, {"y", point.y}});
               out["way_there"] = std::move(path);
+              json doors = json::array();
+              for (const game::Vec3& door : room.doors)
+                doors.push_back(
+                    json{{"x", door.x}, {"y", door.y}, {"z", door.z}});
+              out["doors"] = std::move(doors);
               if (args.value("picture", true)) {
                 json picture = json::array();
                 for (const std::string& row : room.picture) picture.push_back(row);
@@ -691,10 +704,22 @@ void RegisterTools(Server* server) {
            {"description", "How far to look. Defaults to fifteen metres."}}},
          {"limit",
           {{"type", "integer"}, {"minimum", 1}, {"maximum", 100},
-           {"description", "At most this many. Defaults to twenty."}}}}}},
+           {"description", "At most this many. Defaults to twenty."}}},
+         {"models",
+          {{"type", "array"}, {"items", {{"type", "integer"}}},
+           {"description", "Only these models. A room is hundreds of objects "
+                           "and the interesting ones are a handful."}}},
+         {"doors_only",
+          {{"type", "boolean"},
+           {"description", "Only the models that are doors."}}}}}},
       [](const json& args) -> json {
         const float radius = args.value("radius", 15.0f);
         const std::size_t limit = args.value("limit", 20);
+        std::vector<int> wanted;
+        if (args.contains("models") && args["models"].is_array())
+          for (const json& model : args["models"])
+            if (model.is_number_integer()) wanted.push_back(model.get<int>());
+        const bool doors_only = args.value("doors_only", false);
         std::int64_t age_ms = -1;
         const json world = asi::Bridge::GetWorld(&age_ms);
         const json pos = world.value("self", json::object()).value("pos", json::array());
@@ -702,14 +727,25 @@ void RegisterTools(Server* server) {
           throw std::runtime_error("where the character is is not known yet");
         const game::Vec3 here{pos[0].get<float>(), pos[1].get<float>(),
                               pos[2].get<float>()};
+        // Filtering has to happen before the count is cut, or asking for the
+        // doors among a room's four hundred objects returns the twenty
+        // nearest things that are not doors.
+        const std::size_t sweep =
+            (wanted.empty() && !doors_only) ? limit : std::size_t{1000};
         json out = json::array();
-        for (const samp::NearObject& one : samp::ObjectsNear(here, radius, limit))
+        for (const samp::NearObject& one : samp::ObjectsNear(here, radius, sweep)) {
+          if (out.size() >= limit) break;
+          if (doors_only && !samp::IsDoorModel(one.model)) continue;
+          if (!wanted.empty() &&
+              std::find(wanted.begin(), wanted.end(), one.model) == wanted.end())
+            continue;
           out.push_back(json{{"id", one.id},
                              {"model", one.model},
                              {"away_m", one.away_m},
                              {"at", json{{"x", one.at.x},
                                          {"y", one.at.y},
                                          {"z", one.at.z}}}});
+        }
         return json{{"objects", std::move(out)}};
       },
   });
@@ -816,13 +852,39 @@ void RegisterTools(Server* server) {
   });
 
   server->AddTool({
+      "get_bindings",
+      "The player's own controller table: which key each of the game's "
+      "actions is on. A server's prompt names a key - \"press Alt\" - and "
+      "this says what that key is on this installation, rather than assuming "
+      "the defaults.",
+      NoArguments(),
+      [](const json&) {
+        return Rpc::RunOnGameThread(
+            [] {
+              json rows = json::array();
+              for (const game::Binding& b : game::AllBindings()) {
+                json row{{"action", b.action}};
+                if (!b.primary.empty()) row["primary"] = b.primary;
+                if (!b.alternative.empty()) row["alternative"] = b.alternative;
+                rows.push_back(std::move(row));
+              }
+              return json{{"bindings", rows}};
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
       "press_key",
       "Holds one key down for a moment, the way a hand does. Names the "
       "player's own bindings rather than keys: 'horn' is what opens a barrier "
       "that listens for one, 'accelerate', 'brake', 'left', 'right', "
       "'enter_exit', 'jump', 'sprint', 'handbrake'. A single character (\"y\", "
       "\"2\") presses that key instead, which is how a server's own prompts "
-      "are answered.",
+      "are answered. 'walk' (also called 'use') is the key servers watch as "
+      "KEY_WALK - Left Alt by default - and is what a prompt saying \"press "
+      "Alt\" means. Key names work too: alt, enter, space, tab, esc, f1-f12, "
+      "up, down, left, right.",
       {{"type", "object"},
        {"properties",
         {{"key",
@@ -847,10 +909,10 @@ void RegisterTools(Server* server) {
               else if (name == "jump")   vk = game::KeyForAction(game::kJumping, VK_LSHIFT);
               else if (name == "sprint") vk = game::KeyForAction(game::kSprint, VK_SPACE);
               else if (name == "handbrake") vk = game::KeyForAction(game::kVehicleHandbrake, VK_SPACE);
-              else if (name.size() == 1) {
-                const char c = name[0];
-                vk = (c >= 'a' && c <= 'z') ? c - 'a' + 'A' : c;
-              }
+              else if (name == "walk" || name == "use")
+                vk = game::KeyForAction(game::kPedWalk, VK_LMENU);
+              else if (name == "duck") vk = game::KeyForAction(game::kPedDuck, 'C');
+              else vk = game::KeyFromName(name);
               if (vk == 0) throw std::runtime_error("no key called \"" + name + "\"");
               if (samp::KeysBusy())
                 throw std::runtime_error("keys are still being played - try again");
