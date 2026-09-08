@@ -7,11 +7,11 @@
 // None of it goes through the chat, so something reading only the chat is
 // standing in a street full of signs with its eyes shut.
 //
-// Where the client keeps them is not documented and differs between builds,
-// so it is not assumed: the table is found by its shape. An entry is a
-// pointer to a string and a position in the world, laid end to end, and a
-// run of those is what a table of them looks like and very little else does.
+// The client keeps them in a pool of its own, reached through CNetGame, and
+// the offsets to it come from the structures BlastHack published rather than
+// from a guess: guessing found the game's own string tables three times over.
 //
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -22,14 +22,19 @@ namespace gtabot::samp {
 using game::Vec3;
 
 struct Label {
+  int   id = -1;
   std::string text;
   Vec3  at;
   float draw_distance = 0;
-  float away_m = 0;      // from wherever it was asked about
+  // From wherever it was asked about. Less than nothing when the label is
+  // hung on a player or a car, whose own position is where it really is.
+  float away_m = 0;
+  bool  behind_walls = false;
+  std::uint16_t attached_to_player  = 0xFFFF;
+  std::uint16_t attached_to_vehicle = 0xFFFF;
 };
 
-// Game thread. Nearest first. Empty until the table has been found, which
-// happens on the first call and takes a moment.
+// Nearest first. Reading only, so it does not need the game thread.
 std::vector<Label> LabelsNear(const Vec3& at, float radius, std::size_t max);
 
 // For the status line and for saying whether the search worked at all.

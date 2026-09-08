@@ -566,12 +566,15 @@ void RegisterTools(Server* server) {
                                     pos[2].get<float>()};
               json out = json::array();
               for (const samp::Label& label : samp::LabelsNear(here, radius, limit))
-                out.push_back(json{{"text", label.text},
+                out.push_back(json{{"id", label.id},
+                                   {"text", label.text},
                                    {"away_m", label.away_m},
                                    {"at", json{{"x", label.at.x},
                                                {"y", label.at.y},
                                                {"z", label.at.z}}},
-                                   {"draw_distance", label.draw_distance}});
+                                   {"draw_distance", label.draw_distance},
+                                   {"attached_to_player", label.attached_to_player},
+                                   {"attached_to_vehicle", label.attached_to_vehicle}});
               json result{{"labels", out}, {"note", samp::LabelsNote()}};
               if (out.empty()) {
                 // Nothing near: say what the table does hold, so the next
