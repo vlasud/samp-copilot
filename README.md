@@ -102,6 +102,19 @@ readable - and names the next call to make in `next`. `wait` also answers
 message-box dialogs on the way in, since a message box has no way past but
 its button and nothing else happens until it is pressed.
 
+### Tests
+
+```
+cmake --build --preset release --target bot_tests
+build/x86/bin/RelWithDebInfo/bot_tests.exe
+```
+
+Most of this project only means anything inside gta_sa.exe and can only be
+tried by playing. Some of it is not like that - reading a chat line, deciding
+what a menu row says, adding up what is known about a stranger - and that part
+was being shipped on the strength of one look at the screen. It runs off the
+game now, against lines pasted out of the real server's chat unchanged.
+
 ### Who is who
 
 `get_people` keeps a record of everyone seen or heard and puts a standing on
