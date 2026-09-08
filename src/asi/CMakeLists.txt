@@ -40,6 +40,7 @@ add_library(bot MODULE
   samp/input_state.cpp
   state/memory.cpp
   state/events.cpp
+  state/people.cpp
   state/probe.cpp
   mcp/server.cpp
   mcp/rpc.cpp

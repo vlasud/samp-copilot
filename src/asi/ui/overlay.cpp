@@ -425,9 +425,6 @@ LRESULT CALLBACK HookedWndProc(HWND window, UINT message, WPARAM wparam,
   return result;
 }
 
-// How long after a keystroke of ours a system menu is still ours to refuse.
-constexpr unsigned long long kOursForMs = 800;
-
 LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   // The hand on the mouse, as the window sees it: the evidence the mouse
   // watch judges DirectInput against, and the deltas it falls back on.
@@ -458,10 +455,16 @@ LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   // key - and the key player holds its own mutex across that call. Asking it
   // anything that locks deadlocks the game thread, which stops rendering,
   // which stops everything. The timestamp is an atomic for that reason.
-  if (message == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_KEYMENU) {
-    const unsigned long long last = samp::KeysLastEventMs();
-    if (last != 0 && GetTickCount64() - last < kOursForMs) return 0;
-  }
+  //
+  // The menu is refused whenever it was a bare Alt that asked for it, ours or
+  // anybody's. lParam carries the character the menu was opened with and is
+  // zero for Alt on its own, so Alt+Space still opens the window menu the way
+  // a person expects while Alt as a game key never does. This window has no
+  // menu bar and nothing to choose from; what it has is a modal loop that
+  // stops the game dead, which is what the game thread was found sitting in.
+  if (message == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_KEYMENU &&
+      lparam == 0)
+    return 0;
 
   if (g_mode == Mode::kMenu) {
     // The menu is open, so the keyboard is its: nothing pressed reaches the

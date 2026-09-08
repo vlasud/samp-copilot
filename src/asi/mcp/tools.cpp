@@ -34,6 +34,7 @@
 #include "samp/version.hpp"
 #include "state/events.hpp"
 #include "state/memory.hpp"
+#include "state/people.hpp"
 #include "state/probe.hpp"
 #include "types.hpp"
 
@@ -889,6 +890,80 @@ void RegisterTools(Server* server) {
               }
               return result;
         }
+      },
+  });
+
+  server->AddTool({
+      "get_people",
+      "Who is who: everyone this session has seen or heard, the most recently "
+      "seen first, with a standing - friend, neutral, wary, enemy - and the "
+      "reason for it. The reasons are what a client can honestly know: how "
+      "near somebody has been, whether he was carrying anything, whether he "
+      "has addressed this character by name, and whether he happened to be "
+      "armed and close when this character lost health. That last one is a "
+      "coincidence the module counts, not an accusation it can prove.",
+      {{"type", "object"},
+       {"properties",
+        {{"limit",
+          {{"type", "integer"}, {"minimum", 1}, {"maximum", 200},
+           {"description", "At most this many. Defaults to twenty."}}},
+         {"here_now",
+          {{"type", "boolean"},
+           {"description", "Only the ones in the world right now."}}},
+         {"standing",
+          {{"type", "string"},
+           {"description", "Only this standing: friend, neutral, wary, "
+                           "enemy."}}}}}},
+      [](const json& args) -> json {
+        const std::size_t limit = args.value("limit", 20);
+        const bool here_now = args.value("here_now", false);
+        const std::string want = args.value("standing", std::string{});
+        json out = json::array();
+        for (const people::Person& who : people::Everyone()) {
+          if (out.size() >= limit) break;
+          if (here_now && !who.streamed) continue;
+          if (!want.empty() && who.standing != want) continue;
+          json one{{"name", who.name},
+                   {"standing", who.standing},
+                   {"why", who.why},
+                   {"set_by_hand", who.set_by_hand},
+                   {"here_now", who.streamed},
+                   {"times_seen", who.times_seen},
+                   {"spoke_to_me", who.spoke_to_me},
+                   {"seen_armed_near", who.seen_armed_near},
+                   {"near_when_hurt", who.near_when_hurt}};
+          if (who.last_id >= 0) one["id"] = who.last_id;
+          if (who.streamed) one["away_m"] = who.last_away_m;
+          if (who.closest_m > 0) one["closest_m"] = who.closest_m;
+          out.push_back(std::move(one));
+        }
+        return json{{"people", std::move(out)}, {"note", people::Note()}};
+      },
+  });
+
+  server->AddTool({
+      "set_standing",
+      "Decides what somebody is, overriding what the record adds up to. Pass "
+      "an empty standing to hand the judgement back to the module.",
+      {{"type", "object"},
+       {"properties",
+        {{"name", {{"type", "string"}}},
+         {"standing",
+          {{"type", "string"},
+           {"enum", json::array({"friend", "neutral", "wary", "enemy", ""})}}},
+         {"why", {{"type", "string"}}}}},
+       {"required", json::array({"name"})}},
+      [](const json& args) -> json {
+        const std::string name = args.value("name", std::string{});
+        if (name.empty()) throw std::runtime_error("a name is required");
+        people::SetStanding(name, args.value("standing", std::string{}),
+                            args.value("why", std::string{}));
+        for (const people::Person& who : people::Everyone())
+          if (who.name == name)
+            return json{{"name", who.name},
+                        {"standing", who.standing},
+                        {"why", who.why}};
+        return json{{"name", name}};
       },
   });
 

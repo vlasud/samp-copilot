@@ -11,6 +11,9 @@
 #include "samp/dialog.hpp"
 #include "samp/input_state.hpp"
 #include "samp/login.hpp"
+#include "samp/talk.hpp"
+#include "samp/world.hpp"
+#include "state/people.hpp"
 
 namespace gtabot::state {
 namespace {
@@ -47,6 +50,7 @@ bool g_travelling = false;
 bool g_login_sent = false;
 std::string g_last_chat_line;
 bool g_chat_started = false;
+std::string g_my_name;
 unsigned long long g_looked_ms = 0;
 
 std::string ChatSignature(const json& line) {
@@ -123,6 +127,16 @@ void WatchEvents() {
     Note("login", "the password has been given to the server");
   }
 
+  // Everyone in sight, for the record of who is who. Throttled inside.
+  {
+    const json world = samp::ReadWorld();
+    if (world.is_object()) {
+      if (world.contains("self"))
+        g_my_name = world["self"].value("name", g_my_name);
+      people::SawWorld(world);
+    }
+  }
+
   // The chat, from wherever it was left.
   const json chat = samp::ReadChat(kChatLines);
   const json lines = chat.value("lines", json::array());
@@ -146,6 +160,12 @@ void WatchEvents() {
       const std::string who = lines[i].value("from", std::string{});
       const std::string what = lines[i].value("text", std::string{});
       Note("chat", who.empty() ? what : who + ": " + what);
+      // And on the record of who is who: a name in the text is somebody
+      // addressing this character, which is the one signal a stranger gives
+      // for free.
+      const samp::TalkLine said = samp::Classify(what, who, g_my_name);
+      if (!said.speaker.empty() && !said.from_me)
+        people::HeardLine(said.speaker, said.to_me);
     }
     g_last_chat_line = ChatSignature(lines.back());
   }

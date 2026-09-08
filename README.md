@@ -102,6 +102,18 @@ readable - and names the next call to make in `next`. `wait` also answers
 message-box dialogs on the way in, since a message box has no way past but
 its button and nothing else happens until it is pressed.
 
+### Who is who
+
+`get_people` keeps a record of everyone seen or heard and puts a standing on
+each - friend, neutral, wary, enemy - with the reason. The reasons are only
+what a client can honestly know: how near somebody has been, whether he was
+carrying anything, whether he has addressed this character by name, and
+whether he happened to be armed and close at the moment this character lost
+health. The last of those is a coincidence counted twice before it means
+anything, and it is labelled as a coincidence, because a server sends a
+health value and never says who took it. `set_standing` overrides the
+judgement and always wins.
+
 ### The keyboard layout
 
 Under a Russian layout the game sees no letter keys at all. It asks Windows
