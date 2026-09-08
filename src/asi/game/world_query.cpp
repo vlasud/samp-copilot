@@ -44,15 +44,16 @@ constexpr std::uint32_t kGetWaterLevel         = 0x6EB690;
 //
 // CPad is 0x134 bytes, which the array stride has to agree with.
 constexpr std::uint32_t kPad0                     = 0xB73458;
-// For the projection: the field of view (CDraw::ms_fFOV, across the width)
-// and the size of what is drawn (RsGlobal.maximumWidth/Height).
-constexpr std::uint32_t kFov    = 0x8D5038;
-constexpr std::uint32_t kAspect = 0xC3EFA4;   // CDraw::ms_fAspectRatio
-constexpr std::uint32_t kWidth  = 0xC17044;
+// The projection is the game's own: CSprite::CalcScreenCoors transforms the
+// point by TheCamera's view matrix and divides by the depth, times the size
+// of what is drawn. The view matrix already carries the field of view and
+// the aspect ratio inside it, so neither is needed here - and neither is a
+// guess about which of them the game believes in.
+constexpr std::uint32_t kViewMatrix = 0xA04;   // CCamera::m_mViewMatrix
+constexpr std::uint32_t kWidth  = 0xC17044;    // RsGlobal.maximumWidth
 constexpr std::uint32_t kHeight = 0xC17048;
-constexpr std::uint32_t kMatrixRight = 0x00;
-constexpr std::uint32_t kMatrixUp    = 0x20;
-constexpr std::uint32_t kMatrixPos   = 0x30;
+constexpr std::uint32_t kMatrixRight = 0x00, kMatrixUp = 0x10, kMatrixAt = 0x20,
+                        kMatrixPos = 0x30;
 // TheCamera, a CPlaceable: matrix pointer where an entity keeps one, and the
 // forward row sixteen bytes into that matrix.
 constexpr std::uint32_t kTheCamera        = 0xB6F028;
@@ -429,42 +430,34 @@ bool ToScreen(const Vec3& world, float* sx, float* sy) {
   // for everything drawn at any frame rate and still an allowance.
   if (!TakeScreenSlot()) return false;
   g_screen_calls.fetch_add(1, std::memory_order_relaxed);
-  // The camera's own frame and field of view, the way the game projects:
-  // the view window is tan(fov/2) across and that over the aspect ratio
-  // down, and a point lands at its ratio to the depth.
-  const std::uintptr_t camera = At(kTheCamera);
-  if (camera == 0) return false;
-  std::uint32_t matrix = 0;
-  if (!asi::mem::Read<std::uint32_t>(camera + kPlaceableMatrix, &matrix) || matrix == 0)
-    return false;
+  const std::uintptr_t view = At(kTheCamera) + kViewMatrix;
+  if (At(kTheCamera) == 0 || !asi::mem::IsReadable(view, 0x40)) return false;
+  // right, up, at, pos - the basis the point is spread over, exactly as
+  // CMatrix::TransformPoint spreads it.
   float m[12];
-  for (int i = 0; i < 3; ++i) {
-    if (!asi::mem::Read<float>(matrix + kMatrixRight + i * 4, &m[i])) return false;
-    if (!asi::mem::Read<float>(matrix + kMatrixForward + i * 4, &m[3 + i])) return false;
-    if (!asi::mem::Read<float>(matrix + kMatrixUp + i * 4, &m[6 + i])) return false;
-    if (!asi::mem::Read<float>(matrix + kMatrixPos + i * 4, &m[9 + i])) return false;
-  }
-  float fov = 0;
+  const std::uint32_t rows[4] = {kMatrixRight, kMatrixUp, kMatrixAt, kMatrixPos};
+  for (int r = 0; r < 4; ++r)
+    for (int i = 0; i < 3; ++i)
+      if (!asi::mem::Read<float>(view + rows[r] + i * 4, &m[r * 3 + i])) return false;
   std::int32_t width = 0, height = 0;
-  if (!asi::mem::Read<float>(At(kFov), &fov) || fov < 1.0f || fov > 179.0f) return false;
   if (!asi::mem::Read<std::int32_t>(At(kWidth), &width) ||
       !asi::mem::Read<std::int32_t>(At(kHeight), &height) || width <= 0 || height <= 0)
     return false;
-  const float dx = world.x - m[9], dy = world.y - m[10], dz = world.z - m[11];
-  const float x = dx * m[0] + dy * m[1] + dz * m[2];
-  const float depth = dx * m[3] + dy * m[4] + dz * m[5];
-  const float z = dx * m[6] + dy * m[7] + dz * m[8];
-  if (depth <= 0.1f) return false;
-  const float tan_half = std::tan(fov * 0.5f * 3.14159265f / 180.0f);
-  // The game's own ratio, which a widescreen fix may have moved away from
-  // the window's; the window is only the fallback.
-  float aspect = 0;
-  if (!asi::mem::Read<float>(At(kAspect), &aspect) || !(aspect > 0.2f && aspect < 6.0f))
-    aspect = static_cast<float>(width) / static_cast<float>(height);
-  const float half_w = static_cast<float>(width) * 0.5f;
-  const float half_h = static_cast<float>(height) * 0.5f;
-  *sx = half_w + (x / depth) / tan_half * half_w;
-  *sy = half_h - (z / depth) / (tan_half / aspect) * half_h;
+
+  const float vx = m[0] * world.x + m[3] * world.y + m[6] * world.z + m[9];
+  const float vy = m[1] * world.x + m[4] * world.y + m[7] * world.z + m[10];
+  const float depth = m[2] * world.x + m[5] * world.y + m[8] * world.z + m[11];
+  if (!(depth > 0.1f)) return false;             // behind the camera, or not a number
+  const float rd = 1.0f / depth;
+  const float x = static_cast<float>(width) * rd * vx;
+  const float y = static_cast<float>(height) * rd * vy;
+  if (!(x == x) || !(y == y)) return false;
+  // Far outside the window is not worth drawing, and is the shape a wrong
+  // matrix would take.
+  if (x < -8.0f * width || x > 8.0f * width || y < -8.0f * height || y > 8.0f * height)
+    return false;
+  *sx = x;
+  *sy = y;
   return true;
 }
 

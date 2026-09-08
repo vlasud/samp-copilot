@@ -158,10 +158,12 @@ constexpr float kDrowns = 0.5f;
 // in eighty milliseconds - and a search for the way down off a freeway is
 // tens of thousands of them; the frame budget is what keeps each frame
 // short, this only stops a runaway.
-// Reading the world costs more per question than asking the game did, and a
-// plan that is not going to be found should give up while the player is
-// still interested.
-constexpr int kCallBudget = 60000;
+constexpr int kCallBudget = 200000;
+// And a wall clock, because the call count is a poor measure of how long
+// the player has been standing there: a plan that has not been found in
+// this many milliseconds of trying is handed back as "no route", and the
+// journey feels its way instead.
+constexpr unsigned long long kPlanDeadlineMs = 6000;
 // A hillside: how much the ground may fall or rise over a quarter of a
 // metre and still be a surface he walks (or slides) on rather than an edge.
 constexpr float kSlopeSubStep    = 0.25f;
@@ -541,7 +543,10 @@ struct Planner::Job {
   std::size_t vk = 0;
 
   int CallsUsed() const { return g_calls - calls_at_start; }
-  bool BudgetSpent() const { return CallsUsed() >= kCallBudget; }
+  bool BudgetSpent() const {
+    return CallsUsed() >= kCallBudget ||
+           (began_ms != 0 && GetTickCount64() - began_ms >= kPlanDeadlineMs);
+  }
 
   void Fail(const std::string& note) {
     plan.ok   = false;
