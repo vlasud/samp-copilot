@@ -102,6 +102,16 @@ readable - and names the next call to make in `next`. `wait` also answers
 message-box dialogs on the way in, since a message box has no way past but
 its button and nothing else happens until it is pressed.
 
+### The keyboard layout
+
+Under a Russian layout the game sees no letter keys at all. It asks Windows
+what character a key produces and files the key under that character, so W
+arrives as "ц", T does not open the chat, and nothing bound to a letter
+works. The module now notices and asks its own window for English; from
+outside, `tools/layout.ps1 -Lang en` does the same. Everything that looked
+like a mysterious half-working input - the walk moving but the chat never
+opening - was this.
+
 ### Looking at the screen
 
 ```

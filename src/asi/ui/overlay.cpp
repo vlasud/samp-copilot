@@ -1366,11 +1366,38 @@ bool CyrillicLayout() {
          layout == 0x043F;
 }
 
+// And fixes it. The game asks Windows what character a key produces and
+// files the key under that character, so under a Cyrillic layout W arrives
+// as "ц", T does not open the chat, and nothing bound to a letter works at
+// all. Asking the window to switch to English is what a player does without
+// thinking, it affects this window and nothing else, and it is the
+// difference between a character who can talk and one who cannot.
+void AskForALatinLayout() {
+  if (g_window == nullptr) return;
+  static unsigned long long asked_ms = 0;
+  const unsigned long long now = GetTickCount64();
+  if (now - asked_ms < 5000) return;
+  asked_ms = now;
+  const HKL english = LoadKeyboardLayoutW(L"00000409", KLF_ACTIVATE);
+  if (english == nullptr) return;
+  PostMessageW(g_window, WM_INPUTLANGCHANGEREQUEST, INPUTLANGCHANGE_SYSCHARSET,
+               reinterpret_cast<LPARAM>(english));
+  static bool said = false;
+  if (!said) {
+    said = true;
+    LOG_INFO("layout: the window is on a Cyrillic layout, where the game sees "
+             "no letter keys at all - asking it for English");
+  }
+}
+
 // The bot, in one word.
 Line BotState(const PlayerView& view) {
   if (!game::Detect().known) return {"игра не поддерживается", kUiBad};
   if (!view.in_game) return {"не в игре", kUiMuted};
-  if (CyrillicLayout()) return {"раскладка RU: игра не видит WASD", kUiWarn};
+  if (CyrillicLayout()) {
+    AskForALatinLayout();
+    return {"раскладка RU: переключаю на EN", kUiWarn};
+  }
   if (view.verdict != "ok") return {"ожидание игры", kUiWarn};
   if (!game::Enabled()) return {"управление выключено", kUiDim};
   if (!game::CallsTrusted()) return {"проверка…", kUiWarn};
@@ -1884,6 +1911,11 @@ std::string Overlay::InputState() {
 }
 
 void Overlay::WatchForLostInput() {
+  // The layout, from here as well as from the panel: the panel only draws
+  // when it is on screen, and a character who cannot press a letter is
+  // stuck whether anybody is watching or not.
+  if (CyrillicLayout()) AskForALatinLayout();
+
   // The moment the calls are armed, the whole picture as it was while
   // everything still worked - so the one taken when it stops has something
   // to be read against.

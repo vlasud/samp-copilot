@@ -25,6 +25,8 @@ namespace {
 // Close enough to have got there, by default.
 constexpr float kArrived = 2.5f;
 constexpr float kArrivedFloor = 0.5f;
+// Further than a person walks in a tick: something moved him.
+constexpr float kTeleportJump = 25.0f;
 // A staging point has to be worth walking to, or the journey stalls on the
 // spot replanning to where it already is.
 constexpr float kMinStagingStep = 12.0f;
@@ -73,6 +75,9 @@ bool        g_bridged = false;   // a leg was issued to cover the current plan
 // is regularly back the way he came. So indoors he waits for the room rather
 // than being given something to be going on with.
 bool        g_indoors = false;
+// Where he was last tick, for noticing that something moved him.
+Vec3        g_last_seen{};
+bool        g_been_somewhere = false;
 bool        g_height_unknown = false;
 nav::Planner g_planner;
 
@@ -329,6 +334,7 @@ void TravelTo(const Vec3& destination, bool height_unknown,
   g_failures    = 0;
   g_reaching    = false;
   g_indoors     = false;
+  g_been_somewhere = false;
   g_best_straight = 0;
   g_next_plan_ms  = 0;
   g_greedy_legs   = 0;
@@ -394,6 +400,29 @@ void TravelTick() {
   }
   const Vec3 here{self.x, self.y, self.z};
   const float straight = Distance2D(here, g_destination);
+
+  // Carried somewhere else. Interiors are built out of teleports - a
+  // staircase, a lift, a door into a shop - and a journey that walks on
+  // afterwards is following a route through a building it is no longer in.
+  // The destination still stands; everything worked out on the way to it
+  // does not.
+  if (g_been_somewhere && Distance2D(here, g_last_seen) > kTeleportJump) {
+    LOG_INFO("travel: carried from ({:.0f}, {:.0f}) to ({:.0f}, {:.0f}) - the "
+             "route belongs to somewhere else now, working it out again",
+             g_last_seen.x, g_last_seen.y, here.x, here.y);
+    Stop("carried somewhere else");
+    g_planner.Cancel();
+    g_phase = Phase::kIdle;
+    g_failures = 0;
+    g_best_straight = 0;
+    g_indoors = false;
+    g_bridged = false;
+    g_next_plan_ms = 0;
+    g_room_last_out = Vec3{};
+    g_note = "starting again from where he was put down";
+  }
+  g_last_seen = here;
+  g_been_somewhere = true;
 
   if (straight <= g_arrived) {
     StopLocked("arrived");
