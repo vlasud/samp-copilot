@@ -38,8 +38,10 @@ struct TravelStatus {
   std::string note;
 };
 
-// Go there. Replaces any travel or walk already running.
-void TravelTo(const Vec3& destination);
+// Go there. Replaces any travel or walk already running. A destination whose
+// height is not known - a marker on the map has none - says so, and the
+// ground under it is found once the journey is near enough to ask.
+void TravelTo(const Vec3& destination, bool height_unknown = false);
 void CancelTravel(const char* why);
 
 // Game thread, once a frame. Cheap while the walker is busy; plans only when

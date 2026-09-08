@@ -83,6 +83,10 @@ struct LocalPed {
 };
 LocalPed ReadLocalPed();
 
+// SA-MP's CLocalPlayer, as the player pool records it beside the local
+// name; 0 until the layout is resolved.
+std::uintptr_t LocalPlayerObject();
+
 // Writes bot.playerinfo-dump.txt: the first occupied records, each word
 // classified, and the CRemotePlayer each one points at. Game thread only.
 bool DumpPlayerRecords();

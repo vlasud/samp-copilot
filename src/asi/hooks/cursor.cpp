@@ -29,8 +29,22 @@ std::atomic<LONG> g_pinned_y{0};
 // Said once per session, because the answer is the whole diagnosis: if the
 // pointer still will not move, this line names what is holding it.
 std::atomic<bool> g_named_caller{false};
+// Every SetCursorPos, freed or not: the target and the time, and who does
+// it, once. Whatever pins the pointer each frame is what makes the window's
+// mouse messages say nothing about the hand.
+std::atomic<LONG> g_last_set_x{-100000};
+std::atomic<LONG> g_last_set_y{-100000};
+std::atomic<unsigned long long> g_last_set_ms{0};
+std::atomic<bool> g_named_pinner{false};
 
 BOOL WINAPI HookedSetCursorPos(int x, int y) {
+  g_last_set_x.store(x, std::memory_order_relaxed);
+  g_last_set_y.store(y, std::memory_order_relaxed);
+  g_last_set_ms.store(GetTickCount64(), std::memory_order_relaxed);
+  if (!g_named_pinner.exchange(true))
+    LOG_INFO("the pointer is being placed by {} (SetCursorPos to {}, {})",
+             mem::DescribeAddress(reinterpret_cast<std::uintptr_t>(_ReturnAddress())),
+             x, y);
   if (!g_freed.load(std::memory_order_acquire)) return g_real_set(x, y);
 
   if (!g_named_caller.exchange(true)) {
@@ -131,6 +145,14 @@ bool CursorHook::RealCursorPos(POINT* out) {
 }
 
 bool CursorHook::installed() { return g_installed.load(); }
+
+bool CursorHook::LastSetTarget(POINT* out, unsigned long long* when_ms) {
+  if (out == nullptr) return false;
+  out->x = g_last_set_x.load(std::memory_order_relaxed);
+  out->y = g_last_set_y.load(std::memory_order_relaxed);
+  if (when_ms != nullptr) *when_ms = g_last_set_ms.load(std::memory_order_relaxed);
+  return out->x != -100000;
+}
 
 std::uint64_t CursorHook::suppressed() {
   return g_suppressed.load(std::memory_order_relaxed);

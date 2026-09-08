@@ -1,14 +1,16 @@
 #pragma once
 //
-// The in-game debug panel. Everything the module knows, drawn over the game so
-// there is nothing to alt-tab to.
+// The in-game interface, drawn over the game so there is nothing to alt-tab
+// to. Two faces: the player's - a badge in the corner and a menu on the
+// keyboard, F11 to open and close, no mouse involved - and the developer's
+// panel behind the menu's last item, with everything the module knows and,
+// in its interactive form, the mouse.
 //
 // Draws inside the EndScene hook, which is the only point where Direct3D is
 // between BeginScene and EndScene and will accept our geometry.
 //
-// It takes no input. The game owns the mouse and keyboard through DirectInput,
-// and wrestling that away is a separate problem from showing numbers - so the
-// panel is read-only and toggled with a single polled key.
+// While the menu is open its keys are swallowed in the window procedure, so
+// the game and SA-MP never see them; the game keeps the mouse throughout.
 //
 #include <string>
 
@@ -46,6 +48,8 @@ class Overlay {
   static bool disabled();
 
   static bool visible();
+  // The keyboard menu (F11) is open and eating key messages.
+  static bool MenuOpen();
   static void SetVisible(bool visible);
 
   // Everything that decides whether a key reaches the character, in one
@@ -54,6 +58,11 @@ class Overlay {
   // movement keys Windows reports held. Callable from any thread - it reads
   // window state and atomics, never Direct3D.
   static std::string InputState();
+
+  // How many key-down messages the window procedure at the head of the
+  // chain has seen. Keys held with this standing still are keys whose
+  // messages never reach the window at all.
+  static unsigned long long KeyMessages();
 
   // Stand down: passive mode, cursor handed back, movement disarmed, the
   // debug overlays off. Bound to a hotkey polled off the game thread so it

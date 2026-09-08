@@ -4,12 +4,13 @@
 // between two points passes through anything, where a point lands on the
 // screen.
 //
-// These are calls into gta_sa.exe, not reads of it. They are the functions
-// the game's own pedestrians use to decide where they can walk, which is the
-// whole reason to use them rather than reason about geometry ourselves: the
-// collision the game consults is the collision that will actually stop a
-// character. Two consequences follow. They may only run on the game thread,
-// because that is where the world is consistent. And they only know about
+// These were calls into gta_sa.exe. SA-MP's client protection answers a
+// call into the game's world functions from outside with the keyboard
+// taken away, while a module that only reads is left alone - so since the
+// evening of 2026-09-08 they are reads: the same sectors, entities and
+// collision models the game's functions walk, walked here (game/collision).
+// Two things remain as they were. This runs only on the game thread,
+// because that is where the world is consistent. And it only knows about
 // what is streamed in - the few hundred metres around the player - so a
 // question about somewhere far away is answered "no ground", which is not a
 // verdict about the place, only about how far the game can see.
@@ -46,6 +47,10 @@ bool Enabled();
 // at ninety frames a second would spend the whole allowance on itself.
 int CallsInLastSecond();
 int CallsPerSecondCeiling();
+// How many more calls this second will still be answered by the game. Past
+// the ceiling every query says "no ground" and "blocked", which a planner
+// must not mistake for the world; it waits instead.
+int CallSlotsLeft();
 
 // How many of each kind have been made since arming, so a report of the input
 // going away can name what had been called by then.
@@ -82,6 +87,11 @@ bool LineOfSightAvailable();
 // game finds none - which is also the answer for anywhere not streamed in.
 bool GroundBelow(const Vec3& at, float* ground_z);
 
+// The water surface at (x, y), if there is water there at all. The ground
+// call does not know about water - it finds the lake bed and calls it
+// ground - so every place he is sent is asked this as well.
+bool WaterLevel(const Vec3& at, float* level);
+
 // Whether nothing solid lies between a and b: buildings, objects, vehicles
 // and the dummies fences are made of. Peds are deliberately left out - they
 // move, and a route is not blocked by someone standing in it right now.
@@ -106,5 +116,13 @@ bool ControlsDisabled(bool* disabled);
 // the check is the one that catches a wrong address: the forward row of a
 // real matrix is a unit vector.
 bool CameraHeading(float* radians);
+
+// The camera's own orientation angle, the one the game subtracts when it
+// turns the walk stick into a direction: in CTaskSimplePlayerOnFoot's
+// PlayerControlZelda the heading is GetRadianAngleBetweenPoints(0, 0,
+// -stickX, stickY) - TheCamera.m_fOrientation. Read, never written - the
+// camera stays the player's. False when it cannot be read or is not a
+// plausible angle.
+bool CameraOrientation(float* radians);
 
 }  // namespace gtabot::game

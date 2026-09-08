@@ -538,4 +538,174 @@ std::vector<PathNode> PedNodesNear(const Vec3& at, float radius,
   return found;
 }
 
+const PathNode* Graph::Node(std::uint16_t area, std::uint16_t index) const {
+  if (!valid || area >= kPathAreas) return nullptr;
+  const Area& a = areas[area];
+  if (!a.loaded || index >= a.nodes.size()) return nullptr;
+  return &a.nodes[index];
+}
+
+int Graph::Links(const PathNode& node, PathLink* out, int max) const {
+  if (!valid || node.area >= kPathAreas) return 0;
+  const Area& a = areas[node.area];
+  if (!a.loaded) return 0;
+  int written = 0;
+  for (int k = 0; k < node.link_count && written < max; ++k) {
+    const std::size_t at = static_cast<std::size_t>(node.base_link) + k;
+    if (at >= a.links.size()) break;
+    const PathLink& link = a.links[at];
+    if (link.area >= kPathAreas || !areas[link.area].loaded) continue;
+    if (link.index >= areas[link.area].nodes.size()) continue;
+    out[written++] = link;
+  }
+  return written;
+}
+
+namespace {
+constexpr float kSquare = 24.0f;
+std::uint32_t SquareKey(float x, float y) {
+  const int sx = static_cast<int>(std::floor(x / kSquare)) + 512;
+  const int sy = static_cast<int>(std::floor(y / kSquare)) + 512;
+  return (static_cast<std::uint32_t>(sx) << 16) | static_cast<std::uint32_t>(sy);
+}
+}  // namespace
+
+std::vector<PathLink> Graph::PedNodesAround(const Vec3& at, float radius,
+                                            std::size_t max) const {
+  std::vector<PathLink> found;
+  if (!valid) return found;
+  struct Hit {
+    float    distance;
+    PathLink ref;
+  };
+  std::vector<Hit> hits;
+  const float radius_squared = radius * radius;
+  for (int dy = -1; dy <= 1; ++dy) {
+    for (int dx = -1; dx <= 1; ++dx) {
+      const auto it = squares.find(SquareKey(at.x + dx * kSquare, at.y + dy * kSquare));
+      if (it == squares.end()) continue;
+      for (const PathLink& ref : it->second) {
+        const PathNode* node = Node(ref.area, ref.index);
+        if (node == nullptr || !node->ped) continue;
+        const float ddx = node->pos.x - at.x, ddy = node->pos.y - at.y,
+                    ddz = node->pos.z - at.z;
+        const float d2 = ddx * ddx + ddy * ddy + ddz * ddz;
+        if (d2 > radius_squared) continue;
+        hits.push_back(Hit{std::sqrt(d2), ref});
+      }
+    }
+  }
+  std::sort(hits.begin(), hits.end(),
+            [](const Hit& a, const Hit& b) { return a.distance < b.distance; });
+  if (hits.size() > max) hits.resize(max);
+  found.reserve(hits.size());
+  for (const Hit& hit : hits) found.push_back(hit.ref);
+  return found;
+}
+
+std::vector<PathNode> Graph::PedNodesNear(const Vec3& at, float radius,
+                                          std::size_t max) const {
+  std::vector<PathNode> found;
+  if (!valid) return found;
+  struct Hit {
+    float    distance;
+    const PathNode* node;
+  };
+  std::vector<Hit> hits;
+  const float radius_squared = radius * radius;
+  for (const Area& a : areas) {
+    if (!a.loaded) continue;
+    for (std::size_t n = a.vehicle; n < a.nodes.size(); ++n) {
+      const PathNode& node = a.nodes[n];
+      const float dx = node.pos.x - at.x, dy = node.pos.y - at.y,
+                  dz = node.pos.z - at.z;
+      const float d2 = dx * dx + dy * dy + dz * dz;
+      if (d2 > radius_squared) continue;
+      hits.push_back(Hit{std::sqrt(d2), &node});
+    }
+  }
+  std::sort(hits.begin(), hits.end(),
+            [](const Hit& a, const Hit& b) { return a.distance < b.distance; });
+  if (hits.size() > max) hits.resize(max);
+  found.reserve(hits.size());
+  for (const Hit& hit : hits) found.push_back(*hit.node);
+  return found;
+}
+
+Graph SnapshotGraph() {
+  Graph graph;
+  if (!g_layout.valid) return graph;
+
+  std::uint32_t pointers[kPathAreas], total[kPathAreas], vehicle[kPathAreas];
+  std::uint32_t link_tables[kPathAreas];
+  if (!ReadPointers(g_layout.nodes, pointers)) return graph;
+  if (!ReadPointers(g_layout.links, link_tables)) return graph;
+  if (!LoadCounts(g_layout.count_all, g_layout.count_width, total)) return graph;
+  if (!LoadCounts(g_layout.count_vehicle, g_layout.count_width, vehicle))
+    return graph;
+
+  std::vector<unsigned char> block;
+  for (int i = 0; i < kPathAreas; ++i) {
+    Graph::Area& area = graph.areas[i];
+    if (pointers[i] == 0 || link_tables[i] == 0 || total[i] == 0 ||
+        total[i] > kMaxNodesPerArea || vehicle[i] > total[i])
+      continue;
+    block.resize(total[i] * kNodeSize);
+    const std::size_t got =
+        asi::mem::ReadGuarded(pointers[i], block.data(), block.size());
+    const std::uint32_t usable = static_cast<std::uint32_t>(got / kNodeSize);
+    if (usable != total[i]) continue;
+
+    area.nodes.resize(total[i]);
+    std::uint32_t links_needed = 0;
+    for (std::uint32_t n = 0; n < total[i]; ++n) {
+      const unsigned char* raw = block.data() + n * kNodeSize;
+      PathNode& node = area.nodes[n];
+      std::int16_t x, y, z;
+      std::memcpy(&x, raw + kNodeX, 2);
+      std::memcpy(&y, raw + kNodeY, 2);
+      std::memcpy(&z, raw + kNodeZ, 2);
+      std::memcpy(&node.base_link, raw + kNodeBase, 2);
+      std::memcpy(&node.area, raw + kNodeArea, 2);
+      std::memcpy(&node.index, raw + kNodeIndex, 2);
+      std::memcpy(&node.flags, raw + kNodeFlags, 4);
+      node.pos        = Vec3{x * kNodeScale, y * kNodeScale, z * kNodeScale};
+      node.link_count = static_cast<std::uint8_t>(node.flags & 0xF);
+      node.ped        = n >= vehicle[i];
+      const std::uint32_t end = static_cast<std::uint32_t>(node.base_link) +
+                                node.link_count;
+      if (end > links_needed) links_needed = end;
+    }
+    // The link table has no count of its own; it is as long as the nodes
+    // say it is.
+    if (links_needed > 0) {
+      std::vector<std::uint32_t> raw_links(links_needed);
+      const std::size_t want = links_needed * kLinkSize;
+      if (asi::mem::ReadGuarded(link_tables[i], raw_links.data(), want) != want)
+        continue;
+      area.links.resize(links_needed);
+      for (std::uint32_t k = 0; k < links_needed; ++k) {
+        area.links[k].area  = static_cast<std::uint16_t>(raw_links[k] & 0xFFFF);
+        area.links[k].index = static_cast<std::uint16_t>(raw_links[k] >> 16);
+      }
+    }
+    area.total   = total[i];
+    area.vehicle = vehicle[i];
+    area.loaded  = true;
+    graph.valid  = true;
+  }
+  // The squares, for the ped nodes - the only ones anything asks about by
+  // position.
+  for (int i = 0; i < kPathAreas; ++i) {
+    const Graph::Area& area = graph.areas[i];
+    if (!area.loaded) continue;
+    for (std::size_t n = area.vehicle; n < area.nodes.size(); ++n) {
+      const PathNode& node = area.nodes[n];
+      graph.squares[SquareKey(node.pos.x, node.pos.y)].push_back(
+          PathLink{node.area, node.index});
+    }
+  }
+  return graph;
+}
+
 }  // namespace gtabot::game

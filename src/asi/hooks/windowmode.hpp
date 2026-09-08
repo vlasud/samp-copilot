@@ -43,6 +43,17 @@ class WindowMode {
   // bot.cfg: walker=on (default) or walker=off.
   static bool WalkerAllowed();
 
+  // Whether the joystick may reach the pad. Off by default: the game
+  // reconciles it with the keyboard by rules that let a gamepad on the desk
+  // switch W, A, S and D off. bot.cfg `gamepad=on` lets it through.
+  static bool GamepadAllowed();
+
+  // Whether the investigation instruments run: hardware watchpoints on the
+  // input switches, the Windows API trace, the DirectInput mouse hooks.
+  // Off by default - each is a deviation from a plain player's process.
+  // bot.cfg `diagnostics=on`.
+  static bool DiagnosticsAllowed();
+
   // Rewrites present parameters to windowed at the configured size. Called
   // from the CreateDevice and Reset hooks with whatever the game passed.
   static void ForceWindowed(D3DPRESENT_PARAMETERS* params);

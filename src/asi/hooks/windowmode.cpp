@@ -30,6 +30,8 @@ int g_height = 0;
 // SetWindowPos and makes the window flicker and jump.
 std::atomic<bool> g_styled{false};
 std::atomic<bool> g_walker_allowed{true};
+std::atomic<bool> g_diagnostics_allowed{false};
+std::atomic<bool> g_gamepad_allowed{false};
 
 std::string Trim(const std::string& in) {
   const std::size_t a = in.find_first_not_of(" \t\r\n");
@@ -53,6 +55,18 @@ void ReadConfig() {
     if (eq == std::string::npos) continue;
     const std::string key   = Trim(line.substr(0, eq));
     const std::string value = Trim(line.substr(eq + 1));
+    if (key == "gamepad") {
+      const bool on = value == "on" || value == "1" || value == "true";
+      g_gamepad_allowed.store(on);
+      LOG_INFO("bot.cfg: the gamepad is {}", on ? "allowed" : "ignored");
+      continue;
+    }
+    if (key == "diagnostics") {
+      const bool on = value == "on" || value == "1" || value == "true";
+      g_diagnostics_allowed.store(on);
+      LOG_INFO("bot.cfg: diagnostics {}", on ? "on" : "off");
+      continue;
+    }
     if (key == "walker") {
       const bool off = value == "off" || value == "0" || value == "false";
       g_walker_allowed.store(!off);
@@ -97,9 +111,19 @@ bool WindowMode::Enabled() {
   return g_enabled.load(std::memory_order_acquire);
 }
 
+bool WindowMode::DiagnosticsAllowed() {
+  EnsureConfigured();
+  return g_diagnostics_allowed.load();
+}
+
 bool WindowMode::WalkerAllowed() {
   EnsureConfigured();
   return g_walker_allowed.load(std::memory_order_acquire);
+}
+
+bool WindowMode::GamepadAllowed() {
+  EnsureConfigured();
+  return g_gamepad_allowed.load(std::memory_order_acquire);
 }
 
 void WindowMode::ForceWindowed(D3DPRESENT_PARAMETERS* params) {

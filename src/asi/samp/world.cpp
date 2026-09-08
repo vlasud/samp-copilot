@@ -1493,4 +1493,14 @@ json ReadWorld() {
   };
 }
 
+std::uintptr_t LocalPlayerObject() {
+  const Layout& layout = ResolveLayout();
+  if (!layout.valid || layout.local_name == 0 || layout.string_width == 0) return 0;
+  std::uint32_t object = 0;
+  if (!asi::mem::Read<std::uint32_t>(
+          layout.player_pool + layout.local_name + layout.string_width, &object))
+    return 0;
+  return object;
+}
+
 }  // namespace gtabot::samp

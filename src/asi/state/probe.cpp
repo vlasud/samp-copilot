@@ -84,6 +84,11 @@ json HitsToJson(const std::vector<mem::Hit>& hits, bool with_context) {
 std::atomic<bool>  g_have_position{false};
 std::atomic<unsigned> g_position_serial{0};
 std::atomic<float> g_local_x{0}, g_local_y{0}, g_local_z{0};
+std::atomic<std::uintptr_t> g_local_ped{0};
+
+std::uintptr_t LastLocalPedPointer() {
+  return g_local_ped.load(std::memory_order_acquire);
+}
 
 unsigned LastPositionSerial() {
   return g_position_serial.load(std::memory_order_acquire);
@@ -113,6 +118,7 @@ json BuildWorldSnapshot() {
     g_local_x.store(self.x, std::memory_order_relaxed);
     g_local_y.store(self.y, std::memory_order_relaxed);
     g_local_z.store(self.z, std::memory_order_relaxed);
+    g_local_ped.store(self.game_ped, std::memory_order_release);
     g_have_position.store(true, std::memory_order_release);
     g_position_serial.fetch_add(1, std::memory_order_release);
     const game::Vec3 at{self.x, self.y, self.z};

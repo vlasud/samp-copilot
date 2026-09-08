@@ -26,6 +26,11 @@ bool LastLocalPosition(float* x, float* y, float* z);
 // who is not moving.
 unsigned LastPositionSerial();
 
+// The game's own object for the local player, as of the last snapshot, for
+// threads that may read his fields but must not walk SA-MP's structures to
+// find him. Zero until there has been one.
+std::uintptr_t LastLocalPedPointer();
+
 // Worker thread. Touches only its own counters and code bytes in d3d9.dll, so
 // it keeps reporting while the game thread is stalled - which is exactly when
 // the report matters most.

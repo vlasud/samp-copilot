@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cmath>
 
+#include "game/collision.hpp"
 #include "game/exe.hpp"
 #include "state/memory.hpp"
 #include "log.hpp"
@@ -15,8 +16,15 @@ namespace {
 // gta_sa.exe 1.0 US. All cdecl; references arrive as pointers, and bools
 // occupy a full argument slot like everything else on this ABI.
 constexpr std::uint32_t kFindGroundZFor3DCoord = 0x5696C0;
+// FindGroundZFor3DCoord asks buildings and dummies only. The line tests ask
+// objects too, so a bench, a planter or a low wall that is an object reads
+// as solid at knee height above a ground that ignores it - a jump at every
+// metre inside it. The ground is asked the same way as the lines.
+constexpr std::uint32_t kProcessVerticalLine   = 0x5674E0;
 constexpr std::uint32_t kGetIsLineOfSightClear = 0x56A490;
 constexpr std::uint32_t kCalcScreenCoors       = 0x71DA00;
+// CWaterLevel::GetWaterLevel(x, y, z, float* level, bool touching, CVector* normals).
+constexpr std::uint32_t kGetWaterLevel         = 0x6EB690;
 
 // CPad for the first player, and the member the game consults before it lets
 // him move. Not a call - a read - so it needs no self-check beyond the build
@@ -36,21 +44,41 @@ constexpr std::uint32_t kCalcScreenCoors       = 0x71DA00;
 //
 // CPad is 0x134 bytes, which the array stride has to agree with.
 constexpr std::uint32_t kPad0                     = 0xB73458;
+// For the projection: the field of view (CDraw::ms_fFOV, across the width)
+// and the size of what is drawn (RsGlobal.maximumWidth/Height).
+constexpr std::uint32_t kFov    = 0x8D5038;
+constexpr std::uint32_t kAspect = 0xC3EFA4;   // CDraw::ms_fAspectRatio
+constexpr std::uint32_t kWidth  = 0xC17044;
+constexpr std::uint32_t kHeight = 0xC17048;
+constexpr std::uint32_t kMatrixRight = 0x00;
+constexpr std::uint32_t kMatrixUp    = 0x20;
+constexpr std::uint32_t kMatrixPos   = 0x30;
 // TheCamera, a CPlaceable: matrix pointer where an entity keeps one, and the
 // forward row sixteen bytes into that matrix.
 constexpr std::uint32_t kTheCamera        = 0xB6F028;
+// CCamera::m_fOrientation. Confirmed in the disassembly of
+// PlayerControlZelda (0x6883D0): the value at 0xB6F178 is what it subtracts
+// from the stick angle.
+constexpr std::uint32_t kCameraOrientation = 0x150;
 constexpr std::uint32_t kPlaceableMatrix  = 0x14;
 constexpr std::uint32_t kMatrixForward    = 0x10;
 constexpr std::uint32_t kPadDisablePlayerControls = 0x10E;
 
 using FindGroundFn = float(__cdecl*)(float x, float y, float z, bool* found,
                                      void** entity);
+using VerticalLineFn = bool(__cdecl*)(const Vec3* origin, float distance,
+                                      void* col_point, void** entity,
+                                      bool buildings, bool vehicles, bool peds,
+                                      bool objects, bool dummies,
+                                      bool see_through, void* poly);
 using LineClearFn  = bool(__cdecl*)(const Vec3* from, const Vec3* to,
                                     bool buildings, bool vehicles, bool peds,
                                     bool objects, bool dummies,
                                     bool see_through, bool camera_ignore);
 using ScreenFn     = bool(__cdecl*)(const Vec3* world, Vec3* screen, float* w,
                                     float* h, bool check_max, bool check_min);
+using WaterFn      = bool(__cdecl*)(float x, float y, float z, float* level,
+                                    bool touching, void* normals);
 
 // A ped's origin sits about a metre above his feet. The self-check accepts a
 // generous band around that, because the point is to catch a wrong address -
@@ -68,9 +96,12 @@ std::atomic<bool> g_enabled{false};
 // was lost once at six calls a second and kept through three hundred, so rate
 // was never what did it. What genuinely bounds these is the planner's own
 // wall clock, which will not spend more than a few milliseconds of any frame.
-// This is left as a backstop against a runaway rather than as a budget, and
-// pulling a route tight across a city is worth a few thousand of them.
-constexpr int kCallsPerSecond = 4000;
+// This is left as a backstop against a runaway rather than as a budget. The
+// planner now works a few milliseconds of every frame and can honestly make
+// several hundred calls in each, so the backstop sits well above what a
+// frame's worth of planning adds up to over a second; a caller that would
+// rather wait than be told "no ground" asks CallSlotsLeft() first.
+constexpr int kCallsPerSecond = 50000;
 std::atomic<unsigned long long> g_second_started{0};
 std::atomic<int> g_calls_this_second{0};
 std::atomic<int> g_calls_last_second{0};
@@ -125,6 +156,25 @@ bool CallGround(FindGroundFn fn, float x, float y, float z, float* out) {
   }
 }
 
+// Downward from the origin to the absolute height end_z (the game's own
+// ground probe passes -1000), buildings, objects and dummies; the collision
+// point's z is the ground. CColPoint is 0x2C bytes; the buffer is larger.
+bool CallVerticalLine(VerticalLineFn fn, const Vec3* origin, float end_z,
+                      float* out) {
+  __try {
+    unsigned char col_point[64] = {};
+    void* entity = nullptr;
+    if (!fn(origin, end_z, col_point, &entity, /*buildings=*/true,
+            /*vehicles=*/false, /*peds=*/false, /*objects=*/true,
+            /*dummies=*/true, /*see_through=*/false, nullptr))
+      return false;
+    *out = *reinterpret_cast<const float*>(col_point + 8);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
 bool CallLineClear(LineClearFn fn, const Vec3* a, const Vec3* b, bool* clear,
                    bool vehicles) {
   __try {
@@ -132,6 +182,16 @@ bool CallLineClear(LineClearFn fn, const Vec3* a, const Vec3* b, bool* clear,
                 /*objects=*/true, /*dummies=*/true, /*see_through=*/false,
                 /*camera_ignore=*/false);
     return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+bool CallWater(WaterFn fn, float x, float y, float z, float* level) {
+  __try {
+    // touching=true, or water more than three metres over the point asked
+    // about - the lake bed - is reported as no water at all.
+    return fn(x, y, z, level, true, nullptr);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     return false;
   }
@@ -175,26 +235,35 @@ bool SelfCheck(const Vec3& player, const char** why) {
     *why = "already verified";
     return true;
   }
-  const auto fn = reinterpret_cast<FindGroundFn>(At(kFindGroundZFor3DCoord));
-  if (fn == nullptr) {
-    *why = "the executable is not the build these addresses are for";
+  if (!col::Ready()) {
+    *why = "the world's tables are not where this build keeps them";
     return false;
   }
+  static unsigned long long explained_ms = 0;
   float ground = 0;
-  if (!CallGround(fn, player.x, player.y, player.z + 1.0f, &ground)) {
-    *why = "the game reports no ground under the player";
+  if (!col::GroundBelow(player.x, player.y, player.z + 1.0f, &ground)) {
+    *why = "no ground reads under the player";
+    if (GetTickCount64() - explained_ms > 5000) {
+      explained_ms = GetTickCount64();
+      col::Explain(player.x, player.y, player.z + 1.0f);
+    }
     return false;
   }
   const float height = player.z - ground;
   if (height < kPedHeightMin || height > kPedHeightMax) {
-    // In a vehicle, or on something the game does not count as ground - or
-    // the address is wrong. Not trusted yet either way; asked again later.
-    *why = "the ground the game reports is not a ped's height below him";
+    // In a vehicle, or on something that does not count as ground - or the
+    // reading is wrong. Not trusted yet either way; asked again later.
+    *why = "the ground read is not a ped's height below him";
+    if (GetTickCount64() - explained_ms > 5000) {
+      explained_ms = GetTickCount64();
+      LOG_WARN("collision: the ground under the player reads {:.2f} m below him", height);
+      col::Explain(player.x, player.y, player.z + 1.0f);
+    }
     return false;
   }
   g_trusted.store(true, std::memory_order_release);
-  LOG_INFO("game calls verified: ground under the player is {:.2f} m below "
-           "him", height);
+  LOG_INFO("collision model verified: ground under the player is {:.2f} m below "
+           "him, read from the game's own data", height);
   *why = "ground under the player is where he is standing";
   return true;
 }
@@ -206,19 +275,27 @@ int ScreenCalls()      { return g_screen_calls.load(); }
 int CallsInLastSecond() { return g_calls_last_second.load(); }
 int CallsPerSecondCeiling() { return kCallsPerSecond; }
 
+int CallSlotsLeft() {
+  const unsigned long long now = GetTickCount64();
+  if (now - g_second_started.load(std::memory_order_acquire) >= 1000)
+    return kCallsPerSecond;   // the window rolls over on the next call
+  const int used = g_calls_this_second.load(std::memory_order_relaxed);
+  return used >= kCallsPerSecond ? 0 : kCallsPerSecond - used;
+}
+
 bool GroundBelow(const Vec3& at, float* ground_z) {
   if (!CallsTrusted()) return false;
   if (!TakeCallSlot()) return false;
   g_ground_calls.fetch_add(1, std::memory_order_relaxed);
-  const auto fn = reinterpret_cast<FindGroundFn>(At(kFindGroundZFor3DCoord));
-  return fn != nullptr && CallGround(fn, at.x, at.y, at.z, ground_z);
+  return col::GroundBelow(at.x, at.y, at.z, ground_z);
 }
 
 namespace {
 bool RawLineClear(const Vec3& a, const Vec3& b, bool* clear,
                   bool include_vehicles = true) {
-  const auto fn = reinterpret_cast<LineClearFn>(At(kGetIsLineOfSightClear));
-  return fn != nullptr && CallLineClear(fn, &a, &b, clear, include_vehicles);
+  if (!col::Ready()) return false;
+  *clear = col::LineClear(a, b, include_vehicles);
+  return true;
 }
 }  // namespace
 
@@ -244,10 +321,7 @@ bool SelfCheckLineOfSight(const Vec3& player, const char** why) {
     return false;
   }
   float ground = 0;
-  const auto ground_fn =
-      reinterpret_cast<FindGroundFn>(At(kFindGroundZFor3DCoord));
-  if (ground_fn == nullptr ||
-      !CallGround(ground_fn, player.x, player.y, player.z + 1.0f, &ground)) {
+  if (!col::GroundBelow(player.x, player.y, player.z + 1.0f, &ground)) {
     *why = "no ground under the player to measure against";
     return false;
   }
@@ -299,6 +373,12 @@ bool LineClear(const Vec3& a, const Vec3& b, bool include_vehicles) {
   return RawLineClear(a, b, &clear, include_vehicles) && clear;
 }
 
+bool WaterLevel(const Vec3& at, float* level) {
+  if (!CallsTrusted()) return false;
+  if (!TakeCallSlot()) return false;
+  return col::WaterAt(at.x, at.y, level);
+}
+
 bool ControlsDisabled(bool* disabled) {
   const std::uintptr_t pad = At(kPad0);
   if (pad == 0) return false;
@@ -330,6 +410,17 @@ bool CameraHeading(float* radians) {
   return true;
 }
 
+bool CameraOrientation(float* radians) {
+  const std::uintptr_t camera = At(kTheCamera);
+  if (camera == 0) return false;
+  float value = 0;
+  if (!asi::mem::Read<float>(camera + kCameraOrientation, &value)) return false;
+  // An angle in radians, kept within a turn by the game itself.
+  if (!(value == value) || value < -7.0f || value > 7.0f) return false;
+  *radians = value;
+  return true;
+}
+
 bool ToScreen(const Vec3& world, float* sx, float* sy) {
   if (!CallsTrusted()) return false;
   // Cheaper than a world query - arithmetic on the camera - but not free, and
@@ -338,12 +429,42 @@ bool ToScreen(const Vec3& world, float* sx, float* sy) {
   // for everything drawn at any frame rate and still an allowance.
   if (!TakeScreenSlot()) return false;
   g_screen_calls.fetch_add(1, std::memory_order_relaxed);
-  const auto fn = reinterpret_cast<ScreenFn>(At(kCalcScreenCoors));
-  if (fn == nullptr) return false;
-  Vec3 screen;
-  if (!CallScreen(fn, &world, &screen)) return false;
-  *sx = screen.x;
-  *sy = screen.y;
+  // The camera's own frame and field of view, the way the game projects:
+  // the view window is tan(fov/2) across and that over the aspect ratio
+  // down, and a point lands at its ratio to the depth.
+  const std::uintptr_t camera = At(kTheCamera);
+  if (camera == 0) return false;
+  std::uint32_t matrix = 0;
+  if (!asi::mem::Read<std::uint32_t>(camera + kPlaceableMatrix, &matrix) || matrix == 0)
+    return false;
+  float m[12];
+  for (int i = 0; i < 3; ++i) {
+    if (!asi::mem::Read<float>(matrix + kMatrixRight + i * 4, &m[i])) return false;
+    if (!asi::mem::Read<float>(matrix + kMatrixForward + i * 4, &m[3 + i])) return false;
+    if (!asi::mem::Read<float>(matrix + kMatrixUp + i * 4, &m[6 + i])) return false;
+    if (!asi::mem::Read<float>(matrix + kMatrixPos + i * 4, &m[9 + i])) return false;
+  }
+  float fov = 0;
+  std::int32_t width = 0, height = 0;
+  if (!asi::mem::Read<float>(At(kFov), &fov) || fov < 1.0f || fov > 179.0f) return false;
+  if (!asi::mem::Read<std::int32_t>(At(kWidth), &width) ||
+      !asi::mem::Read<std::int32_t>(At(kHeight), &height) || width <= 0 || height <= 0)
+    return false;
+  const float dx = world.x - m[9], dy = world.y - m[10], dz = world.z - m[11];
+  const float x = dx * m[0] + dy * m[1] + dz * m[2];
+  const float depth = dx * m[3] + dy * m[4] + dz * m[5];
+  const float z = dx * m[6] + dy * m[7] + dz * m[8];
+  if (depth <= 0.1f) return false;
+  const float tan_half = std::tan(fov * 0.5f * 3.14159265f / 180.0f);
+  // The game's own ratio, which a widescreen fix may have moved away from
+  // the window's; the window is only the fallback.
+  float aspect = 0;
+  if (!asi::mem::Read<float>(At(kAspect), &aspect) || !(aspect > 0.2f && aspect < 6.0f))
+    aspect = static_cast<float>(width) / static_cast<float>(height);
+  const float half_w = static_cast<float>(width) * 0.5f;
+  const float half_h = static_cast<float>(height) * 0.5f;
+  *sx = half_w + (x / depth) / tan_half * half_w;
+  *sy = half_h - (z / depth) / (tan_half / aspect) * half_h;
   return true;
 }
 

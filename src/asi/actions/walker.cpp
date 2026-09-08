@@ -1,70 +1,208 @@
 #include "actions/walker.hpp"
 
+#include "samp/input_state.hpp"
+#include "game/mouse_watch.hpp"
+#include "ui/overlay.hpp"
+
 #include <windows.h>
 
-#include <MinHook.h>
-
+#include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 
 #include "game/exe.hpp"
 #include "hooks/windowmode.hpp"
 #include "log.hpp"
+#include "nav/planner.hpp"
 #include "samp/world.hpp"
 #include "state/memory.hpp"
 
 namespace gtabot::act {
 namespace {
 
-// CPad::UpdatePads fills the pad from the real keyboard and mouse. Writing
-// immediately after it is the only moment the stick sticks.
-constexpr std::uint32_t kUpdatePads = 0x541DD0;
+// CPad::UpdatePads fills the pad from the real keyboard and mouse:
+// AffectPadFromKeyBoard puts each held key into CPad::PCTempKeyState, and
+// CPad::Update reconciles that into NewState and clears it. The walker's
+// stick goes into the same temp state at the end of the frame, from the
+// frame hook, and the next UpdatePads picks it up exactly as it would a
+// held key. No instruction of the game's is patched for it.
 constexpr std::uint32_t kPads       = 0xB73458;
-// CPad is 0x134 bytes; NewState is the first member and its sticks are the
-// first two shorts of it.
-constexpr std::uint32_t kNewStateLeftStickX = 0x00;
-constexpr std::uint32_t kNewStateLeftStickY = 0x02;
+constexpr std::uint32_t kKeyState   = 0x78;    // CPad::PCTempKeyState
+// The game's own key table, the one its window procedure fills on
+// WM_KEYDOWN: F1..F12 first, then the 256 standard keys, 255 while down.
+// The walk is expressed as the player's movement keys held in it; the
+// game's AffectPadFromKeyBoard turns those into the stick the way it does
+// for a hand on the keyboard, and nothing about the pad is ours.
+constexpr std::uint32_t kTempKeyTable = 0xB72CB0;   // CPad::TempKeyState
+constexpr std::uint32_t kStandardKeys = 0x18;
+constexpr short kKeyDown = 255;
+// CControllerConfigManager: which keys the player bound to walking. Type 0
+// is the primary key, type 1 the alternative; arrows and WASD by default.
+constexpr std::uint32_t kControlsManager = 0xB70198;
+constexpr std::uint32_t kActions         = 0xB70;
+constexpr std::uint32_t kActionSize      = 0x20;
+constexpr std::uint32_t kKeySize         = 0x8;
+constexpr int kGoForward = 4, kGoBack = 5, kGoLeft = 6, kGoRight = 7;
+constexpr int kJumping = 12, kSprint = 13;
+constexpr unsigned kFwd = 1, kBack = 2, kRight = 4, kLeft = 8;
+constexpr unsigned kSprintKey = 16, kJumpKey = 32;
+// The game's own key codes above the virtual keys: what a binding to a
+// modifier or an arrow looks like in the controls table.
+constexpr int kRsUp = 1019, kRsDown = 1020, kRsLeft = 1021, kRsRight = 1022;
+constexpr int kRsEnter = 1045, kRsLShift = 1046, kRsRShift = 1047, kRsShift = 1048;
+constexpr int kRsLCtrl = 1049, kRsRCtrl = 1050, kRsLAlt = 1051, kRsRAlt = 1052;
+constexpr int kRsTab = 1043, kRsBackspace = 1042;
+// CPad is 0x134 bytes; NewState is the first member. Its sticks are the first
+// two shorts of it, and the buttons follow in PlayStation order: square is
+// jump, cross is sprint.
+constexpr std::uint32_t kNewStateLeftStickX  = 0x00;
+constexpr std::uint32_t kNewStateLeftStickY  = 0x02;
+constexpr std::uint32_t kNewStateButtonSquare = 0x1C;
+constexpr std::uint32_t kNewStateButtonCross  = 0x20;
+constexpr short kPressed = 255;
+
+// CPhysical::m_vecMoveSpeed, whose z says whether he is going up or down.
+// The ped's own standing/in-the-air flags are not read: by the time the pad
+// is written, at the end of the frame, the physics has already cleared the
+// one and left the other set, and a walker that trusted them never jumped.
+constexpr std::uint32_t kMoveSpeed = 0x44;
 
 // Full deflection. The game clamps to 128 either way.
 constexpr short kFullStick = 127;
 
 // How close counts as arrived. A person does not stop on a coin, and the
-// route's own legs are metres long.
-constexpr float kArriveNext = 1.6f;
-constexpr float kArriveLast = 1.0f;
-// Giving up: no meaningful progress toward the next point for this long.
-constexpr unsigned long long kStuckMs = 2500;
-constexpr float kProgress = 0.4f;
+// route's own legs are metres long. Running, he needs a little more.
+constexpr float kArriveNext = 1.8f;
+constexpr float kArriveLast = 1.4f;
+
+// Stuck: he has hardly moved at all for this long. Not "no closer to the
+// target" - a man going round a fence is no closer to the target either, and
+// he is doing exactly the right thing.
+constexpr unsigned long long kStuckMs = 1300;
+constexpr float kStuckMetres = 0.5f;
+// And separately: moving, but no closer to the point he is heading for, for
+// a long time. That is a loop or a wall being followed to nowhere, and the
+// journey should have another look.
+constexpr unsigned long long kNoCloserMs = 10000;
+constexpr float kCloser = 1.0f;
 // The whole walk, so a route that cannot be finished does not press the stick
 // forever.
-constexpr unsigned long long kWalkLimitMs = 120000;
+constexpr unsigned long long kWalkLimitMs = 180000;
 
-// Long enough to push straight forward and see which way that turned out to
-// be, and short enough that a walk does not visibly start in the wrong
-// direction.
+// The stick's frame, from the game's own arithmetic rather than measured.
+//
+// CTaskSimplePlayerOnFoot::PlayerControlZelda turns the pad into a heading
+// as GetRadianAngleBetweenPoints(0, 0, -stickX, stickY) - m_fOrientation,
+// where that angle function is atan2(x, -y), the game's headings run
+// anticlockwise from north, and the direction walked is (-sin h, cos h).
+// Solving that for the stick, with the wanted direction as a mathematical
+// angle theta (anticlockwise from east):
+//
+//   a      = theta - pi/2 + m_fOrientation
+//   stickX = -127 sin a
+//   stickY = -127 cos a
+//
+// So the frame offset is pi/2 - m_fOrientation and the sideways axis is
+// mirrored - which is what the measuring used to discover for itself, two
+// and a half seconds of running the wrong way into every session.
+constexpr float kHalfPi = 1.57079633f;
+constexpr float kMirrored = -1.0f;
+// Should the derivation be wrong on some camera mode, the character faces
+// off his line steadily while his line is not changing. Left for this long,
+// that is a wrong frame and not a slow turn, and it is corrected by what is
+// observed - the old way.
+constexpr float kFrameErrorRadians = 0.52f;
+constexpr float kIntentSteadyRadians = 0.30f;
+constexpr unsigned long long kFrameErrorMs = 1500;
+// Without a readable camera, the old way from the start: push forward
+// briefly and watch where he ends up pointing.
 constexpr unsigned long long kBootstrapMs = 450;
 
-// Meeting something in the way. A person does not stop dead at a bin and
-// abandon the errand; he steps round it and carries on, and tries the other
-// side if that does not work. Only after several of those is it really a wall.
-constexpr int   kMaxSidesteps    = 4;
+// Meeting something in the way that the whiskers did not see - a low thing
+// under the knee line, a fence with holes in it. He steps round it and
+// carries on, the other side next time. After a few of those it is a wall.
+constexpr int   kMaxSidesteps    = 3;
 constexpr float kSidestepMetres  = 2.8f;
 constexpr unsigned long long kSidestepMs = 1400;
 
-// The stick is eased rather than snapped. Full deflection appearing in one
-// frame is what makes a character look driven rather than walked, and the
-// game's own turning is smoothed anyway - fighting it just wastes distance.
+// The stick's direction is eased rather than snapped, so a turn is a turn
+// and not a jolt; its magnitude is not. A keyboard only has full deflection,
+// and a character who slows to a walk when he leans round a bin or nears a
+// corner does not move like anyone at a keyboard. He runs, always, and stops
+// when he is there.
 constexpr float kStickEase = 0.28f;
-// Slowing for the last stride reads as arriving somewhere rather than
-// colliding with it, and stops him sailing past a tight waypoint.
-constexpr float kEaseInFrom = 3.0f;
-constexpr float kSlowest    = 0.55f;
 
-using UpdatePadsFn = void(__cdecl*)();
-UpdatePadsFn g_original_update = nullptr;
-void*        g_hook_target = nullptr;
+// The whiskers: seven lines of sight fanned about the way he wants to go,
+// cast every tenth of a second at knee, waist and chest height, each ending
+// on the ground the game finds there. Centre first, then thirty-five degrees
+// either side, seventy, and a hundred - the last pair pointing a little
+// behind him, because a man with his nose against a fence has nothing clear
+// in front of him at all and still has a way along it.
+//
+// What blocks the low lines but not the one at head height is low enough to
+// jump: a boom gate, a rail, a low wall. That is not steered round; it is
+// run at and jumped.
+//
+// Beside each is how far off his line he leans when that whisker is the
+// nearest clear one on its side: a little more than the whisker's own angle,
+// so the thing is cleared rather than grazed.
+constexpr int   kWhiskers = 7;
+constexpr float kWhiskerAngle[kWhiskers]  = {0.0f, 0.61f, -0.61f, 1.22f, -1.22f, 1.75f, -1.75f};
+constexpr float kWhiskerLength[kWhiskers] = {4.0f, 3.0f, 3.0f, 2.4f, 2.4f, 2.4f, 2.4f};
+constexpr float kLeanFor[kWhiskers]       = {0.0f, 0.79f, -0.79f, 1.40f, -1.40f, 1.92f, -1.92f};
+constexpr float kKnee  = 0.5f;
+constexpr float kWaist = 0.95f;
+constexpr float kChest = 1.35f;
+constexpr float kHead  = 1.9f;
+// Steps he takes without thinking, and the ledges and drops he takes with a
+// jump - the drop only when the way is meant to go down there.
+constexpr float kMaxClimb     = 1.0f;
+constexpr float kMaxJumpClimb = 2.0f;
+constexpr float kMaxDrop      = 1.6f;
+constexpr float kMaxJumpDrop  = 4.5f;
+constexpr float kDescending   = 1.2f;
+constexpr unsigned long long kProbeMs = 100;
+// How near a low thing has to be before he jumps it.
+constexpr float kJumpAt = 2.2f;
+
+// Going round something. Once a side is chosen he keeps it - along a fence
+// the way to the target stays blocked for as long as the fence is, and a
+// character that changes his mind every probe walks a metre each way and
+// gets nowhere. The side is given up only in a dead end: nothing clear on
+// that side for most of a second. Two dead ends, or long enough following
+// without the line ever clearing, and it is a wall for the journey to plan
+// round.
+constexpr int kDeadEndProbes = 8;
+constexpr int kMaxSideChanges = 2;
+constexpr unsigned long long kFollowGiveUpMs = 9000;
+constexpr int kCentreClearProbes = 2;
+
+// Running and jumping.
+//
+// Sprint is held on the ground when the way is clear and there is far
+// enough to go. Sprint and jump are never down in the same frame, and the
+// jump has priority: the moment a jump is decided, sprint is let go, and
+// the jump is pressed two frames later with sprint still up - a server's
+// anti-bunny-hop looks for the two keys together, and a sync packet sees
+// one frame's keys. The character is still at sprinting speed those two
+// frames later, so the jump is the long one. Sprint stays up for the whole
+// of the flight and a moment after landing; then it is held again, and the
+// next jump follows.
+constexpr float kSprintMinRemaining = 10.0f;
+constexpr float kSprintMaxError     = 0.70f;   // radians off his line
+constexpr float kHopMinToNext       = 7.0f;
+constexpr unsigned long long kHopIntervalMs   = 950;
+constexpr int   kFramesSprintUpBeforeJump = 2;
+constexpr unsigned long long kJumpTakesMs     = 300;   // airborne whatever the ground says
+constexpr unsigned long long kSettleAfterLandMs = 150;
+// On the ground: feet within this of it, and not moving vertically.
+constexpr float kFeetOnGround = 0.35f;
+constexpr float kStillVertical = 0.045f;
+
 std::atomic<bool> g_installed{false};
 
 std::mutex        g_mutex;
@@ -73,23 +211,34 @@ std::size_t       g_leg = 0;
 bool              g_walking = false;
 std::string       g_note = "idle";
 unsigned long long g_started_ms = 0;
-unsigned long long g_progress_ms = 0;
-float             g_best_distance = 0;
 float             g_to_next = 0;
 float             g_remaining = 0;
 
-// The measured transform from stick to world, and the one thing measuring it
-// cannot settle on its own: whether the sideways axis runs the other way. A
-// mirrored axis makes every correction push him further out, so it shows up
-// as an error that will not come down, and that is what is watched for.
+// Progress: the window that says whether he has moved at all, and the longer
+// one that says whether he is getting anywhere.
+Vec3  g_window_pos;
+unsigned long long g_window_ms = 0;
+float g_best_distance = 0;
+unsigned long long g_closer_ms = 0;
+
+// The frame the stick is expressed in. With the camera readable it is
+// computed exactly and the correction stays at zero; measured only as a
+// check, and applied only when the check fails for a while. Without the
+// camera the old measured estimate takes over, hand and all.
+float g_correction = 0;
+bool  g_camera_frame = false;
+unsigned long long g_frame_error_since = 0;
+float g_steered_at_error = 0;
 float g_offset = 0;
 bool  g_offset_seen = false;
 float g_last_emit = 0;
-float g_hand = 1.0f;
+float g_last_steered = 0;
+float g_hand = kMirrored;
 unsigned long long g_bootstrap_until = 0;
 unsigned long long g_wrong_since = 0;
 bool  g_corrected = false;
 float g_error_deg = 0;
+bool  g_said_frame = false;
 
 // Stepping round something, and the eased stick.
 int   g_sidesteps = 0;
@@ -97,6 +246,35 @@ bool  g_sidestep_left = true;
 unsigned long long g_sidestep_until = 0;
 Vec3  g_sidestep_target;
 float g_stick_x = 0, g_stick_y = 0;
+
+// The whiskers, and the going-round they drive.
+unsigned long long g_probe_ms = 0;
+bool  g_whisker_clear[kWhiskers] = {true, true, true, true, true, true, true};
+bool  g_whisker_low[kWhiskers]   = {false, false, false, false, false, false, false};
+Vec3  g_whisker_end[kWhiskers];
+float g_lean = 0;             // radians added to the wanted heading
+int   g_follow_side = 0;      // +1 left, -1 right, 0 straight
+int   g_last_follow_side = 1;
+unsigned long long g_follow_since = 0;
+int   g_dead_end_probes = 0;
+int   g_side_changes = 0;
+int   g_centre_clear = 0;
+bool  g_wall = false;
+
+// The ground, as of the last probe, and running.
+bool  g_on_ground = true;
+bool  g_sprint_on = true;
+bool  g_hop_on    = true;
+bool  g_sprinting = false;
+bool  g_jump_this_frame = false;
+// Frames until a decided jump is pressed; negative when none is pending.
+// Sprint is up throughout.
+int   g_jump_countdown = -1;
+unsigned long long g_last_jump_ms = 0;
+unsigned long long g_hop_gap_ms = kHopIntervalMs;
+unsigned long long g_landed_ms = 0;
+bool  g_was_airborne = false;
+int   g_jumps = 0;
 
 float Normalise(float radians) {
   while (radians > 3.14159265f)  radians -= 6.28318531f;
@@ -110,14 +288,197 @@ float Distance2D(const Vec3& a, const Vec3& b) {
   return std::sqrt(dx * dx + dy * dy);
 }
 
-void ClearStick() {
+std::uintptr_t Pad() {
   const std::uintptr_t pad = game::At(kPads);
+  if (pad == 0 || !asi::mem::IsReadable(pad, 0x110)) return 0;
+  return pad;
+}
+
+void WriteShort(std::uintptr_t pad, std::uint32_t offset, short value) {
+  *reinterpret_cast<short*>(pad + offset) = value;
+}
+
+std::atomic<unsigned long> g_pad_thread{0};
+// The keys held in the table last frame, and the ones the player bound.
+unsigned g_held = 0;
+int  g_key_fwd = 'W', g_key_back = 'S', g_key_left = 'A', g_key_right = 'D';
+int  g_key_sprint = VK_SPACE, g_key_jump = VK_LSHIFT;
+bool g_keys_read = false;
+bool g_said_background = false;
+// Eight directions are what keys give. The one held changes only when the
+// wanted heading has moved well into the next sector - a hand does not
+// tap D twenty times a second to hold a heading of thirty degrees, it
+// holds W until the corner and then W and D.
+int g_direction = -1;
+constexpr float kSectorDegrees = 45.0f;
+constexpr float kSwitchBeyond  = 30.0f;   // from the held sector's centre
+// A jump key is down for a real press, not a frame.
+constexpr unsigned long long kJumpHoldMs = 90;
+unsigned long long g_jump_release_ms = 0;
+std::atomic<unsigned long long> g_key_events{0};
+std::atomic<bool> g_test_keys{false};
+
+// A binding as a virtual key: letters, digits and space come through as
+// their own codes; the game's codes for the modifiers and arrows are mapped.
+int VirtualKey(int code) {
+  if (code > 0 && code < 256) return code;
+  switch (code) {
+    case kRsUp:     return VK_UP;
+    case kRsDown:   return VK_DOWN;
+    case kRsLeft:   return VK_LEFT;
+    case kRsRight:  return VK_RIGHT;
+    case kRsEnter:  return VK_RETURN;
+    case kRsLShift: case kRsShift: return VK_LSHIFT;
+    case kRsRShift: return VK_RSHIFT;
+    case kRsLCtrl:  return VK_LCONTROL;
+    case kRsRCtrl:  return VK_RCONTROL;
+    case kRsLAlt:   return VK_LMENU;
+    case kRsRAlt:   return VK_RMENU;
+    case kRsTab:    return VK_TAB;
+    case kRsBackspace: return VK_BACK;
+    default:        return 0;
+  }
+}
+
+int BoundKey(int action, int fallback) {
+  const std::uintptr_t table = game::At(kControlsManager) + kActions;
+  // The alternative first: WASD sits there when arrows are the primary.
+  for (int type = 1; type >= 0; --type) {
+    std::uint32_t code = 0;
+    if (!asi::mem::Read<std::uint32_t>(table + action * kActionSize + type * kKeySize,
+                                       &code))
+      continue;
+    const int vk = VirtualKey(static_cast<int>(code));
+    if (vk != 0) return vk;
+  }
+  return fallback;
+}
+
+std::string KeyName(int vk) {
+  if (vk >= '0' && vk <= 'Z') return std::string(1, static_cast<char>(vk));
+  switch (vk) {
+    case VK_SPACE:    return "Space";
+    case VK_LSHIFT:   return "LShift";
+    case VK_RSHIFT:   return "RShift";
+    case VK_LCONTROL: return "LCtrl";
+    case VK_RCONTROL: return "RCtrl";
+    case VK_LMENU:    return "LAlt";
+    case VK_RMENU:    return "RAlt";
+    case VK_UP:       return "Up";
+    case VK_DOWN:     return "Down";
+    case VK_LEFT:     return "Left";
+    case VK_RIGHT:    return "Right";
+    case VK_RETURN:   return "Enter";
+    case VK_TAB:      return "Tab";
+    default: {
+      char text[16];
+      std::snprintf(text, sizeof(text), "vk%02X", vk);
+      return text;
+    }
+  }
+}
+
+void ReadBindings() {
+  if (g_keys_read) return;
+  g_keys_read = true;
+  g_key_fwd    = BoundKey(kGoForward, 'W');
+  g_key_back   = BoundKey(kGoBack, 'S');
+  g_key_left   = BoundKey(kGoLeft, 'A');
+  g_key_right  = BoundKey(kGoRight, 'D');
+  g_key_sprint = BoundKey(kSprint, VK_SPACE);
+  g_key_jump   = BoundKey(kJumping, VK_LSHIFT);
+  LOG_INFO("walker: keys {} {} {} {} (forward, back, left, right), sprint {}, jump {}",
+           KeyName(g_key_fwd), KeyName(g_key_back), KeyName(g_key_left),
+           KeyName(g_key_right), KeyName(g_key_sprint), KeyName(g_key_jump));
+}
+
+// One key down or up, through the system: the same road a finger takes.
+void SendKey(int vk, bool down) {
+  INPUT input{};
+  input.type = INPUT_KEYBOARD;
+  input.ki.wVk = static_cast<WORD>(vk);
+  input.ki.wScan = static_cast<WORD>(MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC));
+  input.ki.dwFlags = down ? 0 : KEYEVENTF_KEYUP;
+  if (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT ||
+      vk == VK_RCONTROL || vk == VK_RMENU)
+    input.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
+  SendInput(1, &input, sizeof(input));
+}
+
+// Whether keys may go out at all: the game window has to be the one in
+// front - the keys go to whatever is - and the panel's own menu must not
+// be up, since it eats key messages.
+bool KeysMayGo() {
+  HWND window = game::GameWindow();
+  if (window == nullptr || GetForegroundWindow() != window) return false;
+  if (asi::Overlay::MenuOpen()) return false;
+  return true;
+}
+
+// Which keys stand for this stick, this frame.
+unsigned DirectionKeys(short x, short y) {
+  if (x == 0 && y == 0) {
+    g_direction = -1;
+    return 0;
+  }
+  float degrees = std::atan2(static_cast<float>(-y), static_cast<float>(x)) *
+                  57.2957795f;
+  if (degrees < 0) degrees += 360.0f;
+  int k = g_direction;
+  if (k < 0) {
+    k = static_cast<int>((degrees + kSectorDegrees / 2) / kSectorDegrees) & 7;
+  } else {
+    float off = degrees - static_cast<float>(k) * kSectorDegrees;
+    while (off > 180.0f)  off -= 360.0f;
+    while (off < -180.0f) off += 360.0f;
+    if (off > kSwitchBeyond)       k = (k + 1) & 7;
+    else if (off < -kSwitchBeyond) k = (k + 7) & 7;
+  }
+  g_direction = k;
+  unsigned keys = 0;
+  if (k == 1 || k == 2 || k == 3) keys |= kFwd;
+  if (k == 5 || k == 6 || k == 7) keys |= kBack;
+  if (k == 0 || k == 1 || k == 7) keys |= kRight;
+  if (k == 3 || k == 4 || k == 5) keys |= kLeft;
+  return keys;
+}
+
+// Holds exactly these keys: the ones newly wanted go down, the ones no
+// longer wanted come up. Keys the walk never pressed are not touched, so
+// the player's own hand on W is left alone. Only the changes are sent -
+// a held key is held by the system until its up.
+void HoldKeys(unsigned want) {
+  const unsigned release = g_held & ~want;
+  const unsigned press   = want & ~g_held;
+  const int keys[6] = {g_key_fwd, g_key_back, g_key_left, g_key_right,
+                       g_key_sprint, g_key_jump};
+  const unsigned bits[6] = {kFwd, kBack, kLeft, kRight, kSprintKey, kJumpKey};
+  for (int i = 0; i < 6; ++i) {
+    if (release & bits[i]) { SendKey(keys[i], false); g_key_events.fetch_add(1); }
+    if (press & bits[i])   { SendKey(keys[i], true);  g_key_events.fetch_add(1); }
+  }
+  g_held = want;
+}
+// What was last written, for the line logged when the keyboard is taken.
+short g_last_x = 0, g_last_y = 0;
+bool  g_last_sprint = false;
+
+void ClearStick() {
+  if (GetCurrentThreadId() != g_pad_thread.load(std::memory_order_relaxed)) return;
+  const std::uintptr_t pad = Pad();
   if (pad == 0) return;
-  auto* x = reinterpret_cast<short*>(pad + kNewStateLeftStickX);
-  auto* y = reinterpret_cast<short*>(pad + kNewStateLeftStickY);
-  if (!asi::mem::IsReadable(pad, 4)) return;
-  *x = 0;
-  *y = 0;
+  const std::uintptr_t keys = pad + kKeyState;
+  WriteShort(keys, kNewStateLeftStickX, 0);
+  WriteShort(keys, kNewStateLeftStickY, 0);
+  WriteShort(keys, kNewStateButtonCross, 0);
+  WriteShort(keys, kNewStateButtonSquare, 0);
+  if (g_held != 0) HoldKeys(0);
+}
+
+float VerticalSpeed(std::uintptr_t ped) {
+  float vz = 0;
+  if (ped != 0) asi::mem::Read<float>(ped + kMoveSpeed + 8, &vz);
+  return vz;
 }
 
 void StopLocked(const char* why) {
@@ -128,12 +489,239 @@ void StopLocked(const char* why) {
   g_sidestep_until = 0;
   g_stick_x = 0;
   g_stick_y = 0;
+  g_lean = 0;
+  g_follow_side = 0;
+  g_wall = false;
+  g_sprinting = false;
+  g_jump_this_frame = false;
+  g_jump_countdown = -1;
+  for (int i = 0; i < kWhiskers; ++i) {
+    g_whisker_clear[i] = true;
+    g_whisker_low[i] = false;
+  }
   ClearStick();
+}
+
+// A jump is wanted: sprint comes up now, the press follows in a couple of
+// frames. Nothing to do when one is already on its way.
+void WantJump(unsigned long long now, const char* why) {
+  if (g_jump_countdown >= 0) return;
+  g_jump_countdown = kFramesSprintUpBeforeJump;
+  g_last_jump_ms = now;   // so nothing decides another one meanwhile
+  if (why != nullptr) LOG_INFO("walk: {}", why);
+}
+
+// The whisker at `index` is on the left of the line when its angle is
+// positive; index 0 is the line itself.
+int SideOf(int index) {
+  return index == 0 ? 0 : kWhiskerAngle[index] > 0 ? 1 : -1;
+}
+
+// The nearest clear whisker on a side, by index, or -1 when none is. A low
+// thing counts as clear: it is jumped, not gone round.
+int NearestClear(int side) {
+  for (int rank = 1; rank <= 3; ++rank) {
+    const int index = side > 0 ? rank * 2 - 1 : rank * 2;
+    if (g_whisker_clear[index]) return index;
+  }
+  return -1;
+}
+
+// Lines at the given heights between two points, on the ground's terms at
+// each end. Cars count.
+bool LinesClear(const Vec3& from, float from_feet, const Vec3& to, float to_feet,
+                const float* heights, int count) {
+  for (int i = 0; i < count; ++i)
+    if (!game::LineClear(Vec3{from.x, from.y, from_feet + heights[i]},
+                         Vec3{to.x, to.y, to_feet + heights[i]}, true))
+      return false;
+  return true;
+}
+
+// How far along a whisker the thing actually is, to within a quarter of
+// its length: the line is halved twice. Two calls more per whisker, and the
+// point goes into the obstacle rather than onto the ground in front of it.
+float DistanceAlongWhisker(const Vec3& here, float angle, float length, float height) {
+  if (!game::LineOfSightAvailable() || game::CallSlotsLeft() < 10) return length * 0.6f;
+  const float feet = here.z - 1.0f;
+  float low = 0, high = length;
+  for (int step = 0; step < 2; ++step) {
+    const float mid = (low + high) * 0.5f;
+    const Vec3 end{here.x + std::cos(angle) * mid, here.y + std::sin(angle) * mid, 0};
+    const bool clear = game::LineClear(Vec3{here.x, here.y, feet + height},
+                                       Vec3{end.x, end.y, feet + height}, true);
+    (clear ? low : high) = mid;
+  }
+  return high;
+}
+
+// Everything the whiskers found in the way, given to the planner as points
+// to route round - each put a little past where its whisker met the thing,
+// so it sits inside the fence and not on the pavement before it. Only what
+// was actually seen, and only walls: a low thing is jumped, not remembered.
+void RememberWhatIsAhead(const Vec3& here, float wanted, const char* what) {
+  int remembered = 0;
+  for (int i = 0; i < 5 && remembered < 3; ++i) {
+    if (g_whisker_clear[i]) continue;
+    const float angle = wanted + kWhiskerAngle[i];
+    const float along =
+        DistanceAlongWhisker(here, angle, kWhiskerLength[i], kChest) + 0.4f;
+    nav::RememberObstacle(Vec3{here.x + std::cos(angle) * along,
+                               here.y + std::sin(angle) * along, here.z},
+                          what);
+    ++remembered;
+  }
+}
+
+// A hillside is not a cliff. When the ground at a whisker's end is well
+// below his feet, the ground halfway along says which: on a slope it is
+// about halfway down, over an edge it is still up here or already at the
+// bottom. Slopes he walks and slides down; edges he does not step off.
+bool ContinuousSlope(const Vec3& here, const Vec3& end, float feet, float ground_end) {
+  const float drop = feet - ground_end;
+  if (drop > 9.0f) return false;   // steeper than a hillside, whatever it is
+  const Vec3 mid{(here.x + end.x) * 0.5f, (here.y + end.y) * 0.5f, here.z};
+  float ground_mid = 0;
+  if (!game::GroundBelow(Vec3{mid.x, mid.y, here.z + 1.5f}, &ground_mid)) return false;
+  const float part = feet - ground_mid;
+  return part > drop * 0.3f && part < drop * 0.7f;
+}
+
+// Casts the whiskers about `wanted` from where he stands. Each is clear when
+// there is ground at its end within a step of his own - or a ledge he can
+// jump up, or a drop he can jump down when the way is meant to go down -
+// and nothing between him and it at knee, waist or chest height. When the
+// low lines are blocked but the one at head height is not, the whisker is
+// "low": the way is open to someone who jumps.
+void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
+  // Past the game-call ceiling every whisker would read blocked. Keep what
+  // they saw last time rather than invent a wall.
+  if (game::CallSlotsLeft() < 80) return;
+  std::vector<Vec3> ends;
+  std::vector<bool> clear;
+  ends.reserve(kWhiskers);
+  clear.reserve(kWhiskers);
+  const bool can_look = game::LineOfSightAvailable();
+  const float feet = here.z - 1.0f;
+  const float max_drop = descending ? kMaxJumpDrop : kMaxDrop;
+  const float low_lines[3] = {kKnee, kWaist, kChest};
+  const float head_line[1] = {kHead};
+  for (int i = 0; i < kWhiskers; ++i) {
+    const float angle = wanted + kWhiskerAngle[i];
+    const Vec3 end{here.x + std::cos(angle) * kWhiskerLength[i],
+                   here.y + std::sin(angle) * kWhiskerLength[i], here.z};
+    bool ok = true;
+    bool low = false;
+    float ground = feet;
+    float water = 0;
+    if (!game::GroundBelow(Vec3{end.x, end.y, here.z + 1.5f}, &ground)) {
+      ok = false;   // a cliff, or the edge of the loaded world
+    } else if (game::WaterLevel(Vec3{end.x, end.y, ground}, &water) &&
+               water > ground + 0.5f) {
+      ok = false;   // water over what the ground call took for ground
+    } else if (ground - feet > kMaxJumpClimb ||
+               (feet - ground > max_drop && !ContinuousSlope(here, end, feet, ground))) {
+      ok = false;   // a wall he cannot get onto, or a drop he should not take
+    } else if (ground - feet > kMaxClimb) {
+      low = true;   // a ledge: up it with a jump
+    } else if (can_look &&
+               !LinesClear(here, feet, end, ground, low_lines, 3)) {
+      if (LinesClear(here, feet, end, ground, head_line, 1))
+        low = true;   // something to jump over
+      else
+        ok = false;   // a wall
+    }
+    g_whisker_clear[i] = ok;
+    g_whisker_low[i]   = ok && low;
+    g_whisker_end[i] = Vec3{end.x, end.y, ground + 1.0f};
+    ends.push_back(g_whisker_end[i]);
+    clear.push_back(ok);
+  }
+  nav::SetDebugWhiskers(here, std::move(ends), std::move(clear));
+}
+
+// Turns what the whiskers saw into a lean off the line - and, when the line
+// stays blocked, into going round: a side is chosen and kept.
+void DecideLean(unsigned long long now) {
+  if (g_whisker_clear[0]) {
+    // The line is open. Two probes of that in a row and the detour is over;
+    // one might be a gap between two posts.
+    if (++g_centre_clear >= kCentreClearProbes) {
+      if (g_follow_side != 0) g_last_follow_side = g_follow_side;
+      g_follow_side = 0;
+      g_lean = 0;
+    } else {
+      g_lean *= 0.5f;
+    }
+    g_wall = false;
+    return;
+  }
+  g_centre_clear = 0;
+
+  if (g_follow_side == 0) {
+    // Choose a side: the one with the nearest clear whisker; between equals,
+    // the one with more of them clear; between those, the side taken last
+    // time, which along one fence is the same side.
+    const int left = NearestClear(1), right = NearestClear(-1);
+    int side = 0;
+    if (left >= 0 && right >= 0) {
+      const int left_rank = (left + 1) / 2, right_rank = (right + 1) / 2;
+      if (left_rank != right_rank) {
+        side = left_rank < right_rank ? 1 : -1;
+      } else {
+        int left_count = 0, right_count = 0;
+        for (int i = 1; i < kWhiskers; ++i)
+          if (g_whisker_clear[i]) (SideOf(i) > 0 ? left_count : right_count)++;
+        side = left_count != right_count ? (left_count > right_count ? 1 : -1)
+                                         : g_last_follow_side;
+      }
+    } else if (left >= 0) {
+      side = 1;
+    } else if (right >= 0) {
+      side = -1;
+    }
+    if (side == 0) {
+      g_wall = true;   // nothing clear anywhere
+      return;
+    }
+    g_follow_side = side;
+    g_follow_since = now;
+    g_dead_end_probes = 0;
+    g_side_changes = 0;
+    LOG_INFO("walk: something across the way, going round it on the {}",
+             side > 0 ? "left" : "right");
+  }
+
+  if (now - g_follow_since > kFollowGiveUpMs) {
+    // Long enough. Whatever this is, it wants planning round, not feeling.
+    g_wall = true;
+    return;
+  }
+
+  int nearest = NearestClear(g_follow_side);
+  if (nearest < 0) {
+    if (++g_dead_end_probes < kDeadEndProbes) return;   // hold the last lean
+    if (++g_side_changes > kMaxSideChanges) {
+      g_wall = true;
+      return;
+    }
+    g_follow_side = -g_follow_side;
+    g_dead_end_probes = 0;
+    LOG_INFO("walk: dead end that way, going round on the {} instead",
+             g_follow_side > 0 ? "left" : "right");
+    nearest = NearestClear(g_follow_side);
+    if (nearest < 0) return;
+  }
+  g_dead_end_probes = 0;
+  g_lean = kLeanFor[nearest];
+  g_wall = false;
 }
 
 // Everything the walk decides, run from inside the pad hook. Returns the
 // stick to press, or false to press nothing.
 bool DecideStick(short* out_x, short* out_y) {
+  g_jump_this_frame = false;
+  g_sprinting = false;
   if (!g_walking) return false;
 
   const unsigned long long now = GetTickCount64();
@@ -164,8 +752,8 @@ bool DecideStick(short* out_x, short* out_y) {
     if (!done && !last && Distance2D(here, g_route[g_leg + 1]) < d) done = true;
     if (!done) break;
     ++g_leg;
-    g_progress_ms = now;
     g_best_distance = 0;
+    g_closer_ms = now;
   }
   if (g_leg >= g_route.size()) {
     StopLocked("arrived");
@@ -180,30 +768,72 @@ bool DecideStick(short* out_x, short* out_y) {
   for (std::size_t i = g_leg + 1; i < g_route.size(); ++i)
     g_remaining += Distance2D(g_route[i - 1], g_route[i]);
 
-  // Progress, or the want of it.
-  if (g_best_distance == 0 || distance < g_best_distance - kProgress) {
+  const float ahead = std::atan2(target.y - here.y, target.x - here.x);
+  // Whether this leg is meant to go down: only then is an edge a way.
+  const bool descending = target.z < here.z - kDescending;
+
+  // On the ground, or in the air? The ground under his feet, as of the last
+  // probe, and whether he is moving vertically now.
+  const float vz = VerticalSpeed(self.game_ped);
+  const bool airborne = !g_on_ground || std::fabs(vz) > kStillVertical ||
+                        now - g_last_jump_ms < kJumpTakesMs;
+  if (airborne) {
+    g_was_airborne = true;
+  } else if (g_was_airborne) {
+    g_was_airborne = false;
+    g_landed_ms = now;
+  }
+  const bool settled = !airborne && now - g_landed_ms >= kSettleAfterLandMs;
+
+  // Getting anywhere at all?
+  if (g_best_distance == 0 || distance < g_best_distance - kCloser) {
     g_best_distance = distance;
-    g_progress_ms = now;
-  } else if (now - g_progress_ms > kStuckMs && now > g_sidestep_until) {
-    if (g_sidesteps >= kMaxSidesteps) {
-      StopLocked("stuck - stepped around four times and still no way through");
-      LOG_WARN("walk: {} ({:.1f} m short of leg {} of {})", g_note, distance,
-               static_cast<int>(g_leg) + 1, static_cast<int>(g_route.size()));
-      return false;
+    g_closer_ms = now;
+  } else if (now - g_closer_ms > kNoCloserMs) {
+    RememberWhatIsAhead(here, ahead, "where he got no closer for ten seconds");
+    StopLocked("no closer for ten seconds - handing back to the journey");
+    LOG_WARN("walk: {} ({:.1f} m short of leg {} of {})", g_note, distance,
+             static_cast<int>(g_leg) + 1, static_cast<int>(g_route.size()));
+    return false;
+  }
+
+  // Moving at all?
+  if (now - g_window_ms >= kStuckMs) {
+    const float moved = Distance2D(here, g_window_pos);
+    g_window_ms  = now;
+    g_window_pos = here;
+    if (moved < kStuckMetres && !airborne && now > g_sidestep_until) {
+      RememberWhatIsAhead(here, ahead, "something he kept walking into");
+      if (g_whisker_low[0] && now - g_last_jump_ms > 700) {
+        // Standing against something low: over it.
+        WantJump(now, "not moving against something low - jumping it");
+      } else if (g_follow_side != 0 && g_side_changes < kMaxSideChanges) {
+        // Going round it and not moving: that side is a dead end.
+        g_follow_side = -g_follow_side;
+        g_follow_since = now;
+        ++g_side_changes;
+        g_dead_end_probes = 0;
+        LOG_INFO("walk: not moving, going round on the {} instead",
+                 g_follow_side > 0 ? "left" : "right");
+      } else if (g_sidesteps >= kMaxSidesteps) {
+        StopLocked("stuck - stepped round it three times and still no way through");
+        LOG_WARN("walk: {} ({:.1f} m short of leg {} of {})", g_note, distance,
+                 static_cast<int>(g_leg) + 1, static_cast<int>(g_route.size()));
+        return false;
+      } else {
+        // Out to one side of the way ahead, then carry on. Sides alternate,
+        // so a corner that defeats one direction gets the other tried next.
+        ++g_sidesteps;
+        g_sidestep_left = !g_sidestep_left;
+        const float side = ahead + (g_sidestep_left ? 1.5708f : -1.5708f);
+        g_sidestep_target = Vec3{here.x + std::cos(side) * kSidestepMetres,
+                                 here.y + std::sin(side) * kSidestepMetres,
+                                 here.z};
+        g_sidestep_until = now + kSidestepMs;
+        LOG_INFO("walk: not moving, stepping {} (attempt {})",
+                 g_sidestep_left ? "left" : "right", g_sidesteps);
+      }
     }
-    // Out to one side of the way ahead, then carry on. Sides alternate, so a
-    // corner that defeats one direction gets the other tried next.
-    ++g_sidesteps;
-    g_sidestep_left = !g_sidestep_left;
-    const float ahead = std::atan2(target.y - here.y, target.x - here.x);
-    const float side  = ahead + (g_sidestep_left ? 1.5708f : -1.5708f);
-    g_sidestep_target = Vec3{here.x + std::cos(side) * kSidestepMetres,
-                             here.y + std::sin(side) * kSidestepMetres, here.z};
-    g_sidestep_until = now + kSidestepMs;
-    g_progress_ms = now;
-    g_best_distance = 0;
-    LOG_INFO("walk: something in the way, stepping {} round it (attempt {})",
-             g_sidestep_left ? "left" : "right", g_sidesteps);
   }
 
   // Where he is going, and where he is going to be sent.
@@ -211,37 +841,100 @@ bool DecideStick(short* out_x, short* out_y) {
   const Vec3& aim = stepping ? g_sidestep_target : target;
   const float wanted = std::atan2(aim.y - here.y, aim.x - here.x);
 
-  // The stick is camera-relative, and the camera is the player's business -
-  // he turns it when he likes and it is wanted for aiming later. So the
-  // transform is not read out of the camera; it is measured off the
-  // character. He turns to face wherever the stick sends him, and his facing
-  // is already being read, so the offset between the two is observable and
-  // self-correcting - it follows the camera around without ever asking it,
-  // and a player spinning the view mid-walk is just another correction.
-  //
-  // The first fraction of a second of a walk is spent pushing straight
-  // forward and watching where he ends up pointing, which is the offset
-  // outright.
-  const bool bootstrapping = now < g_bootstrap_until;
-  const float emit = bootstrapping ? 0.0f : Normalise(wanted - g_offset);
+  // Look where he is going, and lean away from what is there.
+  bool jump_low_now = false;
+  if (now - g_probe_ms >= kProbeMs && game::CallsTrusted()) {
+    g_probe_ms = now;
+    // The ground under his own feet, for whether he is standing on it.
+    float ground = 0;
+    if (game::GroundBelow(Vec3{here.x, here.y, here.z + 0.5f}, &ground))
+      g_on_ground = (here.z - 1.0f) - ground < kFeetOnGround;
+    else
+      g_on_ground = false;
 
-  // What the last press implied, folded in slowly. Slowly because he takes a
-  // few frames to come round, and a fast estimate would chase its own tail.
-  if (g_offset_seen) {
-    const float implied = Normalise(self.heading - g_last_emit);
-    const float step = Normalise(implied - g_offset);
-    g_offset = Normalise(g_offset + step * (bootstrapping ? 0.35f : 0.08f));
+    ProbeWhiskers(here, wanted, descending);
+    DecideLean(now);
+    if (g_wall) {
+      RememberWhatIsAhead(here, wanted, "a wall the plan did not know about");
+      StopLocked("blocked - no way round from here, handing back to the journey");
+      LOG_WARN("walk: {} ({:.1f} m short of leg {} of {})", g_note, distance,
+               static_cast<int>(g_leg) + 1, static_cast<int>(g_route.size()));
+      return false;
+    }
+    // Something low straight ahead: jump it when it is close.
+    if (g_whisker_low[0] && g_follow_side == 0 && !airborne &&
+        now - g_last_jump_ms > 700) {
+      const float at = DistanceAlongWhisker(here, wanted, kWhiskerLength[0], kWaist);
+      if (at <= kJumpAt) jump_low_now = true;
+    }
   }
-  g_last_emit  = emit;
-  g_offset_seen = true;
+  const float steered = Normalise(wanted + g_lean);
+
+  // The stick is camera-relative: the game itself subtracts the camera's
+  // orientation from the stick angle before it moves him. The camera stays
+  // the player's - it is read here, never turned - and the frame follows
+  // from its own number, so a spun view is simply a different number next
+  // frame and never a wrong direction.
+  float orientation = 0;
+  const bool camera = game::CameraOrientation(&orientation);
+  if (camera != g_camera_frame || !g_said_frame) {
+    g_said_frame = true;
+    g_camera_frame = camera;
+    LOG_INFO("walk: steering {}", camera
+        ? "from the camera's own orientation, the way the game does"
+        : "by measurement - the camera's orientation is not readable");
+    if (!camera) g_bootstrap_until = now + kBootstrapMs;
+  }
+
+  float offset = 0;
+  float hand = kMirrored;
+  bool bootstrapping = false;
+  if (camera) {
+    offset = Normalise(kHalfPi - orientation + g_correction);
+    // The check on the derivation: facing steadily off a line that is not
+    // moving. A turn is over in well under the time allowed; a wrong frame
+    // never is.
+    const float error = Normalise(self.heading - g_last_steered);
+    if (g_offset_seen && settled && std::fabs(error) > kFrameErrorRadians) {
+      if (g_frame_error_since == 0 ||
+          std::fabs(Normalise(steered - g_steered_at_error)) > kIntentSteadyRadians) {
+        g_frame_error_since = now;
+        g_steered_at_error  = steered;
+      } else if (now - g_frame_error_since > kFrameErrorMs) {
+        g_correction = Normalise(g_correction + error);
+        g_corrected  = true;
+        g_frame_error_since = 0;
+        LOG_WARN("walk: facing {:.0f} degrees off a steady line for a second "
+                 "and a half - the camera frame is off, correcting by that",
+                 error * 57.2957795f);
+      }
+    } else {
+      g_frame_error_since = 0;
+    }
+  } else {
+    // The old way: measured off the character, who turns to face wherever
+    // the stick sends him.
+    bootstrapping = now < g_bootstrap_until;
+    if (g_offset_seen && settled) {
+      const float implied = Normalise(self.heading - g_last_emit);
+      const float step = Normalise(implied - g_offset);
+      g_offset = Normalise(g_offset + step * (bootstrapping ? 0.35f : 0.08f));
+    }
+    offset = g_offset;
+    hand = g_hand;
+  }
+  const float emit = bootstrapping ? 0.0f : Normalise(steered - offset);
+  g_last_emit    = emit;
+  g_last_steered = steered;
+  g_offset_seen  = true;
 
   // How far his facing is from where he is meant to be going. Kept for the
-  // panel, and used to notice the one thing measurement cannot fix by
-  // itself: a sideways axis that is the other way round makes every
-  // correction push him further out, so the error never comes down.
-  const float heading_error = Normalise(wanted - self.heading);
+  // panel. Without the camera it also catches the one thing measurement
+  // cannot fix by itself: a mirrored sideways axis makes every correction
+  // push him further out, so the error never comes down.
+  const float heading_error = Normalise(steered - self.heading);
   g_error_deg = heading_error * 57.2957795f;
-  if (!bootstrapping && std::fabs(heading_error) > 1.7453f) {
+  if (!camera && !bootstrapping && settled && std::fabs(heading_error) > 1.7453f) {
     if (g_wrong_since == 0) g_wrong_since = now;
     else if (now - g_wrong_since > 2000) {
       g_hand = -g_hand;
@@ -257,80 +950,193 @@ bool DecideStick(short* out_x, short* out_y) {
     g_wrong_since = 0;
   }
 
-  // Ease off over the last few metres of the last leg.
-  float pace = 1.0f;
-  const bool final_leg = g_leg + 1 == g_route.size();
-  if (final_leg && !stepping && distance < kEaseInFrom)
-    pace = kSlowest + (1.0f - kSlowest) * (distance / kEaseInFrom);
+  // Full deflection, always - the way a keyboard does it.
+  const float pace = 1.0f;
 
-  const float want_x = std::sin(emit) * g_hand * kFullStick * pace;
+  // Run, when there is a clear way and somewhere to go - on the ground, and
+  // never with a jump pending or under way. Jump while running when he is
+  // on the ground and not about to turn; and jump the low thing ahead
+  // whether running or not. The jump has priority: deciding one takes
+  // sprint up at once, and the press follows with sprint still up.
+  const bool way_clear = g_whisker_clear[0] && !g_whisker_low[0];
+  const bool could_sprint =
+      g_sprint_on && !bootstrapping && !stepping && !airborne &&
+      g_follow_side == 0 && way_clear && !descending &&
+      g_remaining > kSprintMinRemaining &&
+      std::fabs(heading_error) < kSprintMaxError;
+  if (jump_low_now) {
+    WantJump(now, "something low ahead - jumping it");
+  } else if (could_sprint && g_hop_on && settled && distance > kHopMinToNext &&
+             now - g_last_jump_ms >= g_hop_gap_ms) {
+    WantJump(now, nullptr);
+    // The next after a gap of its own, and now and then a longer one. A hop
+    // every 950 ms to the frame is a metronome, not a runner.
+    g_hop_gap_ms = kHopIntervalMs + static_cast<unsigned long long>(std::rand() % 700);
+    if (std::rand() % 5 == 0) g_hop_gap_ms += 1500;
+  }
+  if (g_jump_countdown >= 0) {
+    g_sprinting = false;
+    if (g_jump_countdown == 0) {
+      g_jump_this_frame = true;
+      g_last_jump_ms = now;
+      ++g_jumps;
+    }
+    --g_jump_countdown;
+  } else {
+    g_sprinting = could_sprint;
+  }
+
+  const float want_x = std::sin(emit) * hand * kFullStick * pace;
   const float want_y = -std::cos(emit) * kFullStick * pace;
   g_stick_x += (want_x - g_stick_x) * kStickEase;
   g_stick_y += (want_y - g_stick_y) * kStickEase;
-  *out_x = static_cast<short>(g_stick_x);
-  *out_y = static_cast<short>(g_stick_y);
+  // The direction eases; the deflection stays full, as a keyboard's does.
+  const float magnitude = std::sqrt(g_stick_x * g_stick_x + g_stick_y * g_stick_y);
+  const float scale = magnitude > 1.0f ? kFullStick / magnitude : 0.0f;
+  *out_x = static_cast<short>(g_stick_x * scale);
+  *out_y = static_cast<short>(g_stick_y * scale);
   return true;
 }
 
-void __cdecl HookedUpdatePads() {
-  g_original_update();
+void PadFrameInner() {
+  if (!g_installed.load(std::memory_order_acquire)) return;
+  g_pad_thread.store(GetCurrentThreadId(), std::memory_order_relaxed);
 
-  // The pad has just been filled from the real keyboard. Ours goes on top,
-  // and only while a walk is running - the rest of the time the player's own
-  // input passes through untouched.
+  // End of the frame. What is written now sits in the keyboard's temp state
+  // until the next CPad::UpdatePads reconciles it into the pad and clears
+  // it: one frame's press, the way a held key arrives. Only while a walk is
+  // running - the rest of the time the pad is the player's alone.
+  // Not while a dialog is up, the server has frozen him, he is not spawned,
+  // the game's menu is open or SA-MP has taken the keyboard away: the route
+  // waits, the pad stays the game's, and the walk's own clocks wait too, so
+  // that standing still is not read as being stuck.
+  const char* why = "";
+  const bool off = samp::InputLegitimatelyOff(&why);
+  if (g_test_keys.load(std::memory_order_relaxed)) {
+    // The experiment: keys and nothing else. No walk is decided, no probe
+    // is made, no call into the game.
+    if (off || !KeysMayGo()) {
+      if (g_held != 0) HoldKeys(0);
+      return;
+    }
+    ReadBindings();
+    HoldKeys(kFwd | kSprintKey);
+    return;
+  }
   short x = 0, y = 0;
   bool press = false;
+  bool sprint = false, jump = false;
+  int  countdown = -1;
+  unsigned long long since_jump = 0;
+  bool on_ground = true;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
-    press = DecideStick(&x, &y);
+    if (off) {
+      const unsigned long long now = GetTickCount64();
+      g_window_ms = now;
+      g_closer_ms = now;
+      g_jump_this_frame = false;
+      g_sprinting = false;
+    } else {
+      press = DecideStick(&x, &y);
+    }
+    sprint     = g_sprinting;
+    jump       = g_jump_this_frame;
+    countdown  = g_jump_countdown;
+    since_jump = GetTickCount64() - g_last_jump_ms;
+    on_ground  = g_on_ground;
   }
-  if (!press) return;
-
-  const std::uintptr_t pad = game::At(kPads);
-  if (pad == 0 || !asi::mem::IsReadable(pad, 4)) return;
-  *reinterpret_cast<short*>(pad + kNewStateLeftStickX) = x;
-  *reinterpret_cast<short*>(pad + kNewStateLeftStickY) = y;
+  {
+    static bool was_off = false;
+    if (off != was_off) {
+      was_off = off;
+      if (off)
+        LOG_INFO("walk: holding still - {} (a moment ago: stick {},{}, sprint {}, "
+                 "jump countdown {}, last jump {} ms ago, on ground {})",
+                 why, g_last_x, g_last_y, g_last_sprint, countdown, since_jump,
+                 on_ground);
+      else
+        LOG_INFO("walk: moving again");
+    }
+  }
+  const bool may = KeysMayGo();
+  if (off || !press || !may) {
+    if (g_held != 0) HoldKeys(0);
+    if (press && !off && !may && !g_said_background) {
+      g_said_background = true;
+      LOG_INFO("walk: waiting - the game window is not in front, or the panel's "
+               "menu is open; keys go only to the game");
+    }
+    return;
+  }
+  g_said_background = false;
+  ReadBindings();
+  // The direction as keys, and sprint and jump as keys, through the
+  // system. Never sprint and jump together: sprint came up two frames
+  // before the jump was decided on, and it is let go on the jump frame.
+  // The jump key is down for one frame - the game jumps on the press.
+  unsigned want = DirectionKeys(x, y);
+  const unsigned long long now_ms = GetTickCount64();
+  if (jump) g_jump_release_ms = now_ms + kJumpHoldMs;
+  const bool jumping = now_ms < g_jump_release_ms;
+  if (sprint && !jumping) want |= kSprintKey;
+  if (jumping) want |= kJumpKey;
+  HoldKeys(want);
+  g_last_x = x;
+  g_last_y = y;
+  g_last_sprint = sprint;
 }
 
 }  // namespace
 
+void PadFrame() { PadFrameInner(); }
+
+void HoldTestKeys(bool hold) {
+  g_test_keys.store(hold, std::memory_order_relaxed);
+  if (!hold && GetCurrentThreadId() == g_pad_thread.load(std::memory_order_relaxed) &&
+      g_held != 0)
+    HoldKeys(0);
+}
+
+unsigned long long KeyEventsSent() {
+  return g_key_events.load(std::memory_order_relaxed);
+}
+
+bool CutTo(std::size_t leg) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  if (!g_walking || leg >= g_route.size() || leg <= g_leg) return false;
+  g_leg = leg;
+  g_best_distance = 0;
+  g_closer_ms = GetTickCount64();
+  g_sidestep_until = 0;
+  g_follow_side = 0;
+  return true;
+}
+
 bool Install() {
   if (g_installed.load()) return true;
-  // The only place this module writes into gta_sa.exe's own code, and that
-  // executable is protected - instructions relocated into stubs, obfuscation
-  // around them. Worth being able to switch off without a rebuild.
   if (!asi::WindowMode::WalkerAllowed()) {
     static bool said = false;
     if (!said) {
       said = true;
-      LOG_INFO("walker: bot.cfg says walker=off - the game's code is left "
-               "alone and the character cannot be walked");
+      LOG_INFO("walker: bot.cfg says walker=off - the character cannot be walked");
     }
     return false;
   }
-  auto* target = reinterpret_cast<void*>(game::At(kUpdatePads));
-  if (target == nullptr) {
-    LOG_WARN("walker: not the build CPad::UpdatePads is known for - the "
-             "character cannot be walked");
+  if (Pad() == 0) {
+    LOG_WARN("walker: not the build CPad is known for - the character cannot "
+             "be walked");
     return false;
   }
-  if (MH_CreateHook(target, &HookedUpdatePads,
-                    reinterpret_cast<void**>(&g_original_update)) != MH_OK ||
-      MH_EnableHook(target) != MH_OK) {
-    LOG_ERROR("walker: could not hook CPad::UpdatePads");
-    return false;
-  }
-  g_hook_target = target;
-  g_installed.store(true);
-  LOG_INFO("walker installed on CPad::UpdatePads at gta_sa.exe+0x{:X}",
-           kUpdatePads - 0x400000);
+  g_installed.store(true, std::memory_order_release);
+  LOG_INFO("walker ready: the walk is the player's own keys pressed through "
+           "the system, from the frame hook");
   return true;
 }
 
 void Uninstall() {
   if (!g_installed.load()) return;
   Stop("stopped - shutting down");
-  if (g_hook_target) MH_RemoveHook(g_hook_target);
   g_installed.store(false);
 }
 
@@ -340,22 +1146,49 @@ void WalkTo(std::vector<Vec3> route) {
     StopLocked("nothing to walk to");
     return;
   }
+  const unsigned long long now = GetTickCount64();
   g_route = std::move(route);
   g_leg = 0;
   g_walking = true;
   g_note = "walking";
-  g_started_ms = GetTickCount64();
-  g_progress_ms = g_started_ms;
+  g_started_ms = now;
+  g_window_ms = now;
   g_best_distance = 0;
+  g_closer_ms = now;
   g_offset_seen = false;
-  g_bootstrap_until = GetTickCount64() + kBootstrapMs;
+  // Only the measured fallback needs a moment of pushing forward to learn
+  // its frame; with the camera readable the first frame is already right.
+  g_bootstrap_until = g_camera_frame ? 0 : now + kBootstrapMs;
   g_wrong_since = 0;
-  g_corrected = false;
+  g_frame_error_since = 0;
   g_error_deg = 0;
   g_sidesteps = 0;
   g_sidestep_until = 0;
   g_stick_x = 0;
   g_stick_y = 0;
+  g_probe_ms = 0;
+  g_lean = 0;
+  g_follow_side = 0;
+  g_dead_end_probes = 0;
+  g_side_changes = 0;
+  g_centre_clear = 0;
+  g_wall = false;
+  g_jumps = 0;
+  g_jump_countdown = -1;
+  g_on_ground = true;
+  for (int i = 0; i < kWhiskers; ++i) {
+    g_whisker_clear[i] = true;
+    g_whisker_low[i] = false;
+  }
+  const samp::LocalPed self = samp::ReadLocalPed();
+  if (self.valid) g_window_pos = Vec3{self.x, self.y, self.z};
+  // What is left, from the start. The journey reads it before the first
+  // step is decided, and a zero there reads as "nearly there" - which, with
+  // the walker held still, was a plan every four seconds until it gave up.
+  g_to_next = self.valid ? Distance2D(g_window_pos, g_route.front()) : 0;
+  g_remaining = g_to_next;
+  for (std::size_t i = 1; i < g_route.size(); ++i)
+    g_remaining += Distance2D(g_route[i - 1], g_route[i]);
   LOG_INFO("walk: {} legs, first at ({:.1f}, {:.1f})", g_route.size(),
            g_route.front().x, g_route.front().y);
 }
@@ -364,6 +1197,26 @@ void Stop(const char* why) {
   std::lock_guard<std::mutex> lock(g_mutex);
   if (g_walking) LOG_INFO("walk: {}", why);
   StopLocked(why);
+}
+
+void SetSprint(bool on) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_sprint_on = on;
+}
+
+void SetBunnyHop(bool on) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_hop_on = on;
+}
+
+bool Sprint() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  return g_sprint_on;
+}
+
+bool BunnyHop() {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  return g_hop_on;
 }
 
 Status Get() {
@@ -378,6 +1231,10 @@ Status Get() {
   status.corrected   = g_corrected;
   status.error_deg   = g_error_deg;
   status.sidesteps   = g_sidesteps;
+  status.steer_deg   = g_lean * 57.2957795f;
+  status.wall        = g_follow_side != 0;
+  status.sprinting   = g_sprinting;
+  status.jumps       = g_jumps;
   return status;
 }
 

@@ -42,6 +42,11 @@ class CursorHook {
   static bool RealCursorPos(POINT* out);
 
   static bool installed();
+
+  // Where the pointer was last put by anybody's SetCursorPos, and when. A
+  // WM_MOUSEMOVE that lands exactly there was made by that call, not by
+  // the hand.
+  static bool LastSetTarget(POINT* out, unsigned long long* when_ms);
   // How many times the game has been told "yes" without the pointer moving.
   // Zero while the panel is interactive means the pointer is being held still
   // by something else, and the log says what.

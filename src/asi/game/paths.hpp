@@ -22,6 +22,7 @@
 //
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "game/world_query.hpp"
@@ -78,5 +79,40 @@ int ReadLinks(const PathNode& node, PathLink* out, int max);
 // Ped nodes within `radius` of a point, nearest first. Game thread only.
 std::vector<PathNode> PedNodesNear(const Vec3& at, float radius,
                                    std::size_t max);
+
+// The loaded graph copied out in one go, so a search over it costs memory
+// reads rather than a validated read per node.
+//
+// A route search touches thousands of nodes and every link of each; done a
+// node at a time against the game's memory that is tens of thousands of
+// VirtualQuery calls, and a plan across a district spent fifty milliseconds
+// in it before a single call into the game was made. Copying the areas
+// first is a few hundred kilobytes and a handful of reads.
+struct Graph {
+  struct Area {
+    bool                  loaded = false;
+    std::uint32_t         total = 0, vehicle = 0;   // nodes; ped ones follow
+    std::vector<PathNode> nodes;                    // all of them, by index
+    std::vector<PathLink> links;                    // the area's link table
+  };
+  bool  valid = false;
+  Area  areas[kPathAreas];
+  // Every node by the 24-metre square it stands in, so "what is near this
+  // point" is a look at nine squares rather than at every node loaded.
+  std::unordered_map<std::uint32_t, std::vector<PathLink>> squares;
+
+  const PathNode* Node(std::uint16_t area, std::uint16_t index) const;
+  // The ped nodes this one links to that are in loaded areas.
+  int Links(const PathNode& node, PathLink* out, int max) const;
+  // Ped nodes within `radius` of a point, nearest first.
+  std::vector<PathNode> PedNodesNear(const Vec3& at, float radius,
+                                     std::size_t max) const;
+  // Ped nodes within `radius` of a point, nearest first, by reference and
+  // fast: the squares, not a sweep. Radius up to 24 m.
+  std::vector<PathLink> PedNodesAround(const Vec3& at, float radius,
+                                       std::size_t max) const;
+};
+// Game thread only. Empty (valid=false) until the layout has resolved.
+Graph SnapshotGraph();
 
 }  // namespace gtabot::game

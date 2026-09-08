@@ -36,17 +36,27 @@ Copy `bot.asi` into the game folder (`D:\SAMP`). The ASI loader already there
 
 ## Use
 
-Start the game. **F11** cycles the in-game panel through hidden, passive and
-interactive. Interactive gives it the mouse so it can be dragged and resized;
-where it ends up is remembered in `bot.imgui.ini` next to the .asi. (F8 is
-GTA's screenshot key and F9 was taken, hence F11.)
+Start the game. A small badge sits at the right of the screen with the bot's
+state; **F11** opens the menu. The menu is driven from the keyboard - arrows
+or W/S to choose, Enter to pick, left/right to switch a setting on or off,
+Esc or F11 to close - and never takes the mouse, so the camera and the cursor
+stay the game's. While it is open its keys do not reach the game or SA-MP.
 
-While dragging, the camera still turns: GTA reads the mouse through
-DirectInput rather than window messages, so swallowing those messages does not
-reach it. The easy way round it is to position the panel with the game paused
-on the ESC menu - the overlay keeps drawing there and mouse look is off., which shows the frame counter,
-hook integrity, the SA-MP build, the MCP endpoint and the tail of the log -
-everything that used to require alt-tabbing to a terminal.
+What the menu offers: go to the marker you put on the map (Esc, Map, click -
+the usual waypoint), stop, allow or forbid the bot to move the character,
+sprint, bunny hop, the route drawn on the ground, the badge, and the
+developer's panel.
+
+The developer's panel is the last item. It opens interactive, with the mouse
+(drag and resize it; where it ends up is remembered in `bot.imgui.ini` next
+to the .asi); F11 makes it passive, and F11 again closes it back to the
+badge. While dragging, the camera still turns: GTA reads the mouse through
+DirectInput rather than window messages, so swallowing those messages does
+not reach it. Position the panel with the game paused on the ESC menu if that
+bothers you. (F8 is GTA's screenshot key and F9 was taken, hence F11.)
+
+Hotkeys outside the menu: **Ctrl+F11** arms or disarms the bot's movement,
+**Ctrl+F12** stops everything, disarms and closes the panel.
 
 To drive it from outside:
 
