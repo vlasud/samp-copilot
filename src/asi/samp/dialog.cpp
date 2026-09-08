@@ -7,6 +7,7 @@
 
 #include "log.hpp"
 #include "samp/version.hpp"
+#include "types.hpp"
 #include "state/memory.hpp"
 
 namespace gtabot::samp {
@@ -72,10 +73,13 @@ Dialog CurrentDialog() {
   out.shown = shown != 0;
   asi::mem::Read<int>(object + kStyle, &out.style);
   asi::mem::Read<int>(object + kId, &out.id);
-  out.caption = ReadString(object + kCaption, kCaptionBytes);
+  // The client's strings are the game's own encoding, and everything this
+  // module hands out is UTF-8 - a caption in Cyrillic passed through raw is
+  // not valid JSON and takes the whole reply down with it.
+  out.caption = ToUtf8(ReadString(object + kCaption, kCaptionBytes));
   std::uint32_t text = 0;
   if (asi::mem::Read<std::uint32_t>(object + kText, &text) && text != 0)
-    out.text = ReadString(text, kMaxText);
+    out.text = ToUtf8(ReadString(text, kMaxText));
   return out;
 }
 

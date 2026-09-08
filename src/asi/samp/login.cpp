@@ -21,7 +21,11 @@
 namespace gtabot::samp {
 namespace {
 
+// SA-MP has a style that masks what is typed (3) and a plain one (1).
+// Servers use either for a login - this one asks in plain text - so both
+// are answered, and only ever before the character has first spawned.
 constexpr int kPasswordStyle = 3;
+constexpr int kInputStyle = 1;
 // One character a frame. Fast enough to be over in a fifth of a second, slow
 // enough that nothing drops it.
 constexpr int kFramesBetween = 1;
@@ -165,9 +169,9 @@ bool Answerable(const Dialog& dialog, std::string* why) {
     *why = "no dialog is on screen";
     return false;
   }
-  if (dialog.style != kPasswordStyle) {
+  if (dialog.style != kPasswordStyle && dialog.style != kInputStyle) {
     *why = std::string("the dialog on screen is a ") +
-           DialogStyleName(dialog.style) + ", not a password input";
+           DialogStyleName(dialog.style) + ", not something to type a password into";
     return false;
   }
   if (!g_caption_filter.empty() &&
@@ -229,11 +233,32 @@ void WatchLogin() {
 
   std::string why;
   const Dialog dialog = CurrentDialog();
-  if (!Answerable(dialog, &why)) return;
-  if (!WindowInFront()) return;
 
-  LOG_INFO("login: the server is asking for a password (\"{}\") - answering from "
-           "bot.login", dialog.caption);
+  // Every dialog the server puts up before the character exists is worth a
+  // line: when the password is not typed, this is what says why.
+  static std::string said_about;
+  if (dialog.shown) {
+    const std::string about = std::to_string(dialog.id) + "/" +
+                              std::to_string(dialog.style) + "/" + dialog.caption;
+    if (about != said_about) {
+      said_about = about;
+      LOG_INFO("login: before the spawn the server is showing a {} dialog, id {}, "
+               "\"{}\"", DialogStyleName(dialog.style), dialog.id, dialog.caption);
+    }
+  }
+
+  if (!Answerable(dialog, &why)) return;
+  if (!WindowInFront()) {
+    static bool complained = false;
+    if (!complained) {
+      complained = true;
+      LOG_WARN("login: the server is asking, but the game's window is not the one "
+               "in front - keys would go to whatever is, so nothing is typed");
+    }
+    return;
+  }
+
+  LOG_INFO("login: answering \"{}\" from bot.login", dialog.caption);
   StartTyping();
 }
 

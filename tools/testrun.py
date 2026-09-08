@@ -33,6 +33,13 @@ GAME_DIR = os.environ.get("GTABOT_GAME_DIR", r"D:\SAMP")
 LAUNCHER = os.path.join(GAME_DIR, "Advance.exe")
 LOG = os.path.join(GAME_DIR, "bot.asi.log")
 
+# The launcher takes the server and the name on its command line, which is
+# how it starts the game when somebody presses Play. Given them, it needs no
+# window and no press.
+HOST = os.environ.get("GTABOT_HOST", "185.169.134.239")
+PORT = os.environ.get("GTABOT_PORT", "7777")
+NICK = os.environ.get("GTABOT_NICK", "Lo_Vlasuddd")
+
 
 def say(text):
     print(text, flush=True)
@@ -67,8 +74,12 @@ def cmd_launch(args):
         if not os.path.exists(LAUNCHER):
             say("no launcher at %s" % LAUNCHER)
             return 1
-        subprocess.Popen([LAUNCHER], cwd=GAME_DIR)
-        say("started %s" % LAUNCHER)
+        # -g gamepath, -h host, -p port, -n name; -P is the server's own
+        # password, which this one does not have.
+        command = [LAUNCHER, "-g", GAME_DIR, "-h", args.host,
+                   "-p", str(args.port), "-n", args.nick]
+        subprocess.Popen(command, cwd=GAME_DIR)
+        say("started: %s" % " ".join(command))
     say("waiting for the mod to answer (up to %d s)" % args.timeout)
     try:
         client = connect(args.timeout)
@@ -196,6 +207,9 @@ def main():
 
     p = sub.add_parser("launch", help="start the game and wait for the mod")
     p.add_argument("--timeout", type=int, default=180)
+    p.add_argument("--host", default=HOST)
+    p.add_argument("--port", default=PORT)
+    p.add_argument("--nick", default=NICK)
     p.set_defaults(run=cmd_launch)
 
     p = sub.add_parser("wait", help="wait until the character can be driven")
