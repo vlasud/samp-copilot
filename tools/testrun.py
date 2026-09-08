@@ -68,7 +68,27 @@ def game_running():
 
 # ---- the steps ----
 
+def unstick():
+    """Lets go of anything the system still thinks is held.
+
+    A key pressed through SendInput stays down for the whole session. Kill
+    the game between the down and the up and Windows goes on believing a
+    hand is on it - and a stuck Alt makes the next game never render.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unstick.ps1")
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
+            capture_output=True, text=True, timeout=30)
+        note = (out.stdout or "").strip()
+        if note and note != "nothing was held":
+            say("  %s" % note)
+    except Exception as e:
+        say("  could not check for stuck keys: %s" % e)
+
+
 def cmd_launch(args):
+    unstick()
     if game_running():
         say("the game is already running")
     else:
@@ -178,15 +198,21 @@ def cmd_stop(args):
 
 
 def cmd_quit(args):
+    # Whatever happens below, nothing may be left held afterwards: killing
+    # the game between a key going down and the same key coming up leaves it
+    # down for the whole session.
     if not game_running():
         say("the game is not running")
+        unstick()
         return 0
     subprocess.run(["taskkill", "/IM", "gta_sa.exe", "/F"], capture_output=True)
     for _ in range(20):
         if not game_running():
             say("the game is closed")
+            unstick()
             return 0
         time.sleep(1)
+    unstick()
     say("the game did not close")
     return 1
 

@@ -38,4 +38,20 @@ void KeysTick();
 bool KeysBusy();
 void KeysClear();
 
+// When a key event last went out, in GetTickCount64 milliseconds. Alt is the
+// reason this exists: a lone Alt press is how Windows opens a window's system
+// menu, and a window whose system menu is open has stopped running the game.
+// The window procedure refuses that menu while a keystroke of ours is in
+// flight, and needs to know when one was.
+unsigned long long KeysLastEventMs();
+
+// Lets go of everything this module has down, from any thread, without
+// waiting for anything. For the case the rest of the module cannot handle:
+// the game has stopped rendering, so the frame hook is not running, so the
+// key player is not running, and whatever it had down stays down - not just
+// in the game but in every window on the machine, until something says
+// otherwise. A stuck Alt is how the next game to start never renders a
+// frame.
+void KeysPanicRelease();
+
 }  // namespace gtabot::samp

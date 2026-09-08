@@ -42,6 +42,7 @@
 #include "samp/chat.hpp"
 #include "samp/discovery.hpp"
 #include "samp/input_state.hpp"
+#include "samp/keys.hpp"
 #include "samp/version.hpp"
 #include "samp/world.hpp"
 #include "state/memory.hpp"
@@ -424,6 +425,9 @@ LRESULT CALLBACK HookedWndProc(HWND window, UINT message, WPARAM wparam,
   return result;
 }
 
+// How long after a keystroke of ours a system menu is still ours to refuse.
+constexpr unsigned long long kOursForMs = 800;
+
 LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   // The hand on the mouse, as the window sees it: the evidence the mouse
   // watch judges DirectInput against, and the deltas it falls back on.
@@ -440,6 +444,25 @@ LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     default:
       break;
   }
+  // A lone Alt is how Windows opens a window's system menu, and while that
+  // menu is up the game is not running: no frames, no pad, no packets. The
+  // player's own controller table puts several actions on Alt - walking
+  // slowly, which is the key nearly every Russian roleplay server watches
+  // for as KEY_WALK - so pressing it is not optional. Refusing the menu for
+  // as long as a keystroke of ours is in flight is what makes the two
+  // compatible, and a person's own Alt, pressed when we are not pressing
+  // anything, still opens the menu exactly as before.
+  //
+  // Nothing here may take a lock. SendInput delivers to this very window on
+  // this very thread, so this procedure runs *inside* the call that sends a
+  // key - and the key player holds its own mutex across that call. Asking it
+  // anything that locks deadlocks the game thread, which stops rendering,
+  // which stops everything. The timestamp is an atomic for that reason.
+  if (message == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_KEYMENU) {
+    const unsigned long long last = samp::KeysLastEventMs();
+    if (last != 0 && GetTickCount64() - last < kOursForMs) return 0;
+  }
+
   if (g_mode == Mode::kMenu) {
     // The menu is open, so the keyboard is its: nothing pressed reaches the
     // game or SA-MP - not the arrows, not Enter, not Escape. Releases go

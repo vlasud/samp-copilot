@@ -105,7 +105,8 @@ its button and nothing else happens until it is pressed.
 ### Looking at the screen
 
 ```
-powershell -File tools/screenshot.ps1 -Path shot.png
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/screenshot.ps1 -Path shot.png
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/focus.ps1
 ```
 
 The tools report positions, models and text, and there are things none of
@@ -113,7 +114,14 @@ that says. A character standing the wrong side of a counter, a server's
 refusal painted across the chat, a prompt drawn over the view: one picture
 settles in a second what an hour of coordinates argues about. It grabs the
 game's own window, so it works with the game behind other windows as long as
-it is not minimised.
+it is not minimised. `focus.ps1` puts the game back in front, which matters
+because keystrokes go to whichever window has the focus - taking a screenshot
+from a terminal is enough to lose it, and then a password typed into the
+server's dialog lands in the terminal instead.
+
+The `-ExecutionPolicy Bypass` is not optional on this machine: without it
+PowerShell refuses to run either script and says so on stderr, which a script
+calling them is likely to throw away.
 
 ### The server's password
 

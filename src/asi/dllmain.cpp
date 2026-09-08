@@ -27,6 +27,7 @@
 #include "game/input_probe.hpp"
 #include "game/mouse_watch.hpp"
 #include "game/api_trace.hpp"
+#include "game/threads.hpp"
 #include "game/watchpoint.hpp"
 #include "samp/input_state.hpp"
 #include "samp/keys.hpp"
@@ -449,10 +450,36 @@ DWORD WINAPI Worker(LPVOID) {
     // If the player has stopped answering his keys while the calls are armed,
     // stand them down rather than leave him stuck.
     Overlay::WatchForLostInput();
+    // The game has stopped rendering: the frame hook is not running, so the
+    // key player is not running, so whatever it had down stays down for the
+    // rest of the session - in every window, not just this one. This thread
+    // is still alive, and lets go.
+    static bool said_where = false;
+    if (FrameHook::idle_ms() > 4000) {
+      samp::KeysPanicRelease();
+      // And say where the game thread actually is, once. "No frames" is a
+      // symptom shared by a lock nobody will release, a loop of our own, a
+      // call into the driver that never returns and the game's own pause;
+      // the instruction pointer tells them apart, and guessing costs a
+      // restart each time.
+      if (!said_where) {
+        said_where = true;
+        LOG_ERROR("frames stopped {} ms ago; threads: {}", FrameHook::idle_ms(),
+                  game::WhereThreadsAre());
+      }
+    } else {
+      said_where = false;   // rendering again: the next stall gets its own report
+    }
     if (WindowMode::DiagnosticsAllowed()) game::WatchMouse();
     samp::WatchSampInput();
-    // The read traps on the key table and the pad: who else looks.
-    game::WatchpointsInstall();
+    // The read traps on the key table and the pad: who else looks. These set
+    // the processor's own debug registers on every thread of the process and
+    // take a trap on every write to two addresses, which is the right price
+    // for an investigation and the wrong one for a session that is supposed
+    // to run for hours. The question they were asked - who switches the
+    // player's input off - has an answer now, so they only go on when the
+    // diagnostics are asked for, like everything else of their kind.
+    if (WindowMode::DiagnosticsAllowed()) game::WatchpointsInstall();
     if (WindowMode::DiagnosticsAllowed()) {
       game::ApiTraceInstall();
       game::ApiTraceDumpIfAsked();
@@ -487,6 +514,13 @@ DWORD WINAPI Worker(LPVOID) {
   }
 
   LOG_INFO("bot.asi stopping");
+  // Whatever is still held goes up first. A key pressed through SendInput is
+  // held for the whole session, not just this game: leave one down on the way
+  // out and Windows goes on believing a hand is on it. A stuck Alt is the
+  // expensive one - every window then behaves as though its menu is being
+  // opened, and the next game to start never renders a frame.
+  samp::KeysReleaseAll();
+  samp::KeysTick();
   act::Uninstall();
   transport.Stop();
   FrameHook::Uninstall();

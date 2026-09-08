@@ -28,6 +28,12 @@ std::vector<Step> g_script;
 std::size_t g_at = 0;
 std::vector<int> g_held;
 std::atomic<unsigned long long> g_events{0};
+std::atomic<unsigned long long> g_last_event_ms{0};
+// What this module currently has down, without a lock. The panic release
+// runs on a thread that must never wait for the game thread - the whole
+// reason it runs is that the game thread has stopped - so it cannot ask the
+// script what it was doing.
+std::atomic<bool> g_down[256] = {};
 
 void Wipe() {
   if (!g_script.empty())
@@ -45,6 +51,7 @@ void SendCharacter(wchar_t ch) {
   in[0].ki.dwFlags = KEYEVENTF_UNICODE;
   in[1] = in[0];
   in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
+  g_last_event_ms.store(GetTickCount64());
   SendInput(2, in, sizeof(INPUT));
 }
 
@@ -57,6 +64,8 @@ void SendKey(int vk, bool down) {
   if (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT)
     in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
   if (!down) in.ki.dwFlags |= KEYEVENTF_KEYUP;
+  if (vk >= 0 && vk < 256) g_down[vk].store(down);
+  g_last_event_ms.store(GetTickCount64());
   SendInput(1, &in, sizeof(in));
 }
 
@@ -106,6 +115,17 @@ void KeysHold(const std::vector<int>& keys) {
 }
 
 void KeysReleaseAll() { KeysHold({}); }
+
+void KeysPanicRelease() {
+  for (int vk = 0; vk < 256; ++vk) {
+    if (!g_down[vk].load()) continue;
+    SendKey(vk, false);
+  }
+}
+
+unsigned long long KeysLastEventMs() {
+  return g_last_event_ms.load();
+}
 
 unsigned long long KeysEventsSent() {
   return g_events.load(std::memory_order_relaxed);

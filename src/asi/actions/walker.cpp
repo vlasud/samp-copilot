@@ -72,6 +72,11 @@ constexpr float kArriveLast = 1.4f;
 constexpr float kArriveFloor = 0.4f;
 // Near enough to what he was sent to that touching it is the point.
 constexpr float kTouchingDistance = 2.5f;
+// Backing out of a corner: how far, for how long, and how many times before
+// the corner is admitted to be a wall.
+constexpr float kBackOutMetres = 3.0f;
+constexpr unsigned long long kBackOutMs = 1500;
+constexpr int   kMaxBackOuts = 3;
 
 // Stuck: he has hardly moved at all for this long. Not "no closer to the
 // target" - a man going round a fence is no closer to the target either, and
@@ -203,6 +208,7 @@ std::mutex        g_mutex;
 std::vector<Vec3> g_route;
 std::size_t       g_leg = 0;
 float             g_arrive_last = kArriveLast;
+int               g_backouts = 0;
 bool              g_walking = false;
 std::string       g_note = "idle";
 unsigned long long g_started_ms = 0;
@@ -936,11 +942,6 @@ bool DecideStick(short* out_x, short* out_y) {
         }
     }
     DecideLean(now);
-    if (at_the_end) {
-      g_lean = 0;
-      g_wall = false;
-      g_follow_side = 0;
-    }
     // A door is not a wall to be got round. Within reach of one the route
     // means to go through, everything the whiskers found is the door frame,
     // and the only thing that opens it is his shoulder.
@@ -952,6 +953,28 @@ bool DecideStick(short* out_x, short* out_y) {
       g_closer_ms = now;
     }
     if (g_wall) {
+      // Everything ahead is blocked. From the middle of a room that is a
+      // wall and the journey should hear about it; from the corner he has
+      // just walked into it is a corner, and what a person does in a corner
+      // is step back out of it. So he backs out first, and only calls it a
+      // wall if backing out did not help either.
+      if (g_backouts < kMaxBackOuts && !airborne) {
+        ++g_backouts;
+        const float behind = Normalise(wanted + 3.14159265f);
+        g_sidestep_target = Vec3{here.x + std::cos(behind) * kBackOutMetres,
+                                 here.y + std::sin(behind) * kBackOutMetres,
+                                 here.z};
+        g_sidestep_until = now + kBackOutMs;
+        g_wall = false;
+        g_lean = 0;
+        g_follow_side = 0;
+        g_closer_ms = now;
+        g_window_ms = now;
+        g_window_pos = here;
+        LOG_INFO("walk: nothing ahead is open - backing out of it (try {})",
+                 g_backouts);
+        return true;
+      }
       RememberWhatIsAhead(here, wanted, "a wall the plan did not know about");
       StopLocked("blocked - no way round from here, handing back to the journey");
       LOG_WARN("walk: {} ({:.1f} m short of leg {} of {})", g_note, distance,
@@ -1251,6 +1274,7 @@ void WalkTo(std::vector<Vec3> route) {
   const unsigned long long now = GetTickCount64();
   g_route = std::move(route);
   g_doorways.clear();
+  g_backouts = 0;
   g_leg = 0;
   g_walking = true;
   g_note = "walking";
