@@ -1,5 +1,7 @@
 #include "samp/keys.hpp"
 
+#include "game/mouse_watch.hpp"
+
 #include <windows.h>
 
 #include <algorithm>
@@ -42,17 +44,40 @@ void Wipe() {
   g_at = 0;
 }
 
-// A character, whatever the keyboard layout is set to: the scan code field
-// carries the code point itself and Windows delivers it as typed.
+// A character, put into the window's own message queue.
+//
+// `KEYEVENTF_UNICODE` looks like it should do this - the scan field carries
+// the code point and Windows delivers it as typed - but the game's window is
+// an ANSI one, so what arrives is not the code point: Windows first folds it
+// down to a single byte using the code page of whatever keyboard layout the
+// window's thread currently has. This module keeps that layout English so
+// that W and S reach the game at all, and English is code page 1252, which
+// has no Russian in it. Every Cyrillic letter therefore arrived as a question
+// mark - the character said "добрый день господа" in chat and the server
+// showed "?????? ???? ???????".
+//
+// So the fold is done here instead, to CP1251, which is what a Russian server
+// speaks and what the client stores, and the byte is posted straight to the
+// window. Nothing is left for a layout to reinterpret.
 void SendCharacter(wchar_t ch) {
-  INPUT in[2] = {};
-  in[0].type = INPUT_KEYBOARD;
-  in[0].ki.wScan = static_cast<WORD>(ch);
-  in[0].ki.dwFlags = KEYEVENTF_UNICODE;
-  in[1] = in[0];
-  in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
+  const HWND window = game::GameWindow();
   g_last_event_ms.store(GetTickCount64());
-  SendInput(2, in, sizeof(INPUT));
+  if (window == nullptr) {
+    // No window to post to: the old way, which at least still types Latin.
+    INPUT in[2] = {};
+    in[0].type = INPUT_KEYBOARD;
+    in[0].ki.wScan = static_cast<WORD>(ch);
+    in[0].ki.dwFlags = KEYEVENTF_UNICODE;
+    in[1] = in[0];
+    in[1].ki.dwFlags |= KEYEVENTF_KEYUP;
+    SendInput(2, in, sizeof(INPUT));
+    return;
+  }
+  char byte = '?';
+  const int made = WideCharToMultiByte(1251, 0, &ch, 1, &byte, 1, "?", nullptr);
+  if (made != 1) return;
+  PostMessageA(window, WM_CHAR, static_cast<WPARAM>(
+                   static_cast<unsigned char>(byte)), 1);
 }
 
 void SendKey(int vk, bool down) {
