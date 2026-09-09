@@ -310,6 +310,7 @@ bool  g_whisker_low[kWhiskers]   = {false, false, false, false, false, false, fa
 // chosen on the local picture, and a blocked route goes back to the journey
 // at once. See SetPrecise.
 bool  g_precise = false;
+Vec3  g_blocked_at;
 std::string g_held_by;
 int   g_wedged_hops = 0;
 unsigned long long g_wedged_hops_ms = 0;
@@ -352,8 +353,9 @@ constexpr float kRoomWorth = 0.8f;
 constexpr float kTurnCost = 1.2f;
 // Somebody standing on the route is given this long to move.
 constexpr unsigned long long kWaitForPersonMs = 3000;
-// Blocked ahead and getting no nearer for this long: the plan is wrong,
-// not merely a hand's breadth out.
+// Blocked ahead and not actually moving for this long: the plan is wrong,
+// not merely a hand's breadth out. How far counts as having moved.
+constexpr float kBlockedMoved = 0.8f;
 constexpr unsigned long long kBlockedNoProgressMs = 2500;
 // Hops allowed to a walk that is wedged, how far apart, and how long the
 // count is remembered. The count does not belong to the walk: the journey
@@ -1599,7 +1601,10 @@ bool DecideStick(short* out_x, short* out_y) {
         // the prediction alone is what had him replan the same two metres
         // every two seconds without moving.
         const Vec3 spot = RoutePoint(here, free);
-        if (g_route_blocked_since == 0) g_route_blocked_since = now;
+        if (g_route_blocked_since == 0) {
+          g_route_blocked_since = now;
+          g_blocked_at = here;
+        }
         // Somebody standing in the way is waited out - but not himself: the
         // ped list holds him too, and taking his own body for a stranger
         // had him stand three seconds at every step of the way.
@@ -1613,7 +1618,17 @@ bool DecideStick(short* out_x, short* out_y) {
           g_window_pos = here;
           return false;        // stand
         }
-        if (now - g_closer_ms > kBlockedNoProgressMs) {
+        // Walking the length of a wall gets him no nearer the end of the
+        // leg for a while, and that is not being stuck: the two pictures
+        // disagree by a hand's breadth all along it, and handing the route
+        // back on that account had him creep a metre and a half at a time
+        // and remember an obstacle every second - forty of them down one
+        // fence. What counts is whether he has actually moved.
+        if (now - g_route_blocked_since > kBlockedNoProgressMs &&
+            Distance2D(here, g_blocked_at) > kBlockedMoved) {
+          g_route_blocked_since = now;
+          g_blocked_at = here;
+        } else if (now - g_route_blocked_since > kBlockedNoProgressMs) {
           // A hop first. It is what a person does when a step will not do,
           // it costs nothing, and it cannot walk him into a trap - and it
           // is the difference between getting off a hospital bed he was
