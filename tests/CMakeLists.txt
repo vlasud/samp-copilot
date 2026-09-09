@@ -10,10 +10,12 @@ add_executable(bot_tests
   test_talk.cpp
   test_people.cpp
   test_field.cpp
+  test_local.cpp
   main.cpp
   "${CMAKE_SOURCE_DIR}/src/asi/samp/talk.cpp"
   "${CMAKE_SOURCE_DIR}/src/asi/state/people.cpp"
   "${CMAKE_SOURCE_DIR}/src/asi/nav/grid.cpp"
+  "${CMAKE_SOURCE_DIR}/src/asi/nav/local.cpp"
 )
 target_include_directories(bot_tests PRIVATE "${CMAKE_SOURCE_DIR}/src/asi")
 target_link_libraries(bot_tests PRIVATE nlohmann_json::nlohmann_json)

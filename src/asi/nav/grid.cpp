@@ -65,6 +65,57 @@ void Chamfer(Grid* g) {
     }
 }
 
+// Fills the cells between the readings by interpolating the four readings
+// round each, instead of copying the one at its corner.
+//
+// Copying made every metre of ground a flat plateau with a step at its
+// edge, so a ramp of one metre in one - the slipway out of the canals, a
+// pavement kerb ramp, a staircase - came out as a flight of metre-high
+// steps. The ledge marker shut both sides of every one of them and the
+// search refused to climb them, which is how a character standing in a
+// storm drain had a hundred and eighty metres of field round him, twenty
+// thousand square metres of floor found in it, and a route twenty-seven
+// metres long that went nowhere. Interpolated, the same ramp rises a
+// quarter of a metre a cell and is simply walkable.
+void SmoothBetweenReadings(Grid* g, int stride) {
+  const std::vector<float> read_z = g->ground;
+  const std::vector<std::uint8_t> read_known = g->known;
+  const auto anchor = [&](int ax, int ay, float* z) {
+    if (ax >= g->W) ax = (g->W - 1) / stride * stride;
+    if (ay >= g->H) ay = (g->H - 1) / stride * stride;
+    const int at = ay * g->W + ax;
+    if (read_known[at] != 1) return false;
+    *z = read_z[at];
+    return true;
+  };
+  for (int iy = 0; iy < g->H; ++iy)
+    for (int ix = 0; ix < g->W; ++ix) {
+      const int fx = ix % stride, fy = iy % stride;
+      if (fx == 0 && fy == 0) continue;          // a reading of its own
+      const int ax = ix - fx, ay = iy - fy;
+      const float tx = static_cast<float>(fx) / stride;
+      const float ty = static_cast<float>(fy) / stride;
+      const float weight[4] = {(1 - tx) * (1 - ty), tx * (1 - ty),
+                               (1 - tx) * ty, tx * ty};
+      const int cx[4] = {ax, ax + stride, ax, ax + stride};
+      const int cy[4] = {ay, ay, ay + stride, ay + stride};
+      float sum = 0, total = 0;
+      for (int k = 0; k < 4; ++k) {
+        float z = 0;
+        if (weight[k] <= 0 || !anchor(cx[k], cy[k], &z)) continue;
+        sum += z * weight[k];
+        total += weight[k];
+      }
+      const int at = g->index(ix, iy);
+      if (total > 0) {
+        g->known[at] = 1;
+        g->ground[at] = sum / total;
+      } else {
+        g->known[at] = 2;
+      }
+    }
+}
+
 int MarkLedges(Grid* g, float max_step) {
   const int W = g->W, H = g->H;
   std::vector<std::uint8_t> ledge(static_cast<std::size_t>(W) * H, 0);
@@ -106,6 +157,8 @@ void Searcher::Start(const Grid* g, int start, int goal, const Vec3& aim,
   best_[start] = 0;
   heap_.push_back(Open{Away(g->centre(start), aim), start});
   nearest_ = start;
+  furthest_ = start;
+  furthest_cost_ = 0;
   nearest_away_ = Away(g->centre(start), aim);
   done_ = reached_ = false;
   started_ = true;
@@ -132,6 +185,10 @@ bool Searcher::Step(int budget) {
     ++done;
     const float away = Away(g.centre(cur.at), aim_);
     if (away < nearest_away_) { nearest_away_ = away; nearest_ = cur.at; }
+    if (best_[cur.at] > furthest_cost_) {
+      furthest_cost_ = best_[cur.at];
+      furthest_ = cur.at;
+    }
     if (cur.at == goal_) { reached_ = true; done_ = true; return true; }
     if (rules_.max_expand > 0 && expanded_ >= rules_.max_expand) { done_ = true; return true; }
     const int hx = cur.at % g.W, hy = cur.at / g.W;
@@ -179,6 +236,18 @@ std::vector<int> Searcher::Cells() const {
   }
   std::reverse(cells.begin(), cells.end());
   return cells;
+}
+
+std::vector<int> Searcher::CellsTo(int at) const {
+  std::vector<int> back;
+  if (!started_ || at < 0 || came_.empty() || closed_.empty() || !closed_[at])
+    return back;
+  for (int on = at; on != -1; on = came_[on]) {
+    back.push_back(on);
+    if (on == start_) break;
+  }
+  std::reverse(back.begin(), back.end());
+  return back;
 }
 
 bool LineFree(const Grid& g, int a, int b, float max_step) {

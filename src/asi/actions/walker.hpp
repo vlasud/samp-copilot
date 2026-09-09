@@ -111,6 +111,16 @@ void SetDoorways(std::vector<Vec3> doorways);
 // WalkTo.
 void SetStrictRoute(bool on);
 
+// Follow the route closely, steering on a picture of the few metres round
+// him painted every tenth of a second from the same collision the field is
+// drawn from, and hand the route back the moment it is blocked rather than
+// feel along the obstacle. For routes a planner drew; set after WalkTo.
+void SetPrecise(bool on);
+
+// A fresh local picture about the character as text, for looking at what
+// he sees: `reach` metres each way. Game thread.
+std::string LocalPictureText(float reach);
+
 // Whether the last point of the route is where the journey actually ends,
 // as opposed to a staging point, the edge of a room, or somewhere to be
 // going on with while a plan is worked out. Only at a real destination does

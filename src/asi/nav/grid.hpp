@@ -48,6 +48,12 @@ void Chamfer(Grid* g);
 // Returns how many cells were shut.
 int MarkLedges(Grid* g, float max_step);
 
+// Fills the cells between the ground readings - which are taken every
+// `stride` cells - by interpolating the four readings round each, so a
+// slope is a slope rather than a flight of steps a stride wide. Cells with
+// no reading anywhere near are marked as having none.
+void SmoothBetweenReadings(Grid* g, int stride);
+
 struct SearchRules {
   // A metre of rise over a metre of ground - forty-five degrees, what the
   // game's own peds manage on a ramp. Seven-tenths cut the stairs off a
@@ -69,6 +75,18 @@ class Searcher {
   bool finished() const { return done_; }
   bool reached_goal() const { return reached_; }
   int  end() const;                 // the goal, or the nearest cell
+  // The cell it reached that is furthest from the start by walking - the
+  // far end of everywhere he can get to. Where the goal cannot be reached
+  // and nothing nearer to it can either, this is the way out of wherever
+  // he is: a canal is escaped by walking along it, not by standing at the
+  // point of it closest to the far side of town.
+  int  furthest() const { return furthest_; }
+  float furthest_cost() const { return furthest_cost_; }
+  // What it cost to reach a cell, or -1 where the search never did.
+  float cost(int at) const {
+    return closed_.empty() || at < 0 || !closed_[at] ? -1.0f : best_[at];
+  }
+  float nearest_away() const { return nearest_away_; }
   int  expanded() const { return expanded_; }
   // Why neighbours were turned away, for the times the search ends short:
   // shut (solid or unknown), too tall a step, or the corner of a wall.
@@ -80,12 +98,14 @@ class Searcher {
   bool visited(int at) const { return !closed_.empty() && closed_[at] != 0; }
   // The way back from `end()` to the start, start first.
   std::vector<int> Cells() const;
+  // The way back from any cell it reached, start first.
+  std::vector<int> CellsTo(int at) const;
 
  private:
   struct Open { float f; int at; bool operator<(const Open& o) const { return f > o.f; } };
   const Grid* g_ = nullptr;
-  int start_ = -1, goal_ = -1, nearest_ = -1;
-  float nearest_away_ = 0;
+  int start_ = -1, goal_ = -1, nearest_ = -1, furthest_ = -1;
+  float nearest_away_ = 0, furthest_cost_ = 0;
   Vec3 aim_;
   SearchRules rules_;
   std::vector<float> best_;

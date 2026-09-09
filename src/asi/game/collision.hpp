@@ -77,6 +77,9 @@ struct Footprint {
   // came after the cut is missing from the square, and the caller should
   // know the picture is short rather than trust it.
   bool starved = false;
+  // Sectors whose paint faulted partway - a list node or an entity that
+  // could not be read. What came after the fault in that sector is missing.
+  int faulted = 0;
 };
 
 // Paints the square of `radius` about (cx, cy). The band is

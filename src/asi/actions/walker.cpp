@@ -1,6 +1,10 @@
 #include "actions/walker.hpp"
 
 #include "actions/contact.hpp"
+#include "game/peds.hpp"
+#include "nav/local.hpp"
+
+#include <string>
 #include "nav/ring.hpp"
 #include "nav/trail.hpp"
 
@@ -298,6 +302,51 @@ float g_stick_x = 0, g_stick_y = 0;
 unsigned long long g_probe_ms = 0;
 bool  g_whisker_clear[kWhiskers] = {true, true, true, true, true, true, true};
 bool  g_whisker_low[kWhiskers]   = {false, false, false, false, false, false, false};
+
+// Following closely: the route is a line to stay on, the way he goes is
+// chosen on the local picture, and a blocked route goes back to the journey
+// at once. See SetPrecise.
+bool  g_precise = false;
+nav::LocalPicture g_local;
+Vec3  g_route_start;              // the first leg runs from here
+float g_precise_delta = 0;        // off the line, as the picture last chose
+float g_route_free = 0;           // metres of the route ahead found open
+float g_route_low_at = -1;        // where the first low thing on it is, or -1
+unsigned long long g_route_blocked_since = 0;
+// The picture's reach, how far along the route is checked, and how far
+// ahead on the line he heads for. Six metres is a second and a half of
+// running; the plan owns everything past that.
+constexpr float kLocalRadius = 6.0f;
+constexpr float kRouteLook   = 6.0f;
+constexpr float kPursuitAhead = 3.0f;
+// Open enough to run at; blocked near enough to stop over.
+constexpr float kRouteOpen = 2.5f;
+constexpr float kRouteBlockedNear = 2.0f;
+// Where he stands is not judged: the paint inflates every wall by half a
+// cell and he is often against one.
+constexpr float kStartSlack = 0.6f;
+// The headings tried beside the line when it is shut: every ten degrees to
+// seventy either side, three and a half metres out, the room beside each
+// worth a little and every degree of turning costing a little.
+constexpr float kSteerLook = 3.5f;
+constexpr float kSteerStep = 0.1745f;   // ten degrees, out to a hundred and twenty
+constexpr int   kSteerSteps = 12;
+constexpr float kRoomWanted = 0.35f;
+constexpr float kRoomWorth = 0.8f;
+constexpr float kTurnCost = 1.2f;
+// Somebody standing on the route is given this long to move.
+constexpr unsigned long long kWaitForPersonMs = 3000;
+// Blocked ahead and getting no nearer for this long: the plan is wrong,
+// not merely a hand's breadth out.
+constexpr unsigned long long kBlockedNoProgressMs = 2500;
+// With the camera readable the frame cannot be wrong by a little; only a
+// gross error - a mirrored or backward frame - is corrected, and only while
+// the route ahead is open, because sliding along a wall is not a wrong
+// frame. Thirty degrees of tolerance had the correction flapping forty
+// degrees each way every time he brushed a fence.
+constexpr float kGrossFrameError = 1.75f;
+// Following closely, standing still is answered sooner.
+constexpr unsigned long long kNoCloserPreciseMs = 6000;
 Vec3  g_whisker_end[kWhiskers];
 float g_lean = 0;             // radians added to the wanted heading
 int   g_follow_side = 0;      // +1 left, -1 right, 0 straight
@@ -891,6 +940,138 @@ void DecideLean(unsigned long long now) {
   g_wall = false;
 }
 
+// The nearest point of the current leg to him. The first leg runs from
+// where the walk began.
+Vec3 Projection(const Vec3& here) {
+  const Vec3 from = g_leg == 0 ? g_route_start : g_route[g_leg - 1];
+  const Vec3& to = g_route[g_leg];
+  const float dx = to.x - from.x, dy = to.y - from.y;
+  const float len2 = dx * dx + dy * dy;
+  float t = len2 > 1e-6f ? ((here.x - from.x) * dx + (here.y - from.y) * dy) / len2 : 1.0f;
+  t = t < 0 ? 0 : (t > 1 ? 1 : t);
+  return Vec3{from.x + dx * t, from.y + dy * t, to.z};
+}
+
+// The way ahead as points: from him to the nearest point of the leg, then
+// leg end by leg end.
+std::vector<Vec3> WayAhead(const Vec3& here) {
+  std::vector<Vec3> way;
+  way.push_back(here);
+  way.push_back(Projection(here));
+  for (std::size_t i = g_leg; i < g_route.size(); ++i) way.push_back(g_route[i]);
+  return way;
+}
+
+// The point `along` metres down the way ahead; its end when the way is
+// shorter than that.
+Vec3 RoutePoint(const Vec3& here, float along) {
+  const std::vector<Vec3> way = WayAhead(here);
+  float left = along;
+  for (std::size_t i = 1; i < way.size(); ++i) {
+    const float len = Distance2D(way[i - 1], way[i]);
+    if (len >= left) {
+      const float k = len > 1e-6f ? left / len : 0.0f;
+      return Vec3{way[i - 1].x + (way[i].x - way[i - 1].x) * k,
+                  way[i - 1].y + (way[i].y - way[i - 1].y) * k, way[i].z};
+    }
+    left -= len;
+  }
+  return way.back();
+}
+
+// The point on the line `ahead` metres past the nearest point of it to
+// him: heading for that pulls him back onto the line rather than at the far
+// end of the leg, which is how a shove off the line stayed a shove.
+Vec3 PursuitPoint(const Vec3& here, float ahead) {
+  const std::vector<Vec3> way = WayAhead(here);
+  float left = ahead;
+  for (std::size_t i = 2; i < way.size(); ++i) {
+    const float len = Distance2D(way[i - 1], way[i]);
+    if (len >= left) {
+      const float k = len > 1e-6f ? left / len : 0.0f;
+      return Vec3{way[i - 1].x + (way[i].x - way[i - 1].x) * k,
+                  way[i - 1].y + (way[i].y - way[i - 1].y) * k, way[i].z};
+    }
+    left -= len;
+  }
+  return way.back();
+}
+
+// How far along the way ahead the picture finds open, up to `metres`, and
+// where the first low thing on it is.
+float RouteAhead(const Vec3& here, float metres, float* low_at) {
+  *low_at = -1.0f;
+  const std::vector<Vec3> way = WayAhead(here);
+  float gone = 0;
+  for (std::size_t i = 1; i < way.size() && gone < metres; ++i) {
+    float low = -1.0f;
+    const float len = Distance2D(way[i - 1], way[i]);
+    // The slack is measured from him, not from the start of each leg: the
+    // first leg is often half a metre long, and skipping only its own
+    // samples left the cell he is standing beside judged all the same.
+    const float free = g_local.FreeAlong(way[i - 1], way[i],
+                                         std::max(0.0f, kStartSlack - gone), &low);
+    if (*low_at < 0 && low >= 0) *low_at = gone + low;
+    if (free < len - 1e-3f) return gone + free;
+    gone += len;
+  }
+  return metres;
+}
+
+// The picture round him as text, for the log: `reach` metres each way, a
+// character a cell, y upward. S is him, X the point asked about, # shut,
+// ~ low, . open, ? no ground.
+std::string PictureAbout(const Vec3& here, const Vec3& mark, float reach) {
+  std::string out;
+  if (!g_local.ok) return "(no picture)";
+  const nav::Grid& g = g_local.high;
+  const int cells = static_cast<int>(reach / g.cell);
+  int hx = 0, hy = 0, mx = -1, my = -1;
+  g.cell_of(here, &hx, &hy);
+  g.cell_of(mark, &mx, &my);
+  for (int iy = hy + cells; iy >= hy - cells; --iy) {
+    for (int ix = hx - cells; ix <= hx + cells; ++ix) {
+      char c = ' ';
+      if (!g.inside(ix, iy)) c = ' ';
+      else if (ix == hx && iy == hy) c = 'S';
+      else if (ix == mx && iy == my) c = 'X';
+      else {
+        const int at = g.index(ix, iy);
+        c = g.known[at] != 1 ? '?' : g.blocked[at] ? '#' : g_local.low[at] ? '~' : '.';
+      }
+      out += c;
+    }
+    out += '\n';
+  }
+  return out;
+}
+
+// How far off the line to head, chosen on the picture: nought when the line
+// itself is open with room beside it, else the heading with the most open
+// ground ahead for the least turning.
+float PreciseDelta(const Vec3& here, float pursuit) {
+  const auto along = [&](float a, float d) {
+    return Vec3{here.x + std::cos(a) * d, here.y + std::sin(a) * d, here.z};
+  };
+  float low = -1.0f;
+  const float straight = g_local.FreeAlong(here, along(pursuit, kSteerLook), kStartSlack, &low);
+  if (straight >= kRouteOpen && g_local.Clearance(along(pursuit, 1.2f)) >= kRoomWanted)
+    return 0.0f;
+  float best = 0, best_score = -1e9f;
+  for (int k = -kSteerSteps; k <= kSteerSteps; ++k) {
+    const float a = pursuit + k * kSteerStep;
+    const float free = g_local.FreeAlong(here, along(a, kSteerLook), kStartSlack, &low);
+    const float room = g_local.Clearance(along(a, std::min(free, 1.2f)));
+    const float score = std::min(free, kSteerLook) + std::min(room, 1.0f) * kRoomWorth -
+                        std::fabs(k * kSteerStep) * kTurnCost;
+    if (score > best_score) {
+      best_score = score;
+      best = k * kSteerStep;
+    }
+  }
+  return best;
+}
+
 // Everything the walk decides, run from inside the pad hook. Returns the
 // stick to press, or false to press nothing.
 bool DecideStick(short* out_x, short* out_y) {
@@ -1015,7 +1196,7 @@ bool DecideStick(short* out_x, short* out_y) {
   if (g_best_distance == 0 || distance < g_best_distance - kCloser) {
     g_best_distance = distance;
     g_closer_ms = now;
-  } else if (now - g_closer_ms > kNoCloserMs) {
+  } else if (now - g_closer_ms > (g_precise ? kNoCloserPreciseMs : kNoCloserMs)) {
     RememberWhatIsAhead(here, ahead, "where he got no closer for ten seconds");
     StopLocked("no closer for ten seconds - handing back to the journey");
     LOG_WARN("walk: {} ({:.1f} m short of leg {} of {})", g_note, distance,
@@ -1179,6 +1360,49 @@ bool DecideStick(short* out_x, short* out_y) {
           return true;   // keep pressing, at it
         }
       }
+      if (g_precise) {
+        // Not before he has had time to turn and get going.
+        if (now - g_started_ms < kStrictGraceMs) {
+          g_window_ms = now;
+          g_window_pos = here;
+          return true;
+        }
+        // A shut door on the route. The map went through it because the
+        // server says it is a door, and a door is opened by walking into
+        // it - so into it, and through it, aiming at the route's own point
+        // beyond so the push goes through the frame and not the hinge.
+        Vec3 door;
+        if (g_pushes < kDoorPushes && NearestDoorway(here, &door, kDoorPushReach)) {
+          ++g_pushes;
+          g_pushing_until = now + kPushForMs;
+          Vec3 through = door;
+          for (std::size_t i = g_leg; i < g_route.size(); ++i)
+            if (Distance2D(g_route[i], door) > 1.0f &&
+                Distance2D(g_route[i], here) > Distance2D(door, here)) {
+              through = g_route[i];
+              break;
+            }
+          g_push_at = through;
+          g_pushing_at_something = true;
+          g_closer_ms = now;
+          g_window_ms = now;
+          g_window_pos = here;
+          LOG_INFO("walk: a shut door on the route at ({:.0f},{:.0f}) - pushing it "
+                   "(push {})", door.x, door.y, g_pushes);
+          return true;
+        }
+        // Standing against something the picture did not show - or did,
+        // and he is wedged in it. Stepping round it by guesswork is what
+        // walked him into traps; the spot is remembered and the journey
+        // draws another route, which takes a second.
+        const Vec3 spot{here.x + std::cos(ahead) * 0.9f,
+                        here.y + std::sin(ahead) * 0.9f, here.z};
+        nav::RememberObstacle(spot, "something he could not move past");
+        StopLocked("not moving - handing back to the journey for another route");
+        LOG_WARN("walk: {} ({:.1f} m short of leg {} of {})", g_note, distance,
+                 static_cast<int>(g_leg) + 1, static_cast<int>(g_route.size()));
+        return false;
+      }
       RememberWhatIsAhead(here, ahead, "something he kept walking into");
       if (g_whisker_low[0] && now - g_last_jump_ms > 700 &&
           !(g_leg + 1 >= g_route.size() && distance < 6.0f)) {
@@ -1221,10 +1445,14 @@ bool DecideStick(short* out_x, short* out_y) {
   // Where he is going, and where he is going to be sent.
   const bool stepping = now < g_sidestep_until;
   if (now >= g_pushing_until) g_pushing_at_something = false;
-  const Vec3& aim = g_pushing_at_something ? g_push_at
-                    : stepping             ? g_sidestep_target
-                                           : target;
-  const float wanted = std::atan2(aim.y - here.y, aim.x - here.x);
+  Vec3 aim = g_pushing_at_something ? g_push_at
+             : stepping             ? g_sidestep_target
+                                    : target;
+  // Following closely, he heads for the line a few metres on, not the far
+  // end of the leg.
+  const bool pursuing = g_precise && !g_pushing_at_something && !stepping;
+  if (pursuing) aim = PursuitPoint(here, kPursuitAhead);
+  float wanted = std::atan2(aim.y - here.y, aim.x - here.x);
 
   // Look where he is going, and lean away from what is there.
   bool jump_low_now = false;
@@ -1242,7 +1470,7 @@ bool DecideStick(short* out_x, short* out_y) {
       g_ground_known = false;
     }
 
-    if (!g_strict) ProbeWhiskers(here, wanted, descending);
+    if (!g_strict && !g_precise) ProbeWhiskers(here, wanted, descending);
     // The last couple of metres of the last leg are different. A person
     // walking to a counter, a bed, a cash machine ends up touching it: the
     // thing he was sent to is in front of him, and leaning away from it is
@@ -1264,6 +1492,83 @@ bool DecideStick(short* out_x, short* out_y) {
       for (int i = 0; i < kWhiskers; ++i) {
         g_whisker_clear[i] = true;
         g_whisker_low[i] = false;
+      }
+    } else if (g_precise) {
+      // The picture round him, fresh, and the route checked on it.
+      g_lean = 0;
+      g_wall = false;
+      g_follow_side = 0;
+      nav::PaintLocal(here, kLocalRadius, nav::LocalBodies(here, kLocalRadius), &g_local);
+      float low_at = -1.0f;
+      const float free = RouteAhead(here, kRouteLook, &low_at);
+      g_route_free = free;
+      g_route_low_at = at_the_end ? -1.0f : low_at;
+      // The whiskers' verdicts, for the sprint and the hop, from the picture.
+      const float room = g_local.Clearance(here);
+      g_whisker_clear[0] = free >= kRouteOpen;
+      g_whisker_low[0] = g_route_low_at >= 0 && g_route_low_at < kRouteOpen;
+      for (int i = 1; i < kWhiskers; ++i) {
+        g_whisker_clear[i] = room >= 1.0f;
+        g_whisker_low[i] = false;
+      }
+      if (free < kRouteBlockedNear && !at_the_end) {
+        // Something across the route within a few strides. It may be a
+        // thing the plan did not have - a car, a gate, a person - or it may
+        // be the two pictures disagreeing about a cell by a hand's breadth,
+        // which happens along every wall. So a block is not a reason to
+        // stop by itself: he steers round it on the picture and keeps
+        // going, and only if that gets him no nearer for a couple of
+        // seconds is the plan wrong enough to draw again. Handing back on
+        // the prediction alone is what had him replan the same two metres
+        // every two seconds without moving.
+        const Vec3 spot = RoutePoint(here, free);
+        if (g_route_blocked_since == 0) g_route_blocked_since = now;
+        // Somebody standing in the way is waited out - but not himself: the
+        // ped list holds him too, and taking his own body for a stranger
+        // had him stand three seconds at every step of the way.
+        const bool somebody =
+            !game::PedsNear(spot, 1.2f, 1, self.game_ped).empty() &&
+            Distance2D(spot, here) > 1.0f;
+        if (somebody && now - g_route_blocked_since < kWaitForPersonMs) {
+          g_precise_delta = 0;
+          g_closer_ms = now;   // waiting is not being stuck
+          g_window_ms = now;
+          g_window_pos = here;
+          return false;        // stand
+        }
+        if (now - g_closer_ms > kBlockedNoProgressMs) {
+          const Vec3 past = RoutePoint(here, free + 0.4f);
+          nav::RememberObstacle(past, somebody ? "somebody standing on the route"
+                                               : "something across the route");
+          const int legs = static_cast<int>(g_route.size()), leg = static_cast<int>(g_leg) + 1;
+          const std::string picture = PictureAbout(here, spot, 3.0f);
+          StopLocked("the route is blocked and he is getting no nearer - handing it back");
+          LOG_WARN("walk: {} ({:.1f} m along it, {:.1f} m short of leg {} of {}); the picture, "
+                   "three metres each way, x across, y up, S him, X the block:\n{}",
+                   g_note, free, distance, leg, legs, picture);
+          return false;
+        }
+      } else {
+        g_route_blocked_since = 0;
+      }
+      g_precise_delta = PreciseDelta(here, wanted);
+      // What the picture says, drawn in the world for the panel: eight
+      // spokes, each as long as the way that way is open. Without this the
+      // panel went on drawing the whiskers from whenever they last ran,
+      // which is not what he steers by any more.
+      {
+        std::vector<Vec3> ends;
+        std::vector<bool> clear;
+        for (int k = 0; k < 8; ++k) {
+          const float a = wanted + k * 0.7854f;
+          const Vec3 far_end{here.x + std::cos(a) * kSteerLook,
+                             here.y + std::sin(a) * kSteerLook, here.z};
+          const float open = g_local.FreeAlong(here, far_end, kStartSlack, nullptr);
+          ends.push_back(Vec3{here.x + std::cos(a) * open,
+                              here.y + std::sin(a) * open, here.z});
+          clear.push_back(open >= kSteerLook - 0.01f);
+        }
+        nav::SetDebugWhiskers(here, std::move(ends), std::move(clear));
       }
     } else {
       DecideLean(now);
@@ -1310,10 +1615,13 @@ bool DecideStick(short* out_x, short* out_y) {
     // Something low straight ahead: jump it when it is close.
     if (g_whisker_low[0] && g_follow_side == 0 && !airborne &&
         now - g_last_jump_ms > 700) {
-      const float at = DistanceAlongWhisker(here, wanted, kWhiskerLength[0], kWaist);
+      const float at = g_precise ? g_route_low_at
+                                 : DistanceAlongWhisker(here, wanted, kWhiskerLength[0], kWaist);
       if (at <= kJumpAt) jump_low_now = true;
     }
   }
+  if (pursuing) wanted = Normalise(wanted + g_precise_delta);
+
   // Indoors he is steered by what he actually walks into, not by what a map
   // predicted. The whiskers stay for the open street, where a plan really
   // can be ignorant of a parked car; in here the game answers the question
@@ -1360,7 +1668,9 @@ bool DecideStick(short* out_x, short* out_y) {
     // moving. A turn is over in well under the time allowed; a wrong frame
     // never is.
     const float error = Normalise(self.heading - g_last_steered);
-    if (g_offset_seen && settled && std::fabs(error) > kFrameErrorRadians) {
+    const float frame_error_min = g_precise ? kGrossFrameError : kFrameErrorRadians;
+    const bool going_freely = !g_precise || g_route_free >= kRouteOpen;
+    if (g_offset_seen && settled && going_freely && std::fabs(error) > frame_error_min) {
       if (g_frame_error_since == 0 ||
           std::fabs(Normalise(steered - g_steered_at_error)) > kIntentSteadyRadians) {
         g_frame_error_since = now;
@@ -1629,6 +1939,12 @@ void WalkTo(std::vector<Vec3> route) {
   g_doorways.clear();
   g_backouts = 0;
   g_strict = false;
+  g_precise = false;
+  g_precise_delta = 0;
+  g_route_free = 0;
+  g_route_low_at = -1.0f;
+  g_route_blocked_since = 0;
+  g_local.ok = false;
   g_last_leg_is_the_destination = false;
   g_ring_ms = 0;
   g_ring_turned = false;
@@ -1673,6 +1989,7 @@ void WalkTo(std::vector<Vec3> route) {
   }
   const samp::LocalPed self = samp::ReadLocalPed();
   if (self.valid) g_window_pos = Vec3{self.x, self.y, self.z};
+  g_route_start = self.valid ? g_window_pos : g_route.front();
   // What is left, from the start. The journey reads it before the first
   // step is decided, and a zero there reads as "nearly there" - which, with
   // the walker held still, was a plan every four seconds until it gave up.
@@ -1687,6 +2004,27 @@ void WalkTo(std::vector<Vec3> route) {
 void SetStrictRoute(bool on) {
   std::lock_guard<std::mutex> lock(g_mutex);
   g_strict = on;
+}
+
+std::string LocalPictureText(float reach) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  const samp::LocalPed self = samp::ReadLocalPed();
+  if (!self.valid) return "(the character cannot be read)";
+  const Vec3 here{self.x, self.y, self.z};
+  nav::PaintLocal(here, std::max(kLocalRadius, reach + 0.5f),
+                  nav::LocalBodies(here, kLocalRadius), &g_local);
+  char head[160];
+  std::snprintf(head, sizeof(head),
+                "%d ground reads, %d entities%s; S him at (%.1f, %.1f, feet %.2f)\n",
+                g_local.ground_reads, g_local.entities, g_local.starved ? ", STARVED" : "",
+                here.x, here.y, here.z - 1.0f);
+  return head + PictureAbout(here, here, reach);
+}
+
+void SetPrecise(bool on) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_precise = on;
+  if (on) LOG_INFO("walk: following the route closely, steering on the local picture");
 }
 
 void SetLastLegIsTheDestination(bool it_is) {

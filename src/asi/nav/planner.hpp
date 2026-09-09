@@ -94,6 +94,9 @@ struct Plan {
   // Legs the strict test called blocked. Not a failure: see the note in the
   // planner about why these are reported rather than fatal.
   int              blocked_legs = 0;
+  // The route does not head for the target: it heads for the far end of
+  // wherever he is shut in, so that the next one can see further.
+  bool             exploring = false;
   int              jumps  = 0;        // over the whole route
   int              climbs = 0;
   int              drops  = 0;
@@ -146,6 +149,16 @@ void RememberObstacle(const Vec3& at, const char* what);
 void ForgetObstacles();
 // The ones still remembered, for the field to paint.
 std::vector<Vec3> RememberedObstacles();
+
+// Where a route went when it was exploring - walking to the far end of
+// somewhere he is shut in, rather than toward the target. The next such
+// route keeps away from these and carries on the same way, or he paces
+// from one end of a canal to the other for ever.
+void RememberExplored(const Vec3& from, const Vec3& to);
+std::vector<Vec3> ExploredPlaces();
+// The way the last exploring route went, or (0,0,0) if none.
+Vec3 ExploringWay();
+void ForgetExplored();
 
 // The last plan asked for, from anywhere - the panel draws it in the world.
 // Also the target, the reach fan the panel maintains itself, and what the

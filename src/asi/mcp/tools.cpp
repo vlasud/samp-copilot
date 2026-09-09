@@ -1449,6 +1449,27 @@ void RegisterTools(Server* server) {
   });
 
   server->AddTool({
+      "local_picture",
+      "What the walker sees round the character this instant: the local "
+      "picture it steers on, painted from the world's collision - a "
+      "quarter-metre cell each character, y upward. S is him, # something "
+      "solid from the waist up (or a ledge, or no ground), ~ something low "
+      "enough to hop, . open ground. Diagnostic.",
+      {{"type", "object"},
+       {"properties",
+        {{"reach", {{"type", "number"}, {"minimum", 1}, {"maximum", 6},
+                    {"description", "Metres each way; six at most."}}}}}},
+      [](const json& args) -> json {
+        const float reach = args.value("reach", 4.0f);
+        return Rpc::RunOnGameThread(
+            [reach]() -> json {
+              return json{{"picture", act::LocalPictureText(reach)}};
+            },
+            5000);
+      },
+  });
+
+  server->AddTool({
       "plan_field",
       "Plans a route over a walkability field painted from the world's own "
       "collision - the same way the room is mapped indoors, taken outside. "

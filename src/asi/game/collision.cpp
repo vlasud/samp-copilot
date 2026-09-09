@@ -76,8 +76,6 @@ constexpr unsigned kMaxFaceGroups = 4096;
 constexpr std::uint32_t kSphereSize = 0x14, kBoxSize = 0x1C, kTriangleSize = 0x08;
 constexpr float kVertexScale = 1.0f / 128.0f;
 constexpr int   kMaxPrimitives = 20000;
-// The box of a boom gate (bar_gatebox01), whose arm is bar_gatebar01, 968.
-constexpr std::int16_t kGateBox = 966;
 constexpr float kEpsilon = 1e-6f;
 
 // Our own grid: a square of sectors around wherever the questions are being
@@ -380,6 +378,9 @@ struct Paint {
   // no floors every cell uses the default, which is the old behaviour.
   const Floors* floors = nullptr;
   bool  vehicles = false;
+  // The entity being painted, for naming it if the sector faults.
+  std::uintptr_t last_entity = 0;
+  int   faults = 0;
   float band_lo = 0, band_hi = 0, floor_default = 0;
   float floor_min = 0, floor_max = 0;   // over the square, for the early out
 };
@@ -628,15 +629,6 @@ void PaintEntity(Paint& p, std::uintptr_t entity) {
     PaintPolygon(p, h, Hull(q, 8, h), z0, z1);
     return;
   }
-  // A boom gate is two things: the box with its two posts, and the arm,
-  // which the server swings up for a car that sounds its horn and drops
-  // again a few seconds later. The arm is painted as it stands, so a plan
-  // made while it was up walked him into it once it was down - and a
-  // character cannot sound a horn. The box's own bounding box runs from the
-  // pivot post to the rest post, which is exactly the arm when it is down,
-  // so the box is painted whole: the gate is shut to someone on foot
-  // whatever the arm is doing this moment, and the way round is the way.
-  if (model == kGateBox) PaintPolygon(p, h, Hull(q, 8, h), z0, z1);
   const unsigned spheres   = U16(data + kDataNumSpheres);
   const unsigned boxes     = U16(data + kDataNumBoxes);
   const unsigned triangles = U16(data + kDataNumTriangles);
@@ -690,7 +682,8 @@ void PaintEntity(Paint& p, std::uintptr_t entity) {
 void PaintList(Paint& p, std::uintptr_t head) {
   std::uint32_t node = U32(head);
   for (int n = 0; n < kMaxListNodes && Plausible(node); ++n) {
-    PaintEntity(p, U32(node));
+    p.last_entity = U32(node);
+    PaintEntity(p, p.last_entity);
     node = U32(node + 4);
   }
 }
@@ -712,10 +705,14 @@ bool PaintSector(Paint* p, int sx, int sy, const std::uintptr_t* bucket, int cou
       PaintList(*p, repeat + kRepeatObjects);
       if (p->vehicles) PaintList(*p, repeat + kRepeatVehicles);
     } else {
-      for (int i = 0; i < count; ++i) PaintEntity(*p, bucket[i]);
+      for (int i = 0; i < count; ++i) {
+        p->last_entity = bucket[i];
+        PaintEntity(*p, bucket[i]);
+      }
     }
     return true;
   } __except (EXCEPTION_EXECUTE_HANDLER) {
+    ++p->faults;
     return false;
   }
 }
@@ -1052,8 +1049,21 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
         const int bucket = BucketOf(sx, sy);
         const std::uintptr_t* items = bucket >= 0 ? g_bucket[bucket].data() : nullptr;
         const int count = bucket >= 0 ? static_cast<int>(g_bucket[bucket].size()) : 0;
-        PaintSector(&p, sx, sy, items, count, moving);
+        if (!PaintSector(&p, sx, sy, items, count, moving)) {
+          // Said once in a while, with the entity it stopped at: a sector
+          // that faults loses everything asked for after the fault, and
+          // for a long time that was every object the server had placed
+          // there, asked for last, and nobody knew.
+          static unsigned long long said_ms = 0;
+          const unsigned long long now = GetTickCount64();
+          if (now - said_ms > 5000) {
+            said_ms = now;
+            LOG_WARN("collision: painting sector ({},{}) {} faulted at entity 0x{:X}",
+                     sx, sy, moving ? "moving things" : "statics", p.last_entity);
+          }
+        }
       }
+  out->faulted = p.faults;
   // And whoever is standing about. A player in a doorway is as solid as the
   // doorway, and he is the one obstacle that walks off on his own - which is
   // why the map is redrawn rather than remembered.

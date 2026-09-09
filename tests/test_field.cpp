@@ -4,6 +4,7 @@
 // without a world. A route that cuts the corner of a wall, hugs a wall when
 // there is room, or climbs a ledge is caught here rather than on a
 // pavement.
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -58,6 +59,55 @@ int LeastClearance(const Grid& g, const std::vector<int>& cells) {
 
 void TestField() {
   std::printf("field\n");
+
+  // A ramp of one metre in one, read every metre the way the world is read,
+  // is a ramp once the readings are filled in - not a flight of steps a
+  // metre high, which is what copying the corner reading made of it, and
+  // what walled the character into a storm drain with twenty thousand
+  // square metres of floor found round him and nowhere to walk.
+  {
+    Grid g;
+    g.cell = 0.25f;
+    g.x0 = 0;
+    g.y0 = 0;
+    g.Resize(80, 40);          // 20 x 10 m
+    const int stride = 4;      // a reading every metre
+    for (int iy = 0; iy < g.H; iy += stride)
+      for (int ix = 0; ix < g.W; ix += stride) {
+        const float x = ix * g.cell;
+        const float z = x < 5.0f ? 0.0f : (x < 15.0f ? x - 5.0f : 10.0f);
+        const int at = g.index(ix, iy);
+        g.known[at] = 1;
+        g.ground[at] = z;
+      }
+    gtabot::nav::SmoothBetweenReadings(&g, stride);
+    int unknown = 0;
+    float tallest = 0;
+    for (int iy = 0; iy < g.H; ++iy)
+      for (int ix = 0; ix + 1 < g.W; ++ix) {
+        if (g.known[g.index(ix, iy)] != 1) ++unknown;
+        tallest = std::max(tallest, std::fabs(g.ground[g.index(ix + 1, iy)] -
+                                              g.ground[g.index(ix, iy)]));
+      }
+    check::Is(unknown, 0, "every cell of the ramp has a floor");
+    check::True(tallest < 0.30f, "and no step on it is taller than a kerb");
+    check::Is(gtabot::nav::MarkLedges(&g, gtabot::nav::SearchRules{}.max_step), 0,
+              "so nothing on it reads as the lip of a drop");
+    bool reached = false;
+    const std::vector<int> up = Route(&g, Vec3{1.0f, 5.0f, 0}, Vec3{19.0f, 5.0f, 10}, &reached);
+    check::True(reached, "and he can walk up it");
+  }
+  // Where there is no reading anywhere near, there is no floor.
+  {
+    Grid g;
+    g.cell = 0.25f;
+    g.Resize(16, 16);
+    gtabot::nav::SmoothBetweenReadings(&g, 4);
+    int known = 0;
+    for (int at = 0; at < g.W * g.H; ++at)
+      if (g.known[at] == 1) ++known;
+    check::Is(known, 0, "no readings, no floor");
+  }
 
   // A wall across the room with a gap of three cells (1.5 m) in it: the
   // way goes through the gap and nowhere else.

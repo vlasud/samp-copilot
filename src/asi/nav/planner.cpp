@@ -173,6 +173,9 @@ constexpr unsigned long long kPlanDeadlineMs = 12000;
 constexpr float kFieldShortOk = 40.0f;
 // And how much nearer a partial route has to bring him to count as a stage.
 constexpr float kFieldStageMin = 40.0f;
+// The least a route may be and still count as a stage, when it at least
+// ends nearer the target than it began.
+constexpr float kFieldStageLeast = 5.0f;
 // A hillside: how much the ground may fall or rise over a quarter of a
 // metre and still be a surface he walks (or slides) on rather than an edge.
 constexpr float kSlopeSubStep    = 0.25f;
@@ -678,11 +681,20 @@ struct Planner::Job {
     // a side and a journey is often longer, so a route to the field's edge
     // is a stage, not a failure - the journey plans again from where a leg
     // ends, as it always has. What is refused is a route that got nowhere.
+    // A stage need not be long, only real. What follows the field is the
+    // pavement graph, whose legs nothing has checked: from the bottom of
+    // the canals it drew a sixty-metre leg straight through the wall, and
+    // the walker spent every one of its eight tries standing against that
+    // wall. Anything the field found - it is drawn from the world's own
+    // collision - is worth more than that, so a route of a few metres is
+    // taken as a stage and the journey plans again from its end.
     const float straight = Distance2D(a, b);
     const bool near_enough = r.ok && !r.reaches_target && r.points.size() >= 2 &&
                              (r.short_by_m <= kFieldShortOk ||
-                              (r.length_m >= kFieldStageMin &&
-                               r.short_by_m <= straight - kFieldStageMin));
+                              r.length_m >= kFieldStageMin ||
+                              r.exploring ||
+                              (r.length_m >= kFieldStageLeast &&
+                               r.short_by_m <= straight - kFieldStageLeast));
     if (r.ok && (r.reaches_target || near_enough) && r.points.size() >= 2) {
       plan.waypoints = r.points;
       plan.legs.clear();
@@ -695,6 +707,8 @@ struct Planner::Job {
         plan.legs.push_back(leg);
       }
       plan.length_m = r.length_m;
+      plan.exploring = r.exploring;
+      if (r.exploring) RememberExplored(a, r.points.back());
       plan.ok = true;
       plan.note = r.note;
       source = "field";
@@ -1608,6 +1622,38 @@ void RememberObstacle(const Vec3& at, const char* what) {
   g_obstacles.push_back(Obstacle{at, now + kObstacleMemoryMs});
   LOG_INFO("nav: remembering {} at ({:.1f}, {:.1f}) - the next plan goes "
            "round it", what, at.x, at.y);
+}
+
+std::vector<Vec3> g_explored;
+Vec3 g_exploring_way{0, 0, 0};
+
+void RememberExplored(const Vec3& from, const Vec3& to) {
+  std::lock_guard<std::mutex> lock(g_obstacle_mutex);
+  const float dx = to.x - from.x, dy = to.y - from.y;
+  const float span = std::sqrt(dx * dx + dy * dy);
+  if (span > 1.0f) g_exploring_way = Vec3{dx / span, dy / span, 0};
+  for (const Vec3& was : g_explored)
+    if (Distance2D(was, to) < 8.0f) return;
+  if (g_explored.size() >= 12) g_explored.erase(g_explored.begin());
+  g_explored.push_back(to);
+  LOG_INFO("nav: remembering that he explored as far as ({:.0f}, {:.0f}) - the "
+           "next look goes on the same way, not back", to.x, to.y);
+}
+
+std::vector<Vec3> ExploredPlaces() {
+  std::lock_guard<std::mutex> lock(g_obstacle_mutex);
+  return g_explored;
+}
+
+Vec3 ExploringWay() {
+  std::lock_guard<std::mutex> lock(g_obstacle_mutex);
+  return g_exploring_way;
+}
+
+void ForgetExplored() {
+  std::lock_guard<std::mutex> lock(g_obstacle_mutex);
+  g_explored.clear();
+  g_exploring_way = Vec3{0, 0, 0};
 }
 
 std::vector<Vec3> RememberedObstacles() {

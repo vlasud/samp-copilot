@@ -67,6 +67,12 @@ struct FieldResult {
   int refused_shut = 0, refused_step = 0, refused_corner = 0;
   int ledges = 0;   // cells shut for standing at the lip of a drop
   int starved = 0;  // tiles whose paint ran out of cell budget - short pictures
+  int settled = 0;  // reading cells the ground flood reached
+  // Set when the route does not head for the target at all but for the far
+  // end of everywhere he can reach: he is shut in - a canal, a yard, a
+  // basement - and the way out has to be walked to before it can be seen.
+  bool exploring = false;
+  int faulted = 0;  // sectors whose paint faulted partway, over all tiles
   float tallest_step = 0;
   // One character a cell, every other cell, rows from the north down.
   std::vector<std::string> picture;

@@ -50,11 +50,31 @@ constexpr float kPersonRadius = 0.45f;
 // take the reading beside them. A kerb is not lost at that spacing, and the
 // reads are a sixteenth of what every cell would cost.
 constexpr int   kGroundStride = 4;
+// How much the floor may rise or fall between two readings a metre apart
+// and still be the same floor. A staircase at forty-five degrees is one
+// metre in one; half a metre more allows for a steep one and for the
+// reading landing on the edge of a step. Whether he can actually take the
+// step is the search's business, not the reading's.
+constexpr float kStepChain = 1.5f;
+// How many reads a cell that will not settle may cost before it is left
+// alone: one from each side, so a hilltop refused from the steep side can
+// still be reached from the gentle one.
+constexpr int   kGroundTries = 4;
 constexpr int   kReadsPerStep = 800;
 constexpr int   kExpandPerStep = 6000;
 // How far a reading may differ from the height it was looked for at and
 // still be the ground rather than something else.
 constexpr float kSameLevel = 6.0f;
+// How much nearer the target a route must end for it to count as heading
+// there at all. Under this he is shut in and the route explores instead.
+constexpr float kProgressWanted = 4.0f;
+// And an exploring route is only worth walking if it goes somewhere.
+constexpr float kExploreLeast = 12.0f;
+// How near somewhere already explored a new exploring route may end.
+constexpr float kExploredKeepOut = 25.0f;
+// How much a cell that carries on the way the last one went is worth over
+// one that goes back: half again at dead ahead, half as much behind.
+constexpr float kCarryOn = 0.5f;
 // A pulled leg no longer than this, so the walker replans on a scale it can
 // see; and the squeeze out of whatever the start is painted inside.
 constexpr float kMaxLeg = 60.0f;
@@ -71,6 +91,40 @@ constexpr float kStuckDisc = 1.0f;
 constexpr float kStuckKeepOut = 1.5f;
 constexpr float kPedOrigin = 1.0f;
 
+// The surface a cell's floor is on, read from `from_z`, which is the floor
+// of the neighbour it is being chained from. True when there is one within
+// a stride's rise of that.
+//
+// The terrain decides wherever the terrain is there: a bench top, a car
+// roof and a crate lid are all solid ground to a collision test, and a
+// street where every one of them counted as floor would have him walking
+// over the furniture. Where the terrain is not there - a room a server
+// built out of objects, a platform, a pier - the objects are the floor,
+// because they are all there is to stand on, and a picture that says
+// otherwise says the inside of every custom building is a wall.
+bool FloorNear(float x, float y, float from_z, float step, float* found) {
+  float water = 0;
+  if (game::col::WaterAt(x, y, &water) && water > from_z - step + 0.5f) {
+    float bed = 0;
+    if (!game::col::GroundBelow(x, y, from_z + step + 0.3f, &bed, false) ||
+        water > bed + 0.5f)
+      return false;   // water over it: not somewhere to walk
+  }
+  float terrain = 0;
+  if (game::col::GroundBelow(x, y, from_z + step + 0.3f, &terrain, false) &&
+      std::fabs(terrain - from_z) <= step) {
+    *found = terrain;
+    return true;
+  }
+  float solid = 0;
+  if (game::col::GroundBelow(x, y, from_z + step + 0.3f, &solid, true) &&
+      std::fabs(solid - from_z) <= step) {
+    *found = solid;
+    return true;
+  }
+  return false;
+}
+
 float Away(const Vec3& a, const Vec3& b) {
   const float dx = a.x - b.x, dy = a.y - b.y;
   return std::sqrt(dx * dx + dy * dy);
@@ -86,16 +140,23 @@ struct Field::Work {
   Grid  grid;
   float ref_z = 0;
 
-  // Reading the ground, a batch a step, in two passes.
-  int ground_at = 0;
-  int ground_pass = 0;
+  // Reading the ground: a flood outward from where he stands, a batch a
+  // step. The queue holds the settled cells whose neighbours are still to
+  // be read; `tries` counts the reads spent on a cell that has not settled,
+  // so a hilltop reached from the steep side can still be reached from the
+  // gentle one without the reading going round for ever.
+  bool ground_seeded = false;
+  std::vector<int> queue;
+  std::size_t queue_at = 0;
+  std::vector<std::uint8_t> tries;
 
   // Painting, a tile a step.
   std::vector<Vec3> tile_centres;
   std::size_t tile_i = 0;
   std::vector<game::col::Body> bodies;
 
-  int start = -1, goal = -1;
+  int start = -1, goal = -1, end = -1;
+  bool exploring = false;
   Searcher searcher;
 };
 
@@ -224,60 +285,85 @@ bool Field::Step() {
     }
 
     case Phase::kGround: {
-      // Two passes. The first reads every reading cell from the height of
-      // the start: on a flat city that settles nearly all of them. The
-      // second, only for the cells the first could not settle, reads from
-      // the height of a neighbour that was settled, so a hillside is
-      // followed up. Chaining from the neighbour for every cell was the
-      // mistake before: inside a building the chain climbed storey by
-      // storey, a tile's floor came out at fifty metres, and at the wall the
-      // chain came back down to a street it no longer believed in and left
-      // it unknown.
-      int reads = 0;
-      const int n = g.W * g.H;
-      while (w.ground_at < n && reads < kReadsPerStep) {
-        const int at = w.ground_at++;
-        const int ix = at % g.W, iy = at / g.W;
-        if (ix % kGroundStride != 0 || iy % kGroundStride != 0) continue;
-        if (w.ground_pass == 1 && g.known[at] != 2) continue;   // settled already
-        float start_z = w.ref_z;
-        if (w.ground_pass == 1) {
-          bool have = false;
-          const int dx[4] = {-kGroundStride, kGroundStride, 0, 0};
-          const int dy[4] = {0, 0, -kGroundStride, kGroundStride};
-          for (int d = 0; d < 4 && !have; ++d)
-            if (g.inside(ix + dx[d], iy + dy[d]) &&
-                g.known[g.index(ix + dx[d], iy + dy[d])] == 1) {
-              start_z = g.ground[g.index(ix + dx[d], iy + dy[d])];
-              have = true;
-            }
-          if (!have) continue;
-        }
-        const Vec3 c = g.centre(at);
-        float found = 0, water = 0;
-        ++reads;
+      // The ground is flooded outward from the cell he is standing on, not
+      // read square by square from his own height. Each cell is read from
+      // the height of a settled neighbour a metre away and kept when it is
+      // within a stride's rise of it, so the reading follows the floor he
+      // is on wherever it goes - up a ramp, down a slipway, round a corner
+      // - and stops where that floor stops.
+      //
+      // Reading everything from his own height instead is what left him at
+      // the bottom of the canals in the middle of town with half the field
+      // unknown: the canal floor is nine metres below the street, every
+      // reading up there was refused for being too far from his feet, and
+      // the search - which treats unknown as solid - had nowhere to go but
+      // fourteen metres along the bottom. He replanned that same fourteen
+      // metres every two seconds.
+      if (!w.ground_seeded) {
+        w.ground_seeded = true;
+        w.tries.assign(static_cast<std::size_t>(g.W) * g.H, 0);
+        int sx = 0, sy = 0;
+        if (!g.cell_of(w.from, &sx, &sy))
+          return finish("the start is outside the field");
+        sx -= sx % kGroundStride;
+        sy -= sy % kGroundStride;
+        const int seed = g.index(sx, sy);
+        const Vec3 c = g.centre(seed);
+        float found = 0;
         ++result_.ground_reads;
-        // From the game's memory directly, not through the guarded call:
-        // that one spends a slot per read out of a small reserve per frame
-        // and, once the reserve is gone, answers "no ground" - which is how
-        // forty per cent of a street came back unknown and walled him in.
-        // Objects are left out: a bench top is not a floor.
-        if (game::col::GroundBelow(c.x, c.y, start_z + 4.0f, &found, false) &&
-            std::fabs(found - start_z) < kSameLevel &&
-            !(game::col::WaterAt(c.x, c.y, &water) && water > found + 0.5f)) {
-          g.known[at] = 1;
-          g.ground[at] = found;
-        } else {
-          g.known[at] = 2;
+        // Where he is standing is ground whatever the read says: it is the
+        // one square in the world that is known to hold him up.
+        g.ground[seed] =
+            (game::col::GroundBelow(c.x, c.y, w.ref_z + 4.0f, &found, false) &&
+             std::fabs(found - w.ref_z) < kSameLevel)
+                ? found
+                : w.ref_z;
+        g.known[seed] = 1;
+        w.queue.push_back(seed);
+      }
+      int reads = 0;
+      const int dx[4] = {kGroundStride, -kGroundStride, 0, 0};
+      const int dy[4] = {0, 0, kGroundStride, -kGroundStride};
+      while (w.queue_at < w.queue.size() && reads < kReadsPerStep) {
+        const int at = w.queue[w.queue_at++];
+        const int ix = at % g.W, iy = at / g.W;
+        const float from_z = g.ground[at];
+        for (int d = 0; d < 4; ++d) {
+          const int nx = ix + dx[d], ny = iy + dy[d];
+          if (!g.inside(nx, ny)) continue;
+          const int next = g.index(nx, ny);
+          if (g.known[next] == 1) continue;
+          if (w.tries[next] >= kGroundTries) continue;
+          ++w.tries[next];
+          const Vec3 c = g.centre(next);
+          float found = 0;
+          ++reads;
+          ++result_.ground_reads;
+          // Read from the game's memory directly rather than through the
+          // guarded call, which spends a slot per read out of a small
+          // reserve and then answers "no ground" - forty per cent of a
+          // street came back unknown that way.
+          if (FloorNear(c.x, c.y, from_z, kStepChain, &found)) {
+            g.known[next] = 1;
+            g.ground[next] = found;
+            w.queue.push_back(next);
+          }
         }
       }
-      if (w.ground_at >= n) {
-        if (w.ground_pass == 0) {
-          w.ground_pass = 1;
-          w.ground_at = 0;
-        } else {
-          w.phase = Phase::kPaint;
-        }
+      if (w.queue_at >= w.queue.size()) {
+        // Whatever the flood never reached is not ground he can walk on.
+        // Only the cells it actually read are settled either way: the ones
+        // between them are still nought, and the clearance phase gives each
+        // of those the reading it belongs to. Marking every cell here
+        // instead left fifteen cells in sixteen saying "no ground", and a
+        // field of eighty-five per cent unknown is a field of walls.
+        for (int iy = 0; iy < g.H; iy += kGroundStride)
+          for (int ix = 0; ix < g.W; ix += kGroundStride) {
+            const int at = g.index(ix, iy);
+            if (g.known[at] != 1) g.known[at] = 2;
+          }
+        result_.settled = static_cast<int>(w.queue.size());
+        w.phase = Phase::kPaint;
       }
       return false;
     }
@@ -336,6 +422,7 @@ bool Field::Step() {
         return false;
       ++result_.tiles;
       if (fp.starved) ++result_.starved;
+      result_.faulted += fp.faulted;
       const int dx = static_cast<int>(std::lround((fp.x0 - g.x0) / kCell));
       const int dy = static_cast<int>(std::lround((fp.y0 - g.y0) / kCell));
       for (int iy = 0; iy < fp.side; ++iy)
@@ -350,14 +437,7 @@ bool Field::Step() {
 
     case Phase::kClearance: {
       // The cells between the readings take the reading beside them.
-      for (int iy = 0; iy < g.H; ++iy)
-        for (int ix = 0; ix < g.W; ++ix) {
-          const int at = g.index(ix, iy);
-          if (g.known[at] != 0) continue;
-          const int src = g.index(ix - ix % kGroundStride, iy - iy % kGroundStride);
-          g.known[at] = g.known[src];
-          g.ground[at] = g.ground[src];
-        }
+      SmoothBetweenReadings(&g, kGroundStride);
       // The lip of every drop is a wall as far as the clearance is concerned.
       result_.ledges = MarkLedges(&g, SearchRules{}.max_step);
       Chamfer(&g);
@@ -406,7 +486,61 @@ bool Field::Step() {
     }
 
     case Phase::kSearch: {
-      if (w.searcher.Step(kExpandPerStep)) w.phase = Phase::kPull;
+      if (!w.searcher.Step(kExpandPerStep)) return false;
+      // Where the search reached the target, or got meaningfully nearer to
+      // it, that is the way. Where it did not - he is shut in somewhere and
+      // the nearest point of his pen to the target is where he already
+      // stands - the route goes to the far end of the pen instead. That is
+      // how anybody gets out of a canal: walk along it until the way out
+      // comes into view, which for the field means until the next box,
+      // drawn from where this route ends, holds the ramp.
+      w.end = w.searcher.end();
+      if (!w.searcher.reached_goal()) {
+        const float from_start = Away(w.from, w.to);
+        const float gained = from_start - w.searcher.nearest_away();
+        if (gained < kProgressWanted) {
+          // The far end, but not the one he came from. Every cell the
+          // search reached is scored by what it cost to walk to - the
+          // further the better - with a cell that carries on the way the
+          // last exploring route went worth half again as much, and one
+          // within a stone's throw of somewhere already explored worth
+          // nothing. Without that he walked to one end of the canal, then
+          // the other, then the first again, for as long as anybody let him.
+          const std::vector<Vec3> explored = ExploredPlaces();
+          const Vec3 way = ExploringWay();
+          const bool have_way = way.x != 0 || way.y != 0;
+          int best = -1;
+          float best_score = 0;
+          for (int at = 0; at < g.W * g.H; ++at) {
+            const float cost = w.searcher.cost(at);
+            if (cost <= 0) continue;
+            const Vec3 c = g.centre(at);
+            const float from_here = Away(c, w.from);
+            if (from_here < kExploreLeast) continue;
+            bool been = false;
+            for (const Vec3& was : explored)
+              if (Away(c, was) <= kExploredKeepOut) { been = true; break; }
+            if (been) continue;
+            float score = cost;
+            if (have_way) {
+              const float along = ((c.x - w.from.x) * way.x +
+                                   (c.y - w.from.y) * way.y) / from_here;
+              score *= 1.0f + kCarryOn * along;
+            }
+            if (score > best_score) {
+              best_score = score;
+              best = at;
+            }
+          }
+          if (best < 0) best = w.searcher.furthest();
+          if (best >= 0 && Away(g.centre(best), w.from) >= kExploreLeast) {
+            w.end = best;
+            w.exploring = true;
+            result_.exploring = true;
+          }
+        }
+      }
+      w.phase = Phase::kPull;
       return false;
     }
 
@@ -423,7 +557,7 @@ bool Field::Step() {
         result_.ok = false;
         return finish("no way out of the start cell");
       }
-      const std::vector<int> cells = w.searcher.Cells();
+      const std::vector<int> cells = w.searcher.CellsTo(w.end);
       const std::vector<int> pulled = Pull(g, cells, kMaxLeg, SearchRules{}.max_step);
       if (!result_.reaches_target) {
         const int ex = end % g.W, ey = end / g.W;
@@ -481,14 +615,17 @@ bool Field::Step() {
       char note[260];
       std::snprintf(note, sizeof(note),
                     "collision field %dx%d at %.1f m: %d tiles, %d ground reads, "
-                    "%d%% solid, %d%% unknown, %d ledge cells, %d starved, route %.0f m in %d legs%s",
+                    "%d%% solid, %d%% unknown, %d ledge cells, %d starved, %d faulted, "
+                    "%d cells of floor, route %.0f m in %d legs%s",
                     g.W, g.H, kCell, result_.tiles, result_.ground_reads,
                     static_cast<int>(100.0f * result_.blocked / std::max(1, g.W * g.H)),
                     static_cast<int>(100.0f * result_.unknown / std::max(1, g.W * g.H)),
-                    result_.ledges, result_.starved,
+                    result_.ledges, result_.starved, result_.faulted, result_.settled,
                     result_.length_m, static_cast<int>(result_.points.size()) - 1,
                     result_.reaches_target ? "" : " - ends short of the target");
       result_.note = note;
+      if (result_.exploring)
+        result_.note += " - shut in, walking to the far end of what he can reach";
       if (!result_.reaches_target)
         result_.note += " by " + std::to_string(static_cast<int>(result_.short_by_m)) + " m";
       return finish(note);

@@ -42,6 +42,10 @@ constexpr std::size_t kStagingNodes = 600;
 constexpr float kStreamedRadius = 240.0f;
 // Decisions in a row that end no nearer than they started.
 constexpr int kMaxFailures = 8;
+// Stages that head away from the target on purpose - along a canal, out of
+// a yard - before the journey calls it hopeless. Each is worth up to a
+// hundred and eighty metres of walking, so this is a long way.
+constexpr int kMaxExploringStages = 10;
 // Between decisions, so a failed plan is not asked for again the same frame.
 constexpr unsigned long long kReplanGapMs = 400;
 // How much of a frame the planner may take. Four milliseconds beside a
@@ -68,6 +72,7 @@ bool        g_travelling = false;
 Vec3        g_destination;
 int         g_replans  = 0;
 int         g_failures = 0;
+int         g_exploring = 0;
 bool        g_reaching = false;
 float       g_arrived = kArrived;
 std::string g_note = "idle";
@@ -168,6 +173,11 @@ bool WalkGreedy(const Vec3& here, bool bridge) {
   g_route = {point};
   WalkTo({point});
   SetStrictRoute(false);
+  // Felt out or not, it is walked the same way: on the picture of the few
+  // metres round him. The old steerer - whiskers, leaning, going round on
+  // a chosen side - is what wandered, and a leg walked while a plan is
+  // being worked out is no reason to go back to it.
+  SetPrecise(true);
   SetLastLegIsTheDestination(Distance2D(point, g_destination) <= g_arrived + 1.0f);
   g_phase = Phase::kWalking;
   return true;
@@ -235,7 +245,10 @@ void Decide(const Vec3& here) {
       g_indoors = true;
       g_route.assign(known.begin() + 1, known.end());
       WalkTo(g_route);
-      SetStrictRoute(true);
+      // Indoors as out: the route is followed closely on the picture of the
+      // few metres round him, which is painted from the same collision the
+      // room was mapped from. One way of steering rather than two.
+      SetPrecise(true);
       SetLastLegIsTheDestination(true);
       g_phase = Phase::kWalking;
       g_bridged = false;
@@ -290,6 +303,14 @@ bool Progress(float straight) {
     g_failures = 0;
     return true;
   }
+  // Walking the length of a canal gets him no nearer the far side of town
+  // and is still the only way out of the canal. A stage the planner drew
+  // for that reason is not a decision that got nowhere.
+  if (g_planner.result().ok && g_planner.result().exploring &&
+      ++g_exploring < kMaxExploringStages) {
+    g_failures = 0;
+    return true;
+  }
   if (++g_failures >= kMaxFailures) {
     StopLocked("gave up - " + std::to_string(kMaxFailures) +
                " decisions in a row got no closer");
@@ -334,8 +355,9 @@ bool WalkTheRoom(const Vec3& here) {
                              edge.y + dy / span * kThroughTheWayOut, edge.z});
   }
   WalkTo(g_route);
-  // Indoors the map is the movement, not a suggestion to a steerer.
-  SetStrictRoute(true);
+  // Indoors the map is the movement, not a suggestion to a steerer - and
+  // the picture of the few metres round him is what keeps him on it.
+  SetPrecise(true);
   SetLastLegIsTheDestination(
       !g_route.empty() &&
       Distance2D(g_route.back(), g_destination) <= g_arrived + 1.0f);
@@ -384,6 +406,7 @@ void OnPlanFinished(const Vec3& here) {
     g_route.assign(plan.waypoints.begin() + 1, plan.waypoints.end());
     WalkTo(g_route);
     SetStrictRoute(false);
+    SetPrecise(true);
     SetLastLegIsTheDestination(
         !g_route.empty() &&
         Distance2D(g_route.back(), g_destination) <= g_arrived + 1.0f);
@@ -430,6 +453,8 @@ void TravelTo(const Vec3& destination, bool height_unknown,
   g_travelling  = true;
   g_replans     = 0;
   g_failures    = 0;
+  g_exploring   = 0;
+  nav::ForgetExplored();
   g_reaching    = false;
   g_indoors     = false;
   g_been_somewhere = false;
