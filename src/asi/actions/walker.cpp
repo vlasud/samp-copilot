@@ -1145,6 +1145,25 @@ bool DecideStick(short* out_x, short* out_y) {
     }
   }
 
+  // A leg the map drew inside something solid - a chair, a counter, a
+  // parked crate - cannot be reached, and standing against it waiting to
+  // reach it is how a walk ends up handing itself back for ever. Where the
+  // picture says the point is inside something and there is another point
+  // after it, that one becomes the leg. The last one is never skipped: it
+  // is where he was sent, and standing against what he was sent to is
+  // arriving.
+  if (g_precise && g_local.ok) {
+    while (g_leg + 1 < g_route.size() && g_local.Shut(g_route[g_leg]) &&
+           Distance2D(here, g_route[g_leg]) < kLocalRadius - 0.5f) {
+      LOG_INFO("walk: leg {} at ({:.1f},{:.1f}) is inside something - taking the "
+               "next one instead", static_cast<int>(g_leg) + 1,
+               g_route[g_leg].x, g_route[g_leg].y);
+      ++g_leg;
+      g_best_distance = 0;
+      g_closer_ms = now;
+    }
+  }
+
   const Vec3& target = g_route[g_leg];
   const float distance = Distance2D(here, target);
   g_to_next = distance;
@@ -1316,7 +1335,12 @@ bool DecideStick(short* out_x, short* out_y) {
         std::vector<samp::NearObject> things =
             samp::DoorsNear(here, kDoorSearch, 3);
         bool is_a_door = !things.empty();
-        if (things.empty())
+        // Anything else of the server's is furniture, not a door. Leaning
+        // on it twice for five seconds and then handing the route back is
+        // what a chair by the reception desk cost him, over and over, while
+        // the picture round him could see perfectly well how to walk past
+        // it. Only worth trying when there is no picture to steer by.
+        if (things.empty() && !g_precise)
           things = samp::ObjectsNear(ahead_of_him, kDoorReach, 3);
         if (!things.empty()) {
           const Vec3 what = things.front().at;
@@ -1498,7 +1522,9 @@ bool DecideStick(short* out_x, short* out_y) {
       g_lean = 0;
       g_wall = false;
       g_follow_side = 0;
-      nav::PaintLocal(here, kLocalRadius, nav::LocalBodies(here, kLocalRadius), &g_local);
+      const Vec3 sent_to = g_route.empty() ? here : g_route.back();
+      nav::PaintLocal(here, kLocalRadius,
+                      nav::LocalBodies(here, kLocalRadius, &sent_to), &g_local);
       float low_at = -1.0f;
       const float free = RouteAhead(here, kRouteLook, &low_at);
       g_route_free = free;

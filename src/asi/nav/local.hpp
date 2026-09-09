@@ -64,6 +64,12 @@ bool PaintLocal(const Vec3& here, float radius,
 
 // The bodies for a picture about `here`: everybody within reach but the
 // character himself, and the pickups and checkpoint he is not standing in.
-std::vector<game::col::Body> LocalBodies(const Vec3& here, float radius);
+// `going_to`, when given, is where he is headed: a pickup there is what he
+// was sent to walk into and is not painted at all. Without that the arrow
+// he was sent to stand on is a solid disc four and a half metres across
+// and he circles it for ever - which is every shop door, every checkpoint
+// and the way out of the hospital.
+std::vector<game::col::Body> LocalBodies(const Vec3& here, float radius,
+                                         const Vec3* going_to = nullptr);
 
 }  // namespace gtabot::nav

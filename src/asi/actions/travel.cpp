@@ -260,6 +260,15 @@ void Decide(const Vec3& here) {
       return;
     }
 
+    // The field is not asked in here. It reads the ground every metre, and
+    // a doorway is a metre wide: indoors three quarters of it comes back
+    // unknown, whole rooms come out cut off from the corridor outside
+    // them, and the routes it draws are nonsense - twenty-five metres to
+    // reach a bed eight metres away, then not a step walked. Tried and
+    // measured, against a room mapper that walks four errands out of five.
+    // Making it work in here means reading the floor every half metre when
+    // the place is small, which is a change to the field and not to this.
+
     // The map is expensive and only redrawn every so often. A decision that
     // arrives inside that gap has not failed at anything - it has arrived
     // early - and counting it as a failure gave up on the journey eight
@@ -388,7 +397,7 @@ bool WalkTheRoom(const Vec3& here) {
 
 void OnPlanFinished(const Vec3& here) {
   const nav::Plan& plan = g_planner.result();
-  if (plan.ok) g_indoors = false;
+  if (plan.ok) g_indoors = LooksIndoors(here);
   if (plan.ok && plan.waypoints.size() >= 2) {
     nav::SetDebugPlan(g_aim_point, plan);
     // The route itself, so a poor one can be read back off the log: each

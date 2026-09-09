@@ -80,7 +80,8 @@ float Away(const Vec3& a, const Vec3& b) {
 
 }  // namespace
 
-std::vector<game::col::Body> LocalBodies(const Vec3& here, float radius) {
+std::vector<game::col::Body> LocalBodies(const Vec3& here, float radius,
+                                         const Vec3* going_to) {
   std::vector<game::col::Body> bodies;
   for (const game::Ped& who : game::PedsNear(here, radius + 1.0f, 32)) {
     if (Away(who.position, here) < 0.8f) continue;   // himself
@@ -93,12 +94,14 @@ std::vector<game::col::Body> LocalBodies(const Vec3& here, float radius) {
   // he stands, and whatever it does it has done.
   for (const samp::Pickup& pickup : samp::PickupsNear(here, radius + kPickupDisc, 64)) {
     if (Away(pickup.at, here) <= kPickupDisc + 0.5f) continue;
+    if (going_to != nullptr && Away(pickup.at, *going_to) <= kPickupDisc + 0.5f) continue;
     bodies.push_back(game::col::Body{pickup.at.x, pickup.at.y, pickup.at.z, kPickupDisc});
   }
   const samp::Checkpoint cp = samp::CheckpointNow(here);
   if (cp.shown) {
     const float disc = std::max(cp.size + 2.0f, kPickupDisc);
-    if (Away(cp.at, here) > disc + 0.5f)
+    const bool sent_there = going_to != nullptr && Away(cp.at, *going_to) <= disc + 1.0f;
+    if (Away(cp.at, here) > disc + 0.5f && !sent_there)
       bodies.push_back(game::col::Body{cp.at.x, cp.at.y, cp.at.z, disc});
   }
   return bodies;
