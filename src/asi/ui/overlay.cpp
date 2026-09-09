@@ -31,6 +31,8 @@
 #include "game/api_trace.hpp"
 #include "game/collision.hpp"
 #include "game/watchpoint.hpp"
+#include <fstream>
+
 #include "hooks/windowmode.hpp"
 #include "game/pad_watch.hpp"
 #include "game/paths.hpp"
@@ -394,6 +396,45 @@ void LogFocusMessage(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
 }
 
 
+// Typing a task for the brain, here in the panel.
+//
+// The brain sets its own goals, and that is the point of it; this is the way
+// somebody watching leans over and says "go and buy a car" without stopping
+// anything. It is written to `bot.task` beside the module, which is what the
+// brain reads, so the panel and the file are never two different answers.
+//
+// The letters come from the same WM_CHAR messages the game would have had -
+// in this mode nothing reaches the game anyway - so a Russian keyboard types
+// Russian, one byte a letter, and the bytes go to the file as UTF-8.
+bool        g_typing_task = false;
+std::string g_task_typed;
+// The Enter that opens the field arrives as a message a moment after the
+// menu has acted on it, and without this it closed the field again at once.
+unsigned long long g_typing_since = 0;
+
+// The buffer holds UTF-8, because that is what the panel's font draws and
+// what the file wants. The keyboard hands over one CP1251 byte a letter -
+// this window is an ANSI one - so each letter is widened as it arrives.
+// Keeping the raw bytes drew nothing: every Russian letter was an empty box.
+void SaveTypedTask() {
+  std::ofstream file(ModuleDirectory() + "bot.task", std::ios::binary);
+  if (file) file << g_task_typed;
+}
+
+// One whole letter off the end: a Russian one is two bytes, and dropping
+// half of it leaves a broken character behind.
+void RubOutLastLetter() {
+  while (!g_task_typed.empty()) {
+    const auto last = static_cast<unsigned char>(g_task_typed.back());
+    g_task_typed.pop_back();
+    if (last < 0x80 || last >= 0xC0) break;
+  }
+}
+
+void LoadTypedTask() {
+  g_task_typed = state::TaskAsked();   // already UTF-8, as the panel wants
+}
+
 LRESULT CALLBACK HookedWndProc(HWND window, UINT message, WPARAM wparam,
                                LPARAM lparam);
 
@@ -489,6 +530,30 @@ LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   if (message == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_KEYMENU &&
       lparam == 0)
     return 0;
+
+  // Typing a task: the letters land in the panel and nowhere else. This mode
+  // already keeps every key from the game, so nothing is being taken away
+  // from anybody by reading them here.
+  if (g_mode == Mode::kMenu && g_typing_task) {
+    if (message == WM_CHAR) {
+      const auto ch = static_cast<unsigned char>(wparam);
+      if (ch == 13) {           // Enter: keep it
+        if (GetTickCount64() - g_typing_since < 350) return 0;
+        SaveTypedTask();
+        g_typing_task = false;
+      } else if (ch == 27) {    // Escape: leave it as it was
+        g_typing_task = false;
+      } else if (ch == 8) {
+        RubOutLastLetter();
+      } else if (ch >= 0x20 && g_task_typed.size() < 300) {
+        g_task_typed += ToUtf8(std::string(1, static_cast<char>(ch)));
+      }
+      return 0;
+    }
+    if (message == WM_KEYDOWN || message == WM_KEYUP || message == WM_SYSCHAR ||
+        message == WM_SYSKEYDOWN)
+      return 0;   // the arrows must not walk the menu while a word is typed
+  }
 
   if (g_mode == Mode::kMenu) {
     // The menu is open, so the keyboard is its: nothing pressed reaches the
@@ -1498,6 +1563,7 @@ void StopEverything() {
 }
 
 enum Item {
+  kItemTask,
   kItemGo, kItemStop, kItemControl, kItemSprint, kItemHop, kItemRoute,
   kItemHud, kItemKeyTest, kItemWorldTest, kItemDeveloper, kItemCount
 };
@@ -1515,6 +1581,16 @@ struct Row {
 void Activate(int item, int direction, const PlayerView& view) {
   const auto want = [&](bool current) { return direction == 0 ? !current : direction > 0; };
   switch (item) {
+    case kItemTask:
+      if (g_typing_task) {
+        SaveTypedTask();
+        g_typing_task = false;
+      } else {
+        LoadTypedTask();
+        g_typing_task = true;
+        g_typing_since = GetTickCount64();
+      }
+      break;
     case kItemGo:
       if (direction == 0) GoToMarker(view);
       break;
@@ -1609,26 +1685,43 @@ void DrawMenu(unsigned long long now) {
   const bool moving = act::TravelGet().travelling || act::Get().walking;
   const bool game_known = game::Detect().known;
 
-  // Keys first, so what is drawn is what was chosen.
-  if (Fired(now, VK_ESCAPE)) {
+  // Keys first, so what is drawn is what was chosen - except while a task is
+  // being typed. The menu reads the keyboard by asking Windows what is held,
+  // not by messages, so refusing the messages was not enough: W and S walked
+  // the selection out from under the word being written. Everything held is
+  // still taken, so nothing fires the moment the typing ends.
+  if (g_typing_task) {
+    Fired(now, VK_UP, 'W');
+    Fired(now, VK_DOWN, 'S');
+    Fired(now, VK_LEFT, 'A');
+    Fired(now, VK_RIGHT, 'D');
+    Fired(now, VK_RETURN, VK_SPACE);
+    Fired(now, VK_ESCAPE);
+  } else if (Fired(now, VK_ESCAPE)) {
     SetMode(Mode::kClosed);
     return;
   }
   int move = 0;
-  if (Fired(now, VK_UP, 'W')) move = -1;
-  if (Fired(now, VK_DOWN, 'S')) move = 1;
+  if (!g_typing_task && Fired(now, VK_UP, 'W')) move = -1;
+  if (!g_typing_task && Fired(now, VK_DOWN, 'S')) move = 1;
   g_selected = (g_selected + move + kItemCount) % kItemCount;
   int direction = 0;
   bool activate = false;
-  if (Fired(now, VK_LEFT, 'A')) { activate = true; direction = -1; }
-  if (Fired(now, VK_RIGHT, 'D')) { activate = true; direction = 1; }
-  if (Fired(now, VK_RETURN, VK_SPACE)) { activate = true; direction = 0; }
+  if (!g_typing_task && Fired(now, VK_LEFT, 'A')) { activate = true; direction = -1; }
+  if (!g_typing_task && Fired(now, VK_RIGHT, 'D')) { activate = true; direction = 1; }
+  if (!g_typing_task && Fired(now, VK_RETURN, VK_SPACE)) { activate = true; direction = 0; }
   if (activate) Activate(g_selected, direction, view);
   if (g_mode != Mode::kMenu) return;   // the developer's panel was chosen
 
   Row rows[kItemCount];
   char marker_text[32] = "нет метки";
   if (view.marker) std::snprintf(marker_text, sizeof(marker_text), "%.0f м", view.marker_m);
+  const std::string task_now =
+      g_typing_task ? (g_task_typed + "_")
+                    : (g_task_typed.empty() ? std::string("нет задачи") : g_task_typed);
+  rows[kItemTask]      = {g_typing_task ? "Задача для ИИ (Enter — сохранить)"
+                                        : "Задача для ИИ",
+                          task_now.c_str(), g_typing_task ? kUiWarn : kUiText, true};
   rows[kItemGo]        = {"Идти к метке на карте", marker_text,
                           view.marker ? kUiText : kUiDim, game_known};
   rows[kItemStop]      = {"Остановиться", "", kUiText, moving};

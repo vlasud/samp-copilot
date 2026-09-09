@@ -84,13 +84,23 @@ def report(c):
 
     dialog = s.get("dialog") or {}
     if dialog.get("shown"):
+        # The mod calls it a caption, and reading it as a title got an empty
+        # line - so at the one moment that matters most, with a dialog in the
+        # way of everything, the brain was shown nothing at all and had to
+        # guess. A dialog with no rows still has its text, and that is where
+        # a server writes the question.
         rows = dialog.get("rows") or []
         out.append("DIALOG IS OPEN - only answer_dialog works now")
-        out.append("  title: %s" % plain(dialog.get("title", "")))
-        for i, row in enumerate(rows[:12]):
-            out.append("   [%d] %s" % (i, plain(row)))
-        if len(rows) > 12:
-            out.append("   ... %d more rows" % (len(rows) - 12))
+        out.append("  caption: %s" % plain(dialog.get("caption", ""), 120))
+        out.append("  style: %s" % dialog.get("style", "?"))
+        for i, row in enumerate(rows[:14]):
+            out.append("   [%d] %s" % (i, plain(row, 100)))
+        if len(rows) > 14:
+            out.append("   ... %d more rows" % (len(rows) - 14))
+        if not rows:
+            body = plain(dialog.get("text", ""), 600)
+            if body:
+                out.append("  text: %s" % body)
     else:
         out.append("dialog: none open")
 
