@@ -37,6 +37,9 @@ std::atomic<unsigned long long> g_last_event_ms{0};
 // reason it runs is that the game thread has stopped - so it cannot ask the
 // script what it was doing.
 std::atomic<bool> g_down[256] = {};
+// How fast a person types, near enough, and when the last letter went.
+constexpr unsigned long long kBetweenLettersMs = 250;
+unsigned long long g_last_letter_ms = 0;
 // And how each one went down: as a message to the window, or through the
 // system. A key must be let go of the same way it was pressed. Choosing the
 // route afresh for the release is what left keys stuck: pressed through the
@@ -250,6 +253,16 @@ void KeysTick() {
     if (g_at >= g_script.size()) {
       if (!g_script.empty()) Wipe();
       return;
+    }
+    // Letters go at a hand's pace, a quarter of a second apart. A whole
+    // sentence appearing between two frames is not something a keyboard can
+    // do, and everything typed here - a line of chat, an answer in a dialog -
+    // is meant to have been typed by somebody. Keys that are not letters are
+    // left alone: a step in a walk is not a keystroke anybody watches.
+    if (g_script[g_at].kind == Kind::kCharacter) {
+      const unsigned long long now = GetTickCount64();
+      if (now - g_last_letter_ms < kBetweenLettersMs) return;   // not yet
+      g_last_letter_ms = now;
     }
     step = g_script[g_at++];
   }

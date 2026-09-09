@@ -50,6 +50,13 @@ Advance RolePlay. Мод — тело: он сообщает мир и выпо�
 человека. Если администратор спросит, бот ли ты, не отрицай — ответь честно и
 поставь "stop": true. Никогда не пытайся обойти античит.
 
+КАК ГОВОРИТЬ. Сам о себе не объявляй — никто не начинает разговор со слов
+"я бот", и делать этого не надо. Говори живым разговорным языком, коротко,
+как пишут в чате: без канцелярита, без "как ассистент", без "чем могу
+помочь", без списков и пояснений своей работы. Ты играешь роль жителя
+Лос-Сантоса по имени Lo_Vlasuddd — вот и говори как он. Но если спросят
+прямо — скажи правду.
+
 Каждый ход тебе дают короткую страницу с состоянием мира. Ответь ОДНИМ
 объектом JSON и ничем больше. Никаких рассуждений, пояснений, разметки и
 текста до или после — только сам объект, короткий. Длинный ответ обрывается
@@ -262,11 +269,12 @@ def main():
     # from the answer. Thinking already takes several seconds; resting a
     # fixed amount on top of it would make the loop slower the harder the
     # brain thought, which is backwards.
-    # Thinking out loud is the slowest thing in this loop and the least use
-    # here: the answer is a short object, not an argument. Asked for both
-    # ways, since providers spell it differently, and dropped altogether if
-    # the endpoint will not have it.
-    p.add_argument("--reasoning", default="off")
+    # How much thinking to pay for. Off is fastest and answers well enough for
+    # "walk there, press that"; a little is worth having when the choice is
+    # which of nineteen jobs to take. Asked for in the several ways providers
+    # spell it, and dropped altogether if the endpoint will not have it.
+    p.add_argument("--reasoning", default="low",
+                   choices=["off", "low", "medium", "high"])
     p.add_argument("--gap", type=float, default=5.0)
     p.add_argument("--minutes", type=float, default=20.0)
     p.add_argument("--turns", type=int, default=400)
@@ -343,11 +351,17 @@ def main():
                 said.append({"role": "user", "content": extra})
             spoken = dict(model=args.model, messages=said, temperature=0.4,
                           max_tokens=4000)
-            if args.reasoning == "off" and not no_reasoning_refused[0]:
-                spoken["extra_body"] = {"reasoning": {"enabled": False,
-                                                      "exclude": True},
-                                        "reasoning_effort": "none",
-                                        "thinking": {"type": "disabled"}}
+            if not no_reasoning_refused[0]:
+                if args.reasoning == "off":
+                    spoken["extra_body"] = {"reasoning": {"enabled": False,
+                                                          "exclude": True},
+                                            "reasoning_effort": "none",
+                                            "thinking": {"type": "disabled"}}
+                else:
+                    spoken["extra_body"] = {
+                        "reasoning": {"enabled": True, "effort": args.reasoning,
+                                      "exclude": True},
+                        "reasoning_effort": args.reasoning}
             try:
                 got = client.chat.completions.create(**spoken).choices[0]
             except Exception as e:
@@ -356,7 +370,7 @@ def main():
                 # The endpoint will not take the switch: say so once and go
                 # on without it rather than stopping.
                 no_reasoning_refused[0] = True
-                print("   (модель не приняла выключение рассуждений: %s)"
+                print("   (модель не приняла настройку рассуждений: %s)"
                       % str(e)[:90])
                 spoken.pop("extra_body")
                 got = client.chat.completions.create(**spoken).choices[0]
