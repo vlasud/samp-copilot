@@ -46,6 +46,7 @@ add_library(bot MODULE
   state/memory.cpp
   state/events.cpp
   state/people.cpp
+  state/plan.cpp
   state/probe.cpp
   mcp/server.cpp
   mcp/rpc.cpp

@@ -114,6 +114,18 @@ That is the shape of the whole thing: a brain that looks, consults the rules
 for the server it is on, and sends a chain of actions; and this module, which
 looks and does and decides nothing.
 
+### Saying what it is doing
+
+`set_plan {summary, steps, doing}` puts the brain's intention on screen, under
+the badge: a line of what it is trying to do and the steps it means to take,
+with the one under way marked. Post it again whenever the plan changes or the
+current step moves on.
+
+Watching the character from outside shows where he went and nothing about why,
+which makes a perfectly sensible plan look like a man wandering about at
+random. Nothing here is checked against what actually happens: it is a
+caption, worth what the brain's honesty about its own intentions is worth.
+
 ### Where knowledge lives
 
 The module gathers facts and works the controls. It does not know anything

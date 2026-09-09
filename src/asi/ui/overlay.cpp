@@ -46,6 +46,7 @@
 #include "samp/version.hpp"
 #include "samp/world.hpp"
 #include "state/memory.hpp"
+#include "state/plan.hpp"
 #include "state/probe.hpp"
 #include "ui/status_source.hpp"
 
@@ -1698,6 +1699,55 @@ void DrawMenu(unsigned long long now) {
 
 // The badge in the corner while the menu is closed: the dot, the name, what
 // he is doing, and the key that opens the menu.
+// What the brain says it is doing, under the badge.
+//
+// Where the character went is visible; why is not, and without it a
+// perfectly sensible plan looks like a man wandering about at random. So the
+// brain posts a line of intent and its steps, and they are drawn here with
+// the one under way marked. Nothing is checked: this is a caption, worth
+// what the brain's honesty about itself is worth.
+void DrawPlan(unsigned long long now, float below) {
+  const state::Plan plan = state::GetPlan();
+  if (plan.summary.empty()) return;
+  // A plan nobody has touched for five minutes is not what he is doing.
+  if (plan.age_ms > 300000) return;
+
+  const float s = g_scale;
+  const ImGuiIO& io = ImGui::GetIO();
+  ImDrawList* draw = ImGui::GetForegroundDrawList();
+  const float title_px = 13 * s, step_px = 12 * s;
+  const float pad = 12 * s, gap = 6 * s;
+
+  float width = Wid(g_bold, title_px, plan.summary.c_str());
+  for (const std::string& step : plan.steps) {
+    const float w = Wid(g_body, step_px, step.c_str()) + 18 * s;
+    if (w > width) width = w;
+  }
+  const float box_w = width + pad * 2;
+  const float box_h = pad + title_px + gap +
+                      plan.steps.size() * (step_px + gap * 0.6f) + pad * 0.6f;
+  const ImVec2 p0(io.DisplaySize.x - box_w - 28 * s, below + 8 * s);
+  const ImVec2 p1(p0.x + box_w, p0.y + box_h);
+  draw->AddRectFilled(p0, p1, kUiBg, 8 * s);
+  draw->AddRect(p0, p1, kUiBorder, 8 * s);
+
+  float y = p0.y + pad;
+  Txt(draw, g_bold, title_px, ImVec2(p0.x + pad, y), kUiText,
+      plan.summary.c_str());
+  y += title_px + gap;
+  for (std::size_t i = 0; i < plan.steps.size(); ++i) {
+    const bool doing = static_cast<int>(i) == plan.doing;
+    const ImU32 colour = doing ? kUiAccent : kUiDim;
+    if (doing)
+      draw->AddCircleFilled(ImVec2(p0.x + pad + 4 * s, y + step_px * 0.5f),
+                            3 * s, kUiAccent);
+    Txt(draw, g_body, step_px, ImVec2(p0.x + pad + 14 * s, y), colour,
+        plan.steps[i].c_str());
+    y += step_px + gap * 0.6f;
+  }
+  (void)now;
+}
+
 void DrawBadge(unsigned long long now) {
   const float s = g_scale;
   const ImGuiIO& io = ImGui::GetIO();
@@ -1736,6 +1786,7 @@ void DrawBadge(unsigned long long now) {
     draw->AddRectFilled(b0, b1, kUiPill, 1 * s);
     draw->AddRectFilled(b0, ImVec2(b0.x + (b1.x - b0.x) * progress, b1.y), kUiAccent, 1 * s);
   }
+  DrawPlan(now, p1.y);
 }
 
 }  // namespace

@@ -38,6 +38,7 @@
 #include "state/events.hpp"
 #include "state/memory.hpp"
 #include "state/people.hpp"
+#include "state/plan.hpp"
 #include "state/probe.hpp"
 #include "types.hpp"
 
@@ -1037,6 +1038,54 @@ void RegisterTools(Server* server) {
                     {"routes_missed", facts.routes_missed},
                     {"loaded", facts.loaded},
                     {"note", facts.note}};
+      },
+  });
+
+  server->AddTool({
+      "set_plan",
+      "Says what you are trying to do and how, so it appears on screen. The "
+      "module is the hands; watching it from outside shows where the "
+      "character went and nothing about why, which makes a sensible plan "
+      "look like a man wandering about at random. Post one line of intent "
+      "and the steps you mean to take, and post it again whenever the plan "
+      "changes or you move on to the next step.",
+      {{"type", "object"},
+       {"properties",
+        {{"summary",
+          {{"type", "string"},
+           {"description", "What he is trying to do, in a line."}}},
+         {"steps",
+          {{"type", "array"}, {"items", {{"type", "string"}}},
+           {"description", "The steps, in order. At most eight are shown."}}},
+         {"doing",
+          {{"type", "integer"},
+           {"description", "Which step is under way, counted from zero; "
+                           "-1 for none."}}}}},
+       {"required", json::array({"summary"})}},
+      [](const json& args) -> json {
+        std::vector<std::string> steps;
+        if (args.contains("steps") && args["steps"].is_array())
+          for (const json& step : args["steps"])
+            if (step.is_string()) steps.push_back(step.get<std::string>());
+        const int doing = args.value("doing", -1);
+        state::SetPlan(args.value("summary", std::string{}), steps, doing);
+        return json{{"shown", true},
+                    {"summary", args.value("summary", std::string{})},
+                    {"steps", steps.size()},
+                    {"doing", doing}};
+      },
+  });
+
+  server->AddTool({
+      "get_plan",
+      "What was last posted with set_plan, and how long ago.",
+      NoArguments(),
+      [](const json&) -> json {
+        const state::Plan plan = state::GetPlan();
+        return json{{"summary", plan.summary},
+                    {"steps", plan.steps},
+                    {"doing", plan.doing},
+                    {"age_ms", plan.age_ms}};
       },
   });
 
