@@ -16,6 +16,7 @@
 #include "log.hpp"
 #include "nav/indoors.hpp"
 #include "nav/planner.hpp"
+#include "nav/trail.hpp"
 #include "samp/input_state.hpp"
 #include "samp/world.hpp"
 
@@ -211,6 +212,33 @@ bool LooksIndoors(const Vec3& here) {
 void Decide(const Vec3& here) {
   const float straight = Distance2D(here, g_destination);
   if (LooksIndoors(here)) {
+    // What he has already walked beats anything worked out from the
+    // geometry: a square he stood in is passable, and a step he took is a
+    // connection, doors and all. Only when the graph does not join the two
+    // ends is the room felt out again.
+    // Only where the graph actually reaches the destination. A route that
+    // stops four metres short of it, over and over, is worse than no route:
+    // he walks it, arrives at its end, is no nearer, and walks it again.
+    std::vector<Vec3> known = nav::TrailRoute(here, g_destination);
+    const bool known_reaches =
+        known.size() >= 2 &&
+        Distance2D(known.back(), g_destination) <= g_arrived + 1.5f;
+    if (known_reaches) {
+      g_indoors = true;
+      g_route.assign(known.begin() + 1, known.end());
+      WalkTo(g_route);
+      SetStrictRoute(true);
+      SetLastLegIsTheDestination(true);
+      g_phase = Phase::kWalking;
+      g_bridged = false;
+      g_failures = 0;
+      g_note = "along the way he has walked before";
+      g_next_plan_ms = GetTickCount64() + kReplanGapMs * 4;
+      LOG_INFO("travel: {} - {} squares of it", g_note,
+               static_cast<int>(known.size()));
+      return;
+    }
+
     // The map is expensive and only redrawn every so often. A decision that
     // arrives inside that gap has not failed at anything - it has arrived
     // early - and counting it as a failure gave up on the journey eight

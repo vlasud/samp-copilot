@@ -21,6 +21,7 @@
 #include "game/world_query.hpp"
 #include "nav/indoors.hpp"
 #include "nav/planner.hpp"
+#include "nav/trail.hpp"
 #include "samp/chat.hpp"
 #include "samp/dialog.hpp"
 #include "samp/dialog_path.hpp"
@@ -1017,6 +1018,25 @@ void RegisterTools(Server* server) {
               return out;
             },
             kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "get_trail",
+      "What he knows because he has walked it: the squares he has physically "
+      "stood in and the steps between them, which is the one map of an "
+      "interior that cannot be wrong. Routing indoors prefers it over "
+      "anything worked out from the geometry, and it is written to bot.trail "
+      "so a building is learned once.",
+      NoArguments(),
+      [](const json&) -> json {
+        const nav::TrailFacts facts = nav::TrailGet();
+        return json{{"squares", facts.squares},
+                    {"steps", facts.steps},
+                    {"routes_found", facts.routes_found},
+                    {"routes_missed", facts.routes_missed},
+                    {"loaded", facts.loaded},
+                    {"note", facts.note}};
       },
   });
 

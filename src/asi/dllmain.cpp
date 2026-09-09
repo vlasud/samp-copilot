@@ -28,6 +28,7 @@
 #include "game/mouse_watch.hpp"
 #include "game/api_trace.hpp"
 #include "game/threads.hpp"
+#include "nav/trail.hpp"
 #include "game/watchpoint.hpp"
 #include "samp/input_state.hpp"
 #include "samp/keys.hpp"
@@ -514,6 +515,7 @@ DWORD WINAPI Worker(LPVOID) {
   }
 
   LOG_INFO("bot.asi stopping");
+  nav::TrailSave();
   // Whatever is still held goes up first. A key pressed through SendInput is
   // held for the whole session, not just this game: leave one down on the way
   // out and Windows goes on believing a hand is on it. A stuck Alt is the

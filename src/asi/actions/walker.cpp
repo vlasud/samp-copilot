@@ -1,6 +1,7 @@
 #include "actions/walker.hpp"
 
 #include "actions/contact.hpp"
+#include "nav/trail.hpp"
 
 #include "samp/input_state.hpp"
 #include "samp/objects.hpp"
@@ -786,6 +787,9 @@ bool DecideStick(short* out_x, short* out_y) {
     return false;
   }
   const Vec3 here{self.x, self.y, self.z};
+  // Where he is standing is passable, and no map can argue with it. This is
+  // the whole of what the learned graph is made of.
+  nav::TrailVisit(here, g_on_ground || !g_ground_known);
 
   // Arrived at this leg - or past it.
   //

@@ -25,6 +25,7 @@ add_library(bot MODULE
   nav/indoors.cpp
   nav/planner.cpp
   nav/roads.cpp
+  nav/trail.cpp
   hooks/cursor.cpp
   hooks/windowmode.cpp
   hooks/frame.cpp
