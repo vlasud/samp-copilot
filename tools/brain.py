@@ -405,7 +405,12 @@ def main():
             else:
                 print("мозг говорит: закончили")
                 break
-        wanted = min(15.0, float(order.get("wait", 0) or 0))
+        # Ten seconds is the most it may ask for. It had been asking for
+        # fifteen and asking again the next turn, standing in the street
+        # waiting for somebody to answer a line of chat - and nobody owes it
+        # an answer. A reply, when it comes, arrives on the page like
+        # anything else; there is nothing to hold still for.
+        wanted = min(10.0, float(order.get("wait", 0) or 0))
         rest = max(args.gap - (time.time() - asked), wanted)
         if rest > 0:
             time.sleep(rest)
