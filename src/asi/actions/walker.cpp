@@ -212,6 +212,12 @@ std::vector<Vec3> g_route;
 std::size_t       g_leg = 0;
 float             g_arrive_last = kArriveLast;
 int               g_backouts = 0;
+bool              g_last_leg_is_the_destination = false;
+bool              g_strict = false;
+// How many points ahead the smoothing may look. The route is half-metre
+// squares, so eight of them is four metres - about as far as a person sees a
+// clear line across a room.
+constexpr int     kLookAhead = 8;
 bool              g_walking = false;
 std::string       g_note = "idle";
 unsigned long long g_started_ms = 0;
@@ -777,6 +783,32 @@ bool DecideStick(short* out_x, short* out_y) {
     return false;
   }
 
+  // Cutting the corners of a verified path.
+  //
+  // A route of half-metre squares walked square by square is a staircase, and
+  // a person does not walk one. So the furthest point along it that he can
+  // reach in a straight line his shoulders fit through becomes the one he
+  // heads for. Nothing leaves the space the map already proved: the straight
+  // line is tested the same way the squares were.
+  if (g_strict && game::CallSlotsLeft() > 400) {
+    const float low_lines[2] = {kKnee, kChest};
+    const float feet_now = here.z - 1.0f;
+    std::size_t furthest = g_leg;
+    const std::size_t limit =
+        std::min(g_route.size(), g_leg + static_cast<std::size_t>(kLookAhead));
+    for (std::size_t i = g_leg + 1; i < limit; ++i) {
+      if (!WideClear(here, feet_now, g_route[i], g_route[i].z - 1.0f,
+                     low_lines, 2))
+        break;
+      furthest = i;
+    }
+    if (furthest != g_leg) {
+      g_leg = furthest;
+      g_best_distance = 0;
+      g_closer_ms = now;
+    }
+  }
+
   const Vec3& target = g_route[g_leg];
   const float distance = Distance2D(here, target);
   g_to_next = distance;
@@ -842,6 +874,26 @@ bool DecideStick(short* out_x, short* out_y) {
       // Is it one of the server's own objects he is up against? Those are
       // what its doors and gates are made of, and a door is opened by
       // walking into it rather than by walking round it.
+      // On a route the map drew, being stuck means the map is out of date -
+      // a door has shut, somebody is standing in the corridor - and the
+      // answer is another look, not a sidestep. Improvising here is what
+      // walked him into the furniture in the first place.
+      if (g_strict) {
+        StopLocked("the way the map found is blocked - looking again");
+        LOG_INFO("walk: {} ({:.1f} m along it)", g_note, distance);
+        return false;
+      }
+      // Unless he is already where he was sent. A destination is often a
+      // thing - a counter, a bed, a pickup on the floor - and standing
+      // against it is arriving, not being blocked. Leaning on it, shoving
+      // it, then shoving it again is what a person never does and a machine
+      // always does, and it happens in plain sight at the end of every walk.
+      if (g_last_leg_is_the_destination && g_leg + 1 >= g_route.size() &&
+          distance <= kTouchingDistance) {
+        StopLocked("arrived - standing against what he was sent to");
+        LOG_INFO("walk: {} ({:.1f} m from it)", g_note, distance);
+        return false;
+      }
       if (g_pushes < kPushesPerPlace) {
         const float reach = 1.6f;
         const Vec3 ahead_of_him{here.x + std::cos(ahead) * reach,
@@ -955,7 +1007,7 @@ bool DecideStick(short* out_x, short* out_y) {
       g_ground_known = false;
     }
 
-    ProbeWhiskers(here, wanted, descending);
+    if (!g_strict) ProbeWhiskers(here, wanted, descending);
     // The last couple of metres of the last leg are different. A person
     // walking to a counter, a bed, a cash machine ends up touching it: the
     // thing he was sent to is in front of him, and leaning away from it is
@@ -970,7 +1022,17 @@ bool DecideStick(short* out_x, short* out_y) {
           g_whisker_clear[i] = true;
         }
     }
-    DecideLean(now);
+    if (g_strict) {
+      g_lean = 0;
+      g_wall = false;
+      g_follow_side = 0;
+      for (int i = 0; i < kWhiskers; ++i) {
+        g_whisker_clear[i] = true;
+        g_whisker_low[i] = false;
+      }
+    } else {
+      DecideLean(now);
+    }
     // A door is not a wall to be got round. Within reach of one the route
     // means to go through, everything the whiskers found is the door frame,
     // and the only thing that opens it is his shoulder.
@@ -1109,7 +1171,7 @@ bool DecideStick(short* out_x, short* out_y) {
   // sprint up at once, and the press follows with sprint still up.
   const bool way_clear = g_whisker_clear[0] && !g_whisker_low[0];
   const bool could_sprint =
-      g_sprint_on && !bootstrapping && !stepping && !airborne &&
+      g_sprint_on && !g_strict && !bootstrapping && !stepping && !airborne &&
       g_follow_side == 0 && way_clear && !descending &&
       g_remaining > kSprintMinRemaining &&
       std::fabs(heading_error) < kSprintMaxError;
@@ -1117,7 +1179,7 @@ bool DecideStick(short* out_x, short* out_y) {
   // car is exactly the low thing the whiskers want to hop over - which is
   // how he kept jumping past the one he had been sent to.
   const bool arriving = g_leg + 1 >= g_route.size() && distance < 6.0f;
-  if (jump_low_now && !arriving) {
+  if (jump_low_now && !arriving && !g_strict) {
     WantJump(now, "something low ahead - jumping it");
   } else if (could_sprint && !arriving && g_hop_on && settled &&
              distance > kHopMinToNext &&
@@ -1304,6 +1366,8 @@ void WalkTo(std::vector<Vec3> route) {
   g_route = std::move(route);
   g_doorways.clear();
   g_backouts = 0;
+  g_strict = false;
+  g_last_leg_is_the_destination = false;
   g_leg = 0;
   g_walking = true;
   g_note = "walking";
@@ -1353,6 +1417,16 @@ void WalkTo(std::vector<Vec3> route) {
     g_remaining += Distance2D(g_route[i - 1], g_route[i]);
   LOG_INFO("walk: {} legs, first at ({:.1f}, {:.1f})", g_route.size(),
            g_route.front().x, g_route.front().y);
+}
+
+void SetStrictRoute(bool on) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_strict = on;
+}
+
+void SetLastLegIsTheDestination(bool it_is) {
+  std::lock_guard<std::mutex> lock(g_mutex);
+  g_last_leg_is_the_destination = it_is;
 }
 
 void SetDoorways(std::vector<Vec3> doorways) {

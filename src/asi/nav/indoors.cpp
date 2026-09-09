@@ -11,10 +11,11 @@
 namespace gtabot::nav {
 namespace {
 
-// A square of the grid. Three quarters of a metre is narrower than any
-// doorway a person walks through and coarse enough that a room is a few
-// thousand of them rather than a few hundred thousand.
-constexpr float kCell = 0.75f;
+// A square of the grid. Half a metre against a body a third of a metre wide
+// resolves a doorway either way round; three quarters did not, and whether a
+// door survived depended on where the character happened to be standing when
+// the grid was drawn.
+constexpr float kCell = 0.5f;
 constexpr int   kMaxSide = 96;          // squares across, whatever the radius
 constexpr float kKnee  = 0.35f;
 constexpr float kChest = 1.05f;
@@ -53,6 +54,27 @@ bool BodyFits(const Vec3& at, float floor_z) {
     }
   }
   return true;
+}
+
+// Somewhere in this square he fits, if anywhere does.
+//
+// Asking only about the centre throws away a doorway whose free space
+// happens to straddle two squares - the grid is drawn wherever he was
+// standing when the room was mapped, and a door does not move to suit it.
+// A ward whose only way out was such a door mapped as a room with no exit,
+// which is worse than the coarse test it replaced. So the centre is tried
+// first and then a few points inside the square, and whichever fits becomes
+// the point the route goes through.
+bool FindStanding(const Vec3& centre, float floor_z, Vec3* where) {
+  const float nudge = kCell * 0.35f;
+  const float tries[5][2] = {{0, 0}, {nudge, 0}, {-nudge, 0}, {0, nudge}, {0, -nudge}};
+  for (const float* at : tries) {
+    const Vec3 point{centre.x + at[0], centre.y + at[1], centre.z};
+    if (!BodyFits(point, floor_z)) continue;
+    *where = point;
+    return true;
+  }
+  return false;
 }
 
 bool Passable(const Vec3& a, const Vec3& b, float z) {
@@ -104,8 +126,19 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
   if (side > kMaxSide) side = kMaxSide;
   if (side < 8) side = 8;
   const int middle = side / 2;
-  const float base_x = from.x - middle * kCell;
-  const float base_y = from.y - middle * kCell;
+  // The grid is pinned to the world, not to him.
+  //
+  // Drawing it around wherever he stands means a different lattice every time
+  // the room is mapped, so the same doorway is inside a square on one pass and
+  // straddling two on the next, and the path he is following changes under his
+  // feet every few seconds. That is most of what "he keeps changing his mind"
+  // looked like. Snapped to half-metre lines of the world, a second look from
+  // ten metres away produces the same squares and the same path.
+  const auto snap = [](float value) {
+    return std::floor(value / kCell) * kCell;
+  };
+  const float base_x = snap(from.x - middle * kCell);
+  const float base_y = snap(from.y - middle * kCell);
 
   const auto centre = [&](int ix, int iy) {
     return Vec3{base_x + ix * kCell, base_y + iy * kCell, from.z};
@@ -135,12 +168,15 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
 
   // Flooded from under his feet, one square at a time, through whatever a
   // knee and a chest can both pass.
-  // 0 not asked, 1 he fits, 2 he does not.
+  // 0 not asked, 1 he fits, 2 he does not - and where in the square he does.
   std::vector<char> fits(static_cast<std::size_t>(side) * side, 0);
+  std::vector<Vec3> stand(static_cast<std::size_t>(side) * side);
   std::vector<int> came_from(static_cast<std::size_t>(side) * side, -1);
   std::vector<char> reached(static_cast<std::size_t>(side) * side, 0);
   std::deque<int> queue;
   const int start = index(middle, middle);
+  stand[start] = centre(middle, middle);
+  fits[start] = 1;
   reached[start] = 1;
   queue.push_back(start);
   int reached_count = 1;
@@ -157,8 +193,11 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
       const int next = index(nx, ny);
       if (reached[next] || !has_floor[next]) continue;
       // Room for his shoulders in the square itself, asked once and kept.
-      if (fits[next] == 0)
-        fits[next] = BodyFits(centre(nx, ny), floor[next]) ? 1 : 2;
+      if (fits[next] == 0) {
+        Vec3 where;
+        fits[next] = FindStanding(centre(nx, ny), floor[next], &where) ? 1 : 2;
+        if (fits[next] == 1) stand[next] = where;
+      }
       if (fits[next] == 2) continue;
       Vec3 door;
       bool through_a_door = false;
@@ -185,15 +224,14 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
   for (int iy = 0; iy < side; ++iy)
     for (int ix = 0; ix < side; ++ix) {
       if (!reached[index(ix, iy)]) continue;
-      const float away = Distance2D(centre(ix, iy), towards);
+      const float away = Distance2D(stand[index(ix, iy)], towards);
       if (away < best_away) {
         best_away = away;
         best = index(ix, iy);
       }
     }
 
-  const int bx = best % side, by = best / side;
-  room.way_out = Vec3{centre(bx, by).x, centre(bx, by).y, floor[best] + 1.0f};
+  room.way_out = Vec3{stand[best].x, stand[best].y, floor[best] + 1.0f};
   room.way_out_away_m = best_away;
   room.way_out_found = best != start;
   room.reaches_target = best_away < kCell * 1.5f;
@@ -201,8 +239,7 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
   // The way there, back along the flood.
   std::vector<Vec3> back;
   for (int at = best; at != -1; at = came_from[at]) {
-    const int ax = at % side, ay = at / side;
-    back.push_back(Vec3{centre(ax, ay).x, centre(ax, ay).y, floor[at] + 1.0f});
+    back.push_back(Vec3{stand[at].x, stand[at].y, floor[at] + 1.0f});
     if (at == start) break;
   }
   std::reverse(back.begin(), back.end());

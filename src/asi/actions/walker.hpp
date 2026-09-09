@@ -99,6 +99,24 @@ void WalkTo(std::vector<Vec3> route);
 // set after the route it belongs to.
 void SetDoorways(std::vector<Vec3> doorways);
 
+// Follow the route as given, without improvising.
+//
+// The whiskers exist for what the plan did not know: a car parked across a
+// pavement, a crowd in a doorway. Indoors the plan does know - every point of
+// it is a square a person has been shown to fit in - and improvising on top
+// of it is what produced the leaning, the stepping round and the twenty
+// seconds of walking into furniture. In this mode he steers at the next
+// point, skips ahead to the furthest one he can reach in a straight line,
+// and hands the journey back rather than inventing a way round. Cleared by
+// WalkTo.
+void SetStrictRoute(bool on);
+
+// Whether the last point of the route is where the journey actually ends,
+// as opposed to a staging point, the edge of a room, or somewhere to be
+// going on with while a plan is worked out. Only at a real destination does
+// standing against something count as having got there. Cleared by WalkTo.
+void SetLastLegIsTheDestination(bool it_is);
+
 // Let go of the stick. Safe to call when not walking.
 void Stop(const char* why);
 

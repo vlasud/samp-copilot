@@ -27,6 +27,8 @@ constexpr float kArrived = 2.5f;
 constexpr float kArrivedFloor = 0.5f;
 // Further than a person walks in a tick: something moved him.
 constexpr float kTeleportJump = 25.0f;
+// No pedestrian node this near means the street graph has nothing to say.
+constexpr float kNoNodesWithin = 60.0f;
 // A staging point has to be worth walking to, or the journey stalls on the
 // spot replanning to where it already is.
 constexpr float kMinStagingStep = 12.0f;
@@ -157,6 +159,8 @@ bool WalkGreedy(const Vec3& here, bool bridge) {
            Distance2D(here, point), point.x, point.y, straight);
   g_route = {point};
   WalkTo({point});
+  SetStrictRoute(false);
+  SetLastLegIsTheDestination(Distance2D(point, g_destination) <= g_arrived + 1.0f);
   g_phase = Phase::kWalking;
   return true;
 }
@@ -185,8 +189,36 @@ void ResolveHeight(const Vec3& here) {
   }
 }
 
+bool WalkTheRoom(const Vec3& here);
+
+// Is he inside something the street knows nothing about?
+//
+// The planner reasons about the pedestrian graph and about open ground, and
+// both are outdoor ideas. Indoors it draws a line straight through a wall,
+// perfectly happy, and hands it to the walker to find the door in - which
+// there is not one. So indoors the planner is not asked at all, and the only
+// movement is the room map, which is built by feeling for walls.
+//
+// Two signs, either of which is enough. A server's custom interior sits a
+// thousand metres above the map, where nothing of the city is. And anywhere
+// with no pedestrian node within sixty metres is somewhere the graph cannot
+// help, whether it is a building or the inside of a tunnel.
+bool LooksIndoors(const Vec3& here) {
+  if (here.z > 400.0f) return true;
+  return game::PedNodesNear(here, kNoNodesWithin, 1).empty();
+}
+
 void Decide(const Vec3& here) {
   const float straight = Distance2D(here, g_destination);
+  if (LooksIndoors(here)) {
+    if (WalkTheRoom(here)) return;
+    // The room map has nothing either: say so rather than drawing a line
+    // through the walls, which is what asking the planner would produce.
+    g_note = "inside, and the room he is in goes nowhere nearer";
+    ++g_failures;
+    g_next_plan_ms = GetTickCount64() + 1000;
+    return;
+  }
   Vec3 staging;
   if (straight <= kStreamedRadius) {
     if (g_height_unknown) ResolveHeight(here);
@@ -245,6 +277,11 @@ bool WalkTheRoom(const Vec3& here) {
                              edge.y + dy / span * kThroughTheWayOut, edge.z});
   }
   WalkTo(g_route);
+  // Indoors the map is the movement, not a suggestion to a steerer.
+  SetStrictRoute(true);
+  SetLastLegIsTheDestination(
+      !g_route.empty() &&
+      Distance2D(g_route.back(), g_destination) <= g_arrived + 1.0f);
   SetDoorways(room.doors);
   // Getting out of one room into the next is progress, even though it is
   // often sideways or briefly away: the counter that gives up on a journey
@@ -289,6 +326,10 @@ void OnPlanFinished(const Vec3& here) {
     // Replaces whatever bridge he was walking meanwhile.
     g_route.assign(plan.waypoints.begin() + 1, plan.waypoints.end());
     WalkTo(g_route);
+    SetStrictRoute(false);
+    SetLastLegIsTheDestination(
+        !g_route.empty() &&
+        Distance2D(g_route.back(), g_destination) <= g_arrived + 1.0f);
     ++g_replans;
     g_note = g_reaching ? "walking toward the far side" : "walking to the target";
     g_phase = Phase::kWalking;
