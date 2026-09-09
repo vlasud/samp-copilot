@@ -652,6 +652,10 @@ bool ContinuousSlope(const Vec3& here, const Vec3& end, float feet, float ground
 // and nothing between him and it at knee, waist or chest height. When the
 // low lines are blocked but the one at head height is not, the whisker is
 // "low": the way is open to someone who jumps.
+// The far look, cast in the same breath as the whiskers; it lives further
+// down, beside the steering that uses it.
+void LookAhead(const Vec3& here, float wanted);
+
 void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
   // Past the game-call ceiling every whisker would read blocked. Keep what
   // they saw last time rather than invent a wall.
@@ -732,6 +736,57 @@ void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
     clear.push_back(ok);
   }
   nav::SetDebugWhiskers(here, std::move(ends), std::move(clear));
+  LookAhead(here, wanted);
+}
+
+// The long look: how far he can see, and which way is most open.
+//
+// The whiskers are short on purpose - they decide about the ground, and the
+// ground four metres ahead is knowable while the ground fifteen metres ahead
+// is a guess about a hill nobody has walked yet. But a man does not discover
+// a wall by touching it, and this one did: he would run into it, run along
+// it one way, then the other, then carry on. So there is a second look, far
+// and shallow, that asks one question only - how far is the way open, at
+// chest height, along each of these directions - and steers early on the
+// answer.
+constexpr int   kLookSpokes = 7;
+constexpr float kLookAngle[kLookSpokes] = {0.0f, 0.35f, -0.35f, 0.70f,
+                                           -0.70f, 1.05f, -1.05f};
+constexpr float kLookReach = 14.0f;
+// A metre of open ground is worth this much of a radian off his line, so a
+// wide detour has to buy a good deal of room to be taken.
+constexpr float kRoomPerRadian = 9.0f;
+float g_look_free[kLookSpokes] = {kLookReach, kLookReach, kLookReach,
+                                  kLookReach, kLookReach, kLookReach,
+                                  kLookReach};
+
+void LookAhead(const Vec3& here, float wanted) {
+  for (int i = 0; i < kLookSpokes; ++i)
+    g_look_free[i] = DistanceAlongWhisker(here, wanted + kLookAngle[i],
+                                          kLookReach, kChest);
+}
+
+// Which way to lean while nothing is yet in reach: the most open direction
+// that is not too far off his line, and only as much as the way ahead is
+// closing in. With the road clear it returns nothing at all.
+float EarlyLean() {
+  const float ahead = g_look_free[0];
+  if (ahead >= kLookReach * 0.95f) return 0.0f;
+  int best = 0;
+  float best_score = g_look_free[0];
+  for (int i = 1; i < kLookSpokes; ++i) {
+    const float score =
+        g_look_free[i] - std::fabs(kLookAngle[i]) * kRoomPerRadian;
+    if (score > best_score + 0.25f) {
+      best_score = score;
+      best = i;
+    }
+  }
+  if (best == 0) return 0.0f;
+  // All of the turn when the wall is on top of him, none of it when it is as
+  // far as he can see.
+  const float urgency = 1.0f - ahead / kLookReach;
+  return kLookAngle[best] * urgency;
 }
 
 // Turns what the whiskers saw into a lean off the line - and, when the line
@@ -743,7 +798,10 @@ void DecideLean(unsigned long long now) {
     if (++g_centre_clear >= kCentreClearProbes) {
       if (g_follow_side != 0) g_last_follow_side = g_follow_side;
       g_follow_side = 0;
-      g_lean = 0;
+      // Nothing within reach, so the far look has the floor: it starts the
+      // turn while the wall is still a dozen metres off, which is when a
+      // person starts it, instead of after walking into the thing.
+      g_lean = g_strict ? 0.0f : EarlyLean();
     } else {
       g_lean *= 0.5f;
     }
