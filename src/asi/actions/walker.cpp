@@ -334,9 +334,13 @@ constexpr float kPursuitAhead = 3.0f;
 // Open enough to run at; blocked near enough to stop over.
 constexpr float kRouteOpen = 2.5f;
 constexpr float kRouteBlockedNear = 2.0f;
-// Where he stands is not judged: the paint inflates every wall by half a
-// cell and he is often against one.
-constexpr float kStartSlack = 0.6f;
+// Where he stands is not judged - the paint inflates every wall by half a
+// cell and he is often against one - but no further than his own body is
+// wide. Six tenths of a metre hid a lamp post standing against his
+// shoulder: every heading read as open, the steering saw no reason to
+// turn, and he walked into the post and stayed there while the journey
+// drew the same route nine times over.
+constexpr float kStartSlack = 0.40f;
 // The headings tried beside the line when it is shut: every ten degrees to
 // seventy either side, three and a half metres out, the room beside each
 // worth a little and every degree of turning costing a little.
