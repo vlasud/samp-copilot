@@ -136,14 +136,19 @@ bool Field::Step() {
       const float roomy0 = std::min(w.from.y, w.to.y) - kRoundStart;
       const float roomy1 = std::max(w.from.y, w.to.y) + kRoundStart;
       float minx = roomx0, maxx = roomx1, miny = roomy0, maxy = roomy1;
+      // When that is more field than there is, the room behind the start is
+      // what is kept and the rest reaches toward the target - not the other
+      // way about. Trimming to forty metres behind the start put the box's
+      // edge half a metre short of the staircase out of the courtyard, and
+      // whether the field reached depended on which half-metre he stood on.
       const float most = kMaxSide * kCell;
       if (maxx - minx > most) {
-        if (w.to.x > w.from.x) { minx = w.from.x - kMargin; maxx = minx + most; }
-        else                   { maxx = w.from.x + kMargin; minx = maxx - most; }
+        if (w.to.x > w.from.x) { minx = w.from.x - kRoundStart; maxx = minx + most; }
+        else                   { maxx = w.from.x + kRoundStart; minx = maxx - most; }
       }
       if (maxy - miny > most) {
-        if (w.to.y > w.from.y) { miny = w.from.y - kMargin; maxy = miny + most; }
-        else                   { maxy = w.from.y + kMargin; miny = maxy - most; }
+        if (w.to.y > w.from.y) { miny = w.from.y - kRoundStart; maxy = miny + most; }
+        else                   { maxy = w.from.y + kRoundStart; miny = maxy - most; }
       }
       g.cell = kCell;
       g.x0 = std::floor(minx / kCell) * kCell;
@@ -153,6 +158,10 @@ bool Field::Step() {
       g.Resize(W, H);
       w.ref_z = w.from.z - kPedOrigin;
       result_.ref_z = w.ref_z;
+      result_.box_x0 = g.x0;
+      result_.box_y0 = g.y0;
+      result_.box_x1 = g.x0 + W * kCell;
+      result_.box_y1 = g.y0 + H * kCell;
 
       // Tiles across the box, overlapping a little so no seam is bare.
       const float pitch = kTileRadius * 2.0f - kCell * 2.0f;

@@ -1522,6 +1522,9 @@ void RegisterTools(Server* server) {
               out["tile_floors"] = r.tile_floors;
               out["ground_line"] = r.ground_line;
               out["probes"] = probes;
+              out["box"] = json{{"x0", r.box_x0}, {"y0", r.box_y0}, {"x1", r.box_x1}, {"y1", r.box_y1}};
+              out["from"] = json{{"x", from.x}, {"y", from.y}, {"z", from.z}};
+              out["to"] = json{{"x", to.x}, {"y", to.y}, {"z", to.z}};
               out["end_neighbours"] = r.end_neighbours;
               out["refused"] = json{{"shut", r.refused_shut}, {"step", r.refused_step},
                                     {"corner", r.refused_corner},

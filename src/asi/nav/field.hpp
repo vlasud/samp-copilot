@@ -58,6 +58,8 @@ struct FieldResult {
   std::vector<float> tile_floors;
   std::vector<float> ground_line;
   float ref_z = 0;
+  // The box, so a target or a way out that fell outside it can be seen to.
+  float box_x0 = 0, box_y0 = 0, box_x1 = 0, box_y1 = 0;
   // The eight cells round where the route ended, when it ended short: for
   // each, whether it is passable, its ground and its clearance - the
   // question being why the search would not go on from there.
