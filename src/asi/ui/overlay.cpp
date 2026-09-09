@@ -393,7 +393,6 @@ void LogFocusMessage(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   }
 }
 
-void ParkOffScreen(HWND window);
 
 LRESULT CALLBACK HookedWndProc(HWND window, UINT message, WPARAM wparam,
                                LPARAM lparam);
@@ -458,15 +457,12 @@ LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     if (message == WM_ACTIVATEAPP && wparam == FALSE) return 0;
     if (message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) return 0;
     if (message == WM_KILLFOCUS) return 0;
-    // Being made an icon is the same news told a different way, and the game
-    // acts on this one too: with the three above answered it still stopped,
-    // its own thread spinning inside itself rather than waiting on Windows.
-    // The window really does minimise - this only keeps the game from
-    // hearing about it.
-    if (message == WM_SIZE && wparam == SIZE_MINIMIZED) {
-      ParkOffScreen(window);
-      return 0;
-    }
+    // A minimised window is left alone. Putting it back and hiding it below
+    // the desktop did keep the game out of the way, and it also stopped the
+    // game: moving a window about from inside the very message that made it
+    // an icon takes Direct3D through a reset it does not come back from, and
+    // the frames ended there. Behind another window the game carries on;
+    // made an icon, it pauses, as it always did.
   }
 
   // A lone Alt is how Windows opens a window's system menu, and while that
@@ -525,64 +521,10 @@ LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
 //
 // A minimised GTA stops, and hiding the focus messages does not change that:
 // it finds out some other way and its thread sits there, four seconds
-// between frames and then none. But the character is supposed to be living
-// his own life while the person whose computer this is gets on with theirs,
-// and that person minimises the game.
-//
-// So a window that has just been made an icon is put back at once - without
-// taking the focus, which is the whole point - and parked below the bottom
-// of the desktop. It is off the screen, out of the way, and as far as the
-// game and Direct3D are concerned it was never minimised at all. The moment
-// anybody brings it forward again, from the taskbar or otherwise, it goes
-// back where it was.
-bool g_parked = false;
-int  g_was_x = 0, g_was_y = 0;
-
-// Put it back at once, without taking the focus, and park it below the
-// desktop. Called the moment the minimise arrives, because waiting for the
-// next frame does not work: there is no next frame - the game stops inside
-// the very message that made it an icon.
-void ParkOffScreen(HWND window) {
-  if (window == nullptr) return;
-  if (!g_parked) {
-    WINDOWPLACEMENT placement{};
-    placement.length = sizeof(placement);
-    if (GetWindowPlacement(window, &placement)) {
-      g_was_x = placement.rcNormalPosition.left;
-      g_was_y = placement.rcNormalPosition.top;
-    }
-    g_parked = true;
-    LOG_INFO("the window was minimised - parking it off the screen instead, "
-             "so the game carries on");
-  }
-  ShowWindow(window, SW_SHOWNOACTIVATE);
-  const int below = GetSystemMetrics(SM_YVIRTUALSCREEN) +
-                    GetSystemMetrics(SM_CYVIRTUALSCREEN) + 8;
-  SetWindowPos(window, HWND_BOTTOM, g_was_x, below, 0, 0,
-               SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
-}
-
-void KeepOutOfTheWay(HWND window) {
-  if (!WindowMode::RunsInBackground() || window == nullptr) return;
-  // A backstop for a minimise that arrived some way other than the message,
-  // and the way back: the moment anybody brings the window forward, it goes
-  // where it was.
-  if (IsIconic(window)) {
-    ParkOffScreen(window);
-    return;
-  }
-  if (g_parked && GetForegroundWindow() == window) {
-    g_parked = false;
-    SetWindowPos(window, HWND_TOP, g_was_x, g_was_y, 0, 0,
-                 SWP_NOSIZE | SWP_NOOWNERZORDER);
-    LOG_INFO("the window is wanted again - back to {},{}", g_was_x, g_was_y);
-  }
-}
 
 // Keeps this procedure at the head of the chain and the neighbour honest.
 // Game thread, every frame.
 void TendWndProcChain(unsigned long long now) {
-  KeepOutOfTheWay(g_window);
   if (g_window == nullptr || g_previous_wndproc == nullptr) return;
 
   // Who is at the head? Asked both ways: a procedure set with the ANSI

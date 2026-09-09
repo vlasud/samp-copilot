@@ -51,6 +51,10 @@ void ReadConfig() {
              "write 'window=off' there to disable");
     return;
   }
+  // Every line, to the end of the file. This loop used to stop at the
+  // window setting - it answered that one and returned - so anything written
+  // below it was silently ignored, which is where `walker` and `background`
+  // had been sitting, doing nothing and saying nothing about it.
   std::string line;
   while (std::getline(file, line)) {
     const std::size_t hash = line.find('#');
@@ -90,11 +94,11 @@ void ReadConfig() {
     if (value == "off" || value == "0" || value == "false") {
       g_enabled.store(false);
       LOG_INFO("bot.cfg: windowed mode off - the game stays fullscreen");
-      return;
+      continue;
     }
     if (value == "on" || value == "1" || value == "true" || value.empty()) {
       LOG_INFO("bot.cfg: windowed mode on at the game's own resolution");
-      return;
+      continue;
     }
     int w = 0, h = 0;
     if (std::sscanf(value.c_str(), "%dx%d", &w, &h) == 2 && w >= 320 &&
@@ -109,7 +113,7 @@ void ReadConfig() {
       LOG_WARN("bot.cfg: 'window={}' is not off, on, or WIDTHxHEIGHT - "
                "using the game's own resolution", value);
     }
-    return;
+    continue;
   }
 }
 

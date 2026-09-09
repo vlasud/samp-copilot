@@ -13,6 +13,7 @@
 #include "game/mouse_watch.hpp"
 #include "log.hpp"
 #include "samp/dialog.hpp"
+#include "hooks/windowmode.hpp"
 #include "samp/input_state.hpp"
 #include "samp/keys.hpp"
 #include "types.hpp"
@@ -126,9 +127,21 @@ void ReadFile() {
   g_last_note = "waiting for the server to ask";
 }
 
-bool WindowInFront() {
+// Whether typing now reaches the game and nothing else.
+//
+// It used to mean only one thing: that the window was in front, because a
+// synthesised keystroke goes wherever the focus is and a password must not
+// be typed into somebody's browser. That is still true of a keystroke sent
+// through the system - but with the game behind another window the module
+// posts its keys to the window itself, where they reach the game and can
+// reach nothing else. So the question is no longer "is it in front" but
+// "will the keys land in the right place", and behind another window the
+// answer is now yes.
+bool KeysWouldReachTheGame() {
   HWND window = game::GameWindow();
-  return window != nullptr && GetForegroundWindow() == window;
+  if (window == nullptr) return false;
+  if (GetForegroundWindow() == window) return true;
+  return asi::WindowMode::RunsInBackground();
 }
 
 // Whether this dialog is the one to answer.
@@ -194,12 +207,13 @@ void WatchLogin() {
   }
 
   if (!Answerable(dialog, &why)) return;
-  if (!WindowInFront()) {
+  if (!KeysWouldReachTheGame()) {
     static bool complained = false;
     if (!complained) {
       complained = true;
       LOG_WARN("login: the server is asking, but the game's window is not the one "
-               "in front - keys would go to whatever is, so nothing is typed");
+               "in front and the module is not set to carry on behind one - keys "
+               "would go to whatever is, so nothing is typed");
     }
     return;
   }
@@ -216,8 +230,9 @@ std::string LoginNow() {
   std::string why;
   const Dialog dialog = CurrentDialog();
   if (!Answerable(dialog, &why)) return why;
-  if (!WindowInFront())
-    return "the game's window is not the one in front, and keys go to whatever is";
+  if (!KeysWouldReachTheGame())
+    return "the game's window is not the one in front, and the module is not set "
+           "to carry on behind one, so keys would go to whatever is";
   StartTyping();
   return "typing the password into \"" + dialog.caption + "\"";
 }
