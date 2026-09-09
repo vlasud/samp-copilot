@@ -72,9 +72,14 @@ constexpr float kProgressWanted = 4.0f;
 constexpr float kExploreLeast = 12.0f;
 // How near somewhere already explored a new exploring route may end.
 constexpr float kExploredKeepOut = 25.0f;
+// How far below his feet a floor still counts as the one he is on.
+constexpr float kHangingReach = 4.0f;
 // How much a cell that carries on the way the last one went is worth over
-// one that goes back: half again at dead ahead, half as much behind.
+// one across it: half again at dead ahead.
 constexpr float kCarryOn = 0.5f;
+// And how far off that way a cell may be at all: a right angle, no more,
+// while anywhere ahead is left to walk to.
+constexpr float kMustCarryOn = 0.0f;
 // A pulled leg no longer than this, so the walker replans on a scale it can
 // see; and the squeeze out of whatever the start is painted inside.
 constexpr float kMaxLeg = 60.0f;
@@ -311,7 +316,16 @@ bool Field::Step() {
         const Vec3 c = g.centre(seed);
         float found = 0;
         ++result_.ground_reads;
-        // Where he is standing is ground whatever the read says: it is the
+        // The floor that is really under him. His feet are not it while he
+        // is hanging off a ledge by his hands, and a flood seeded two
+        // metres up refuses everything round it.
+        float under = w.ref_z;
+        if (game::col::GroundBelow(w.from.x, w.from.y, w.from.z + 1.0f, &under, true) &&
+            under < w.ref_z + 0.5f && under > w.ref_z - kHangingReach) {
+          w.ref_z = under;
+          result_.ref_z = under;
+        }
+        // Where he is standing is ground whatever a read says: it is the
         // one square in the world that is known to hold him up.
         g.ground[seed] =
             (game::col::GroundBelow(c.x, c.y, w.ref_z + 4.0f, &found, false) &&
@@ -525,6 +539,12 @@ bool Field::Step() {
             if (have_way) {
               const float along = ((c.x - w.from.x) * way.x +
                                    (c.y - w.from.y) * way.y) / from_here;
+              // Not backwards at all, while there is anywhere ahead. A
+              // hundred and forty metres back up the canal costs more to
+              // walk than thirty metres on, so scoring by cost alone chose
+              // it and he turned round after covering a hundred and
+              // forty-five metres of new ground.
+              if (along < kMustCarryOn) continue;
               score *= 1.0f + kCarryOn * along;
             }
             if (score > best_score) {
@@ -532,7 +552,17 @@ bool Field::Step() {
               best = at;
             }
           }
-          if (best < 0) best = w.searcher.furthest();
+          // Nowhere ahead at all: he has walked that way to its end, and
+          // turning round is now the only thing left to try.
+          if (best < 0)
+            for (int at = 0; at < g.W * g.H; ++at) {
+              const float cost = w.searcher.cost(at);
+              if (cost <= best_score || cost <= 0) continue;
+              const Vec3 c = g.centre(at);
+              if (Away(c, w.from) < kExploreLeast) continue;
+              best_score = cost;
+              best = at;
+            }
           if (best >= 0 && Away(g.centre(best), w.from) >= kExploreLeast) {
             w.end = best;
             w.exploring = true;

@@ -29,6 +29,12 @@ constexpr float kInflate  = kCell * 0.5f;
 // the plan drew blocked, hands it back, and gets the same route again.
 constexpr float kStepChain = 1.5f;
 constexpr int   kGroundTries = 4;
+// How far below his feet a floor still counts as the one he is on: enough
+// for hanging off a ledge by his hands.
+constexpr float kHangingReach = 4.0f;
+// What the outright read allows between his floor and a square's, since it
+// is not chaining from anywhere: a storey.
+constexpr float kSpreadOut = 4.0f;
 constexpr float kPersonRadius = 0.45f;
 constexpr float kPickupDisc = 4.5f;     // as the field paints them
 constexpr float kPedOrigin = 1.0f;
@@ -128,8 +134,23 @@ bool PaintLocal(const Vec3& here, float radius,
     cx = std::min(std::max(cx - cx % kStride, 0), (side - 1) / kStride * kStride);
     cy = std::min(std::max(cy - cy % kStride, 0), (side - 1) / kStride * kStride);
     const int seed = g.index(cx, cy);
+    // The floor that is really under him, not his feet. Hanging off a wall
+    // with his hands - which happens, and which is exactly when he most
+    // needs to see - his feet are two metres above the floor, and a flood
+    // that starts from them refuses every reading round it as too far
+    // below. The picture came back four readings out of a hundred and
+    // forty-four, every cell of it unknown, every way out of it a wall, and
+    // he stood there handing the route back and asking for another.
+    float under = feet;
+    if (game::col::GroundBelow(here.x, here.y, here.z + 1.0f, &under, true) &&
+        under < feet + 0.5f && under > feet - kHangingReach) {
+      // A floor below him it is.
+    } else {
+      under = feet;
+    }
     g.known[seed] = 1;
-    g.ground[seed] = feet;   // he is standing on it, whatever a read says
+    g.ground[seed] = under;
+    ++out->ground_reads;
     queue.push_back(seed);
     const int dx[4] = {kStride, -kStride, 0, 0};
     const int dy[4] = {0, 0, kStride, -kStride};
@@ -153,6 +174,28 @@ bool PaintLocal(const Vec3& here, float radius,
         }
       }
     }
+    // Then every square the flood did not reach is read outright, from the
+    // height of the floor under him, allowing a storey either way. The
+    // flood alone was blind wherever it was seeded badly or hemmed in - on
+    // the bank of a canal it settled four squares of a hundred and
+    // forty-four, and a picture of nothing says every way is a wall, so he
+    // stood there handing the route back and asking for another. The flood
+    // still decides what the floor he is on is; this only fills in what it
+    // could not say, and the paint and the ledges judge those the same as
+    // any other.
+    const float from_z = g.ground[seed];
+    for (int iy = 0; iy < side; iy += kStride)
+      for (int ix = 0; ix < side; ix += kStride) {
+        const int at = g.index(ix, iy);
+        if (g.known[at] == 1) continue;
+        const Vec3 c = g.centre(at);
+        float found = 0;
+        ++out->ground_reads;
+        if (FloorNear(c.x, c.y, from_z, kSpreadOut, &found)) {
+          g.known[at] = 1;
+          g.ground[at] = found;
+        }
+      }
     for (int iy = 0; iy < side; iy += kStride)
       for (int ix = 0; ix < side; ix += kStride) {
         const int at = g.index(ix, iy);

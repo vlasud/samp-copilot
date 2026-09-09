@@ -45,7 +45,7 @@ constexpr int kMaxFailures = 8;
 // Stages that head away from the target on purpose - along a canal, out of
 // a yard - before the journey calls it hopeless. Each is worth up to a
 // hundred and eighty metres of walking, so this is a long way.
-constexpr int kMaxExploringStages = 10;
+constexpr int kMaxExploringStages = 30;
 // Between decisions, so a failed plan is not asked for again the same frame.
 constexpr unsigned long long kReplanGapMs = 400;
 // How much of a frame the planner may take. Four milliseconds beside a
@@ -306,10 +306,16 @@ bool Progress(float straight) {
   // Walking the length of a canal gets him no nearer the far side of town
   // and is still the only way out of the canal. A stage the planner drew
   // for that reason is not a decision that got nowhere.
-  if (g_planner.result().ok && g_planner.result().exploring &&
-      ++g_exploring < kMaxExploringStages) {
-    g_failures = 0;
-    return true;
+  if (g_planner.result().ok && g_planner.result().exploring) {
+    if (++g_exploring < kMaxExploringStages) {
+      g_failures = 0;
+      return true;
+    }
+    StopLocked("shut in - he cannot walk out of here, whatever way he tries");
+    LOG_WARN("travel: {} ({:.0f} m short, after {} stages of looking for a way "
+             "out)", g_note, straight, g_exploring);
+    Stop("shut in");
+    return false;
   }
   if (++g_failures >= kMaxFailures) {
     StopLocked("gave up - " + std::to_string(kMaxFailures) +
@@ -411,7 +417,14 @@ void OnPlanFinished(const Vec3& here) {
         !g_route.empty() &&
         Distance2D(g_route.back(), g_destination) <= g_arrived + 1.0f);
     ++g_replans;
-    g_note = g_reaching ? "walking toward the far side" : "walking to the target";
+    // Said plainly, because the brain reads this off the page and a
+    // character who is walking away from where he was sent looks like a
+    // broken one unless it knows why.
+    g_note = plan.exploring
+                 ? "shut in here - walking to the far end of what he can reach, "
+                   "looking for a way out"
+             : g_reaching ? "walking toward the far side"
+                          : "walking to the target";
     g_phase = Phase::kWalking;
     g_bridged = false;
     return;
