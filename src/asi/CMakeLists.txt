@@ -25,6 +25,7 @@ add_library(bot MODULE
   game/api_trace.cpp
   game/paths.cpp
   nav/field.cpp
+  nav/grid.cpp
   nav/indoors.cpp
   nav/planner.cpp
   nav/ring.cpp
