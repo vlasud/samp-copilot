@@ -53,9 +53,9 @@ struct SearchRules {
   // game's own peds manage on a ramp. Seven-tenths cut the stairs off a
   // beach promenade and walled him onto it.
   float max_step = 1.00f;
-  int   clear_wanted = 4;     // cells from a wall before walking is free
-  float near_wall_cost = 0.35f;
-  int   max_expand = 250000;
+  int   clear_wanted = 8;     // cells from a wall before walking is free: two metres at a quarter
+  float near_wall_cost = 0.18f;   // per cell short of that, so the total is as it was
+  int   max_expand = 0;      // nought: the grid itself is the limit
 };
 
 // A* across the grid, in batches so it can sit beside a frame. Ends at the

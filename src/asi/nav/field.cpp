@@ -8,23 +8,28 @@
 
 #include "game/collision.hpp"
 #include "game/peds.hpp"
+#include "samp/checkpoints.hpp"
+#include "samp/objects.hpp"
 #include "log.hpp"
 #include "nav/grid.hpp"
 
 namespace gtabot::nav {
 namespace {
 
-// Half a metre a cell. A quarter, as the room uses, is four times the cells
-// for a street where nothing is narrower than a doorway; a metre misses the
-// gap between two parked things. Half a metre is what a body's width is.
-constexpr float kCell = 0.5f;
+// A quarter of a metre a cell, as the room uses. Half a metre was tried
+// first, for a street, and it was too coarse both ways at once: a fence ten
+// centimetres thick fell between the cell centres and was invisible, and a
+// metre-wide staircase between two handrails had no free centre in it.
+// Recast puts three or four cells across a body for the same reason.
+constexpr float kCell = 0.25f;
 // How far either side of the straight line the field reaches. A detour
 // round a whole block is forty metres; anything further is a different
 // route, not a detour.
 constexpr float kMargin = 40.0f;
-constexpr float kRoundStart = 80.0f;
-// The most field there is: three hundred and sixty metres a side. Beyond
-// that the world is not streamed anyway.
+constexpr float kRoundStart = 60.0f;
+// The most field there is: a hundred and eighty metres a side at this
+// cell. A journey is staged and replanned as the world streams in anyway,
+// so a plan need only reach the next stage.
 constexpr int   kMaxSide = 720;
 // Painted in squares of this half-width, each against its own floor,
 // because the painter takes one floor height and a street is not one height.
@@ -32,18 +37,18 @@ constexpr float kTileRadius = 20.0f;
 // The band above the floor a body occupies: over the kerb, under the sign.
 constexpr float kBandLow  = 0.30f;
 constexpr float kBandHigh = 1.75f;
-// Painted as it is, not grown by a body's width. Growing every wall by
-// thirty-four centimetres on half-metre cells left no free centre in a
-// metre-wide staircase between two handrails, and the courtyard whose only
-// way out it was came out sealed. The body's width is honoured instead by
-// the clearance every cell already knows - walking beside a wall costs
+// Grown by half a cell, and no more: enough that a thing thinner than a
+// cell paints every cell it passes through, which a fence ten centimetres
+// thick otherwise did not, and not so much that a metre-wide staircase
+// between two handrails loses its free middle. The body's own width is
+// honoured by the clearance every cell knows - walking beside a wall costs
 // more, and the walker keeps him off it - which is how Recast does it.
-constexpr float kBodyRadius   = 0.0f;
+constexpr float kBodyRadius   = kCell * 0.5f;
 constexpr float kPersonRadius = 0.45f;
-// The ground is read every other cell - a metre - and the cells between
-// take the reading beside them. A kerb is not lost at that spacing; the
-// reads are quartered.
-constexpr int   kGroundStride = 2;
+// The ground is read every fourth cell - a metre - and the cells between
+// take the reading beside them. A kerb is not lost at that spacing, and the
+// reads are a sixteenth of what every cell would cost.
+constexpr int   kGroundStride = 4;
 constexpr int   kReadsPerStep = 800;
 constexpr int   kExpandPerStep = 6000;
 // How far a reading may differ from the height it was looked for at and
@@ -53,6 +58,12 @@ constexpr float kSameLevel = 6.0f;
 // see; and the squeeze out of whatever the start is painted inside.
 constexpr float kMaxLeg = 60.0f;
 constexpr float kSqueeze = 1.0f;
+// How near a pickup counts as stepping on it. Not the pickup's own reach,
+// which is a metre and a half: a server watches a range of its own round
+// the point, and the dialog for the route map at the station opened with
+// the character three metres nine from the icon. Four and a half covers the
+// ranges servers use, and a street is wide enough to go round.
+constexpr float kPickupDisc = 4.5f;
 constexpr float kPedOrigin = 1.0f;
 
 float Away(const Vec3& a, const Vec3& b) {
@@ -176,6 +187,25 @@ bool Field::Step() {
         w.bodies.push_back(game::col::Body{who.position.x, who.position.y,
                                            who.position.z, kPersonRadius});
       }
+      // Pickups and the checkpoint are not floor. A pickup is a thing a
+      // server puts on the ground to be walked into on purpose, and a route
+      // that crosses one by accident opens whatever it opens - a dialog
+      // nobody asked for, a shop, a teleport - and the dialog then takes the
+      // keyboard and the walk with it. He stood twenty-five metres into a
+      // journey with a dialog up for that reason. So they are painted solid,
+      // except the one he was sent to and the one he is standing on.
+      for (const samp::Pickup& pickup : samp::PickupsNear(w.from, reach, 128)) {
+        if (Away(pickup.at, w.to) <= kPickupDisc + 0.5f) continue;
+        if (Away(pickup.at, w.from) <= kSqueeze) continue;
+        w.bodies.push_back(game::col::Body{pickup.at.x, pickup.at.y, pickup.at.z,
+                                           kPickupDisc});
+      }
+      {
+        const samp::Checkpoint cp = samp::CheckpointNow(w.from);
+        if (cp.shown && Away(cp.at, w.to) > cp.size + 1.0f && Away(cp.at, w.from) > kSqueeze)
+          w.bodies.push_back(game::col::Body{cp.at.x, cp.at.y, cp.at.z,
+                                             std::max(cp.size + 2.0f, kPickupDisc)});
+      }
       w.phase = Phase::kGround;
       return false;
     }
@@ -285,8 +315,11 @@ bool Field::Step() {
       floors.y0 = g.y0;
       floors.cell = kCell;
       game::col::Footprint fp;
+      // Vehicles too: a car across the pavement is a wall until it leaves,
+      // and the journey replans as it goes, so a snapshot is enough.
       if (!game::col::PaintFootprint(c.x, c.y, floor, kTileRadius, kCell, kBandLow,
-                                     kBandHigh, kBodyRadius, {}, w.bodies, &fp, &floors))
+                                     kBandHigh, kBodyRadius, {}, w.bodies, &fp, &floors,
+                                     true))
         return false;
       ++result_.tiles;
       const int dx = static_cast<int>(std::lround((fp.x0 - g.x0) / kCell));

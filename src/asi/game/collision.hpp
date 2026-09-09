@@ -76,8 +76,11 @@ struct Footprint {
 };
 
 // Paints the square of `radius` about (cx, cy). The band is
-// [floor_z + z_lo, floor_z + z_hi]. Buildings, dummies and objects; not
-// vehicles. Game thread. False when the world does not read.
+// [floor_z + z_lo, floor_z + z_hi]. Buildings, dummies and objects; and
+// vehicles when asked - a car parked across a pavement is as solid as a
+// wall for as long as it stands there, and a field that did not know of it
+// sent the walker straight into one. Game thread. False when the world
+// does not read.
 // One thing, by where it stands.
 struct Leaf { float x = 0, y = 0, z = 0; };
 
@@ -110,7 +113,7 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
                     float z_lo, float z_hi, float inflate,
                     const std::vector<Leaf>& skip_here,
                     const std::vector<Body>& also, Footprint* out,
-                    const Floors* floors = nullptr);
+                    const Floors* floors = nullptr, bool vehicles = false);
 
 // For the input line: queries, entities and primitives looked at.
 std::string Line();

@@ -133,7 +133,7 @@ bool Searcher::Step(int budget) {
     const float away = Away(g.centre(cur.at), aim_);
     if (away < nearest_away_) { nearest_away_ = away; nearest_ = cur.at; }
     if (cur.at == goal_) { reached_ = true; done_ = true; return true; }
-    if (expanded_ >= rules_.max_expand) { done_ = true; return true; }
+    if (rules_.max_expand > 0 && expanded_ >= rules_.max_expand) { done_ = true; return true; }
     const int hx = cur.at % g.W, hy = cur.at / g.W;
     for (int d = 0; d < 8; ++d) {
       const int nx = hx + step_x[d], ny = hy + step_y[d];

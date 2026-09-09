@@ -65,6 +65,12 @@ def main():
             walked += gone
         track.append([here[0], here[1], here[2], round(time.time() - began, 2)])
 
+        # A dialog opening mid-walk is worth knowing about: it takes the
+        # keyboard, and it says what he walked into.
+        d = s.get("dialog") or {}
+        if d.get("shown"):
+            title = (d.get("caption") or d.get("title") or d.get("text") or "")[:60].replace("\n", " / ")
+            notes.append("%5.1f s  DIALOG at %.0f,%.0f: %s" % (time.time() - began, here[0], here[1], title))
         t = s.get("travel") or {}
         w = t.get("walk") or {}
         note = "%s / %s" % (t.get("note", "-"), w.get("note", "-"))

@@ -171,6 +171,8 @@ constexpr int kCallBudget = 200000;
 constexpr unsigned long long kPlanDeadlineMs = 12000;
 // How far short of the target a field route may end and still be taken.
 constexpr float kFieldShortOk = 40.0f;
+// And how much nearer a partial route has to bring him to count as a stage.
+constexpr float kFieldStageMin = 40.0f;
 // A hillside: how much the ground may fall or rise over a quarter of a
 // metre and still be a surface he walks (or slides) on rather than an edge.
 constexpr float kSlopeSubStep    = 0.25f;
@@ -672,8 +674,15 @@ struct Planner::Job {
     // the journey replans from wherever a leg ends, and the pavement graph
     // it would fall back to walks through fences. Only a long way short
     // means the field has not reached at all.
+    // Or ends a good way toward it: the field is a hundred and eighty metres
+    // a side and a journey is often longer, so a route to the field's edge
+    // is a stage, not a failure - the journey plans again from where a leg
+    // ends, as it always has. What is refused is a route that got nowhere.
+    const float straight = Distance2D(a, b);
     const bool near_enough = r.ok && !r.reaches_target && r.points.size() >= 2 &&
-                             r.short_by_m <= kFieldShortOk;
+                             (r.short_by_m <= kFieldShortOk ||
+                              (r.length_m >= kFieldStageMin &&
+                               r.short_by_m <= straight - kFieldStageMin));
     if (r.ok && (r.reaches_target || near_enough) && r.points.size() >= 2) {
       plan.waypoints = r.points;
       plan.legs.clear();

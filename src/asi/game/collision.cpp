@@ -377,6 +377,7 @@ struct Paint {
   // The band as offsets, and the floors to judge it against per cell. With
   // no floors every cell uses the default, which is the old behaviour.
   const Floors* floors = nullptr;
+  bool  vehicles = false;
   float band_lo = 0, band_hi = 0, floor_default = 0;
   float floor_min = 0, floor_max = 0;   // over the square, for the early out
 };
@@ -690,6 +691,7 @@ bool PaintSector(Paint* p, int sx, int sy, const std::uintptr_t* bucket, int cou
         At(kRepeatSectors) +
         ((sy & (kRepeat - 1)) * kRepeat + (sx & (kRepeat - 1))) * kRepeatSectorSize;
     PaintList(*p, repeat + kRepeatObjects);
+    if (p->vehicles) PaintList(*p, repeat + kRepeatVehicles);
     return true;
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     return false;
@@ -981,7 +983,7 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
                     float z_lo, float z_hi, float inflate,
                     const std::vector<Leaf>& skip_here,
                     const std::vector<Body>& also, Footprint* out,
-                    const Floors* floors) {
+                    const Floors* floors, bool vehicles) {
   if (!Ready() || out == nullptr || cell <= 0.05f || radius <= 0) return false;
   EnsureWindow(cx, cy);
   const int side = static_cast<int>(std::ceil(radius * 2.0f / cell));
@@ -1003,6 +1005,7 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
   p.y1 = out->y0 + side * cell;
   p.budget = 4000000;
   p.floors = floors;
+  p.vehicles = vehicles;
   p.band_lo = z_lo;
   p.band_hi = z_hi;
   p.floor_default = floor_z;
