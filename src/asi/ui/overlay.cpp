@@ -1708,9 +1708,14 @@ void DrawMenu(unsigned long long now) {
 // what the brain's honesty about itself is worth.
 void DrawPlan(unsigned long long now, float below) {
   const state::Plan plan = state::GetPlan();
-  if (plan.summary.empty()) return;
-  // A plan nobody has touched for five minutes is not what he is doing.
-  if (plan.age_ms > 300000) return;
+  // An empty panel is indistinguishable from a broken one, and the brain
+  // going quiet is exactly what somebody watching needs to see. So it always
+  // says something: what was last said, or that nothing has been.
+  const bool nothing_said = plan.summary.empty();
+  const bool gone_quiet = !nothing_said && plan.age_ms > 120000;
+  const std::string title =
+      nothing_said ? std::string("мозг ещё ничего не сказал")
+                   : (gone_quiet ? plan.summary + "  (молчит)" : plan.summary);
 
   const float s = g_scale;
   const ImGuiIO& io = ImGui::GetIO();
@@ -1718,7 +1723,7 @@ void DrawPlan(unsigned long long now, float below) {
   const float title_px = 13 * s, step_px = 12 * s;
   const float pad = 12 * s, gap = 6 * s;
 
-  float width = Wid(g_bold, title_px, plan.summary.c_str());
+  float width = Wid(g_bold, title_px, title.c_str());
   for (const std::string& step : plan.steps) {
     const float w = Wid(g_body, step_px, step.c_str()) + 18 * s;
     if (w > width) width = w;
@@ -1732,8 +1737,8 @@ void DrawPlan(unsigned long long now, float below) {
   draw->AddRect(p0, p1, kUiBorder, 8 * s);
 
   float y = p0.y + pad;
-  Txt(draw, g_bold, title_px, ImVec2(p0.x + pad, y), kUiText,
-      plan.summary.c_str());
+  Txt(draw, g_bold, title_px, ImVec2(p0.x + pad, y), nothing_said ? kUiDim : kUiText,
+      title.c_str());
   y += title_px + gap;
 
   // When it last spoke, and how long it took to work this out. Both are the
@@ -1741,7 +1746,9 @@ void DrawPlan(unsigned long long now, float below) {
   // the brain asking what the world looked like and saying what it would do.
   char when[96];
   const long long seconds = plan.age_ms / 1000;
-  if (plan.thought_ms >= 0)
+  if (nothing_said)
+    std::snprintf(when, sizeof(when), "жду плана от ИИ");
+  else if (plan.thought_ms >= 0)
     std::snprintf(when, sizeof(when), "%lld c назад  ·  думал %.1f c",
                   seconds, plan.thought_ms / 1000.0);
   else
