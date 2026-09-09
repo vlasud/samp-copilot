@@ -315,7 +315,9 @@ def revive():
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("task", nargs="?", default="")
-    p.add_argument("--model", default="deepseek-v4-flash-0731")
+    # Left unset, the model and the effort follow from where the brain is
+    # running: the measured best of each. Naming either overrides it.
+    p.add_argument("--model", default=None)
     # How often a question goes out, counted from the last one rather than
     # from the answer. Thinking already takes several seconds; resting a
     # fixed amount on top of it would make the loop slower the harder the
@@ -324,7 +326,7 @@ def main():
     # "walk there, press that"; a little is worth having when the choice is
     # which of nineteen jobs to take. Asked for in the several ways providers
     # spell it, and dropped altogether if the endpoint will not have it.
-    p.add_argument("--reasoning", default="off",
+    p.add_argument("--reasoning", default=None,
                    choices=["off", "low", "medium", "high"])
     p.add_argument("--gap", type=float, default=5.0)
     p.add_argument("--minutes", type=float, default=20.0)
@@ -342,6 +344,17 @@ def main():
 
     if args.local and args.base == BASE:
         args.base = "http://localhost:11434/v1/"
+
+    # On this machine: gpt-oss at medium. Measured against the alternatives
+    # on the same page - four turns in 5.9, 5.4, 4.2 and 3.4 seconds, every
+    # one choosing the pickup at the hospital door rather than the interior
+    # coordinates written in the notes. On low it is a second faster and
+    # picks the wrong one; on high it never closes the object.
+    here = is_local(args.base)
+    if args.model is None:
+        args.model = "gpt-oss:20b" if here else "deepseek-v4-flash-0731"
+    if args.reasoning is None:
+        args.reasoning = "medium" if here else "off"
 
     from openai import OpenAI
     client = OpenAI(api_key=read_key(args.base), base_url=args.base)
