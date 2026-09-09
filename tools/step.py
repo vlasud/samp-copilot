@@ -145,14 +145,17 @@ def report(c):
                " in a car" if r.get("in_vehicle") else "",
                " **%s**" % r["standing"] if r.get("standing") else "",
                " (has spoken to you)" if r.get("has_spoken_to_me") else ""))))
+    else:
+        out.append("PLAYERS near: none")
+    # The "none" above belongs to having no players at all. It had been
+    # hanging off this next test instead, so a page that listed six people by
+    # name went on to say there was nobody about.
     bad = [r for r in players if r.get("standing") in ("enemy", "wary")]
     if bad:
         out.append("KEEP AWAY: " + "; ".join(
             "%s %.0fm - %s" % (r.get("name", "?"), r.get("away_m", 0),
                                r.get("why", "no reason recorded"))
             for r in bad[:4]))
-    else:
-        out.append("PLAYERS near: none")
 
     npcs = s.get("npcs") or []
     if npcs:
