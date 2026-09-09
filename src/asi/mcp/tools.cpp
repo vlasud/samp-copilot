@@ -17,6 +17,7 @@
 #include "actions/walker.hpp"
 #include "game/bindings.hpp"
 #include "game/paths.hpp"
+#include "game/peds.hpp"
 #include "game/world_query.hpp"
 #include "nav/indoors.hpp"
 #include "nav/planner.hpp"
@@ -966,6 +967,66 @@ void RegisterTools(Server* server) {
                  {"note", status.note}};
         if (!status.rows.empty()) out["rows_on_screen"] = status.rows;
         return out;
+      },
+  });
+
+  server->AddTool({
+      "get_npcs",
+      "The people the game itself is holding, nearest first, with the "
+      "direction each is facing and the spot to stand on to be in front of "
+      "his face. Shopkeepers, clerks and a hospital's duty doctor are not "
+      "players and are in none of SA-MP's pools; they are peds the server "
+      "made. A server checks that somebody is in front of its clerk before "
+      "it will talk to him, so 'stand_at' is the point to walk to and "
+      "'look_at' the point to face while doing it.",
+      {{"type", "object"},
+       {"properties",
+        {{"radius",
+          {{"type", "number"}, {"minimum", 1}, {"maximum", 200},
+           {"description", "How far to look. Defaults to thirty metres."}}},
+         {"limit",
+          {{"type", "integer"}, {"minimum", 1}, {"maximum", 60},
+           {"description", "At most this many. Defaults to ten."}}},
+         {"stand_off",
+          {{"type", "number"}, {"minimum", 0.4}, {"maximum", 3.0},
+           {"description", "How far in front of the face to stand. Defaults "
+                           "to one metre."}}},
+         {"players_too",
+          {{"type", "boolean"},
+           {"description", "Include the peds that are players. Off by "
+                           "default: those are in get_world already."}}}}}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              const samp::LocalPed self = samp::ReadLocalPed();
+              if (!self.valid)
+                throw std::runtime_error("the local player is not readable");
+              const float radius = args.value("radius", 30.0f);
+              const std::size_t limit = args.value("limit", 10);
+              const float off = args.value("stand_off", 1.0f);
+              const bool players_too = args.value("players_too", false);
+              json out = json::array();
+              for (const game::Ped& who :
+                   game::PedsNear(game::Vec3{self.x, self.y, self.z}, radius,
+                                  limit * 4, self.game_ped)) {
+                if (!players_too && who.is_player) continue;
+                if (out.size() >= limit) break;
+                const game::Vec3 stand = game::InFrontOf(who, off);
+                out.push_back(json{
+                    {"away_m", who.away_m},
+                    {"is_player", who.is_player},
+                    {"heading_deg", who.heading * 57.2957795f},
+                    {"at", json{{"x", who.position.x},
+                                {"y", who.position.y},
+                                {"z", who.position.z}}},
+                    {"stand_at", json{{"x", stand.x}, {"y", stand.y}}},
+                    {"look_at", json{{"x", who.position.x},
+                                     {"y", who.position.y}}}});
+              }
+              return json{{"npcs", std::move(out)},
+                          {"note", game::PedsNote()}};
+            },
+            kFastTimeoutMs);
       },
   });
 

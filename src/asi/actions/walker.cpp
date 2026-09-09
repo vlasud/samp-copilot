@@ -153,6 +153,9 @@ constexpr int   kWhiskers = 7;
 constexpr float kWhiskerAngle[kWhiskers]  = {0.0f, 0.61f, -0.61f, 1.22f, -1.22f, 1.75f, -1.75f};
 constexpr float kWhiskerLength[kWhiskers] = {4.0f, 3.0f, 3.0f, 2.4f, 2.4f, 2.4f, 2.4f};
 constexpr float kLeanFor[kWhiskers]       = {0.0f, 0.79f, -0.79f, 1.40f, -1.40f, 1.92f, -1.92f};
+// Half the width of a person, near enough. The game's own ped collision is
+// about this, and it is what decides whether he fits between two things.
+constexpr float kBodyRadius = 0.34f;
 constexpr float kKnee  = 0.5f;
 constexpr float kWaist = 0.95f;
 constexpr float kChest = 1.35f;
@@ -518,6 +521,31 @@ bool LinesClear(const Vec3& from, float from_feet, const Vec3& to, float to_feet
   return true;
 }
 
+// The same, at the width of his shoulders.
+//
+// A line down the middle of the way ahead says nothing about the chair leg
+// half a metre to the side of it. He walks at it, leans, steps round, leans
+// back, walks at it again - twenty seconds of that in the middle of a
+// hospital ward, in front of everybody, and none of it is what a person
+// looks like. So the question stops being "is this line clear" and becomes
+// "does his body fit through there": the centre and both shoulders, each
+// swept the length of the whisker.
+bool WideClear(const Vec3& from, float from_feet, const Vec3& to, float to_feet,
+               const float* heights, int count) {
+  const float dx = to.x - from.x, dy = to.y - from.y;
+  const float span = std::sqrt(dx * dx + dy * dy);
+  if (span < 0.01f) return LinesClear(from, from_feet, to, to_feet, heights, count);
+  const float sx = -dy / span * kBodyRadius;
+  const float sy =  dx / span * kBodyRadius;
+  const float sides[3] = {0.0f, 1.0f, -1.0f};
+  for (const float side : sides) {
+    const Vec3 a{from.x + sx * side, from.y + sy * side, 0};
+    const Vec3 b{to.x + sx * side, to.y + sy * side, 0};
+    if (!LinesClear(a, from_feet, b, to_feet, heights, count)) return false;
+  }
+  return true;
+}
+
 // How far along a whisker the thing actually is, to within a quarter of
 // its length: the line is halved twice. Two calls more per whisker, and the
 // point goes into the obstacle rather than onto the ground in front of it.
@@ -576,7 +604,8 @@ bool ContinuousSlope(const Vec3& here, const Vec3& end, float feet, float ground
 void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
   // Past the game-call ceiling every whisker would read blocked. Keep what
   // they saw last time rather than invent a wall.
-  if (game::CallSlotsLeft() < 80) return;
+  // Three lines a whisker now, so three times the room to leave.
+  if (game::CallSlotsLeft() < 240) return;
   std::vector<Vec3> ends;
   std::vector<bool> clear;
   ends.reserve(kWhiskers);
@@ -605,8 +634,8 @@ void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
     } else if (ground - feet > kMaxClimb) {
       low = true;   // a ledge: up it with a jump
     } else if (can_look &&
-               !LinesClear(here, feet, end, ground, low_lines, 3)) {
-      if (LinesClear(here, feet, end, ground, head_line, 1))
+               !WideClear(here, feet, end, ground, low_lines, 3)) {
+      if (WideClear(here, feet, end, ground, head_line, 1))
         low = true;   // something to jump over
       else
         ok = false;   // a wall
