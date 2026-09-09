@@ -453,7 +453,10 @@ def main():
                 # Straight to ollama, so the answer can be read as it comes
                 # and stopped when it is done or when the time is up.
                 whole = page if not extra else page + "\n\n" + extra
-                think = args.reasoning != "off"
+                # The level, not merely yes or no. A model built with
+                # low/medium/high of its own answers in three seconds on low
+                # and fourteen on high, and the difference is not subtle.
+                think = False if args.reasoning == "off" else args.reasoning
                 text, why = ask_ollama(args.base, args.model, system, whole,
                                        think, args.budget)
                 # Cut off in the middle of a thought there is no object, and
