@@ -677,7 +677,7 @@ void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
   const float feet = here.z - 1.0f;
   const float max_drop = descending ? kMaxJumpDrop : kMaxDrop;
   const float low_lines[3] = {kKnee, kWaist, kChest};
-  const float head_line[1] = {kHead};
+  const float chest_line[1] = {kChest};
   for (int i = 0; i < kWhiskers; ++i) {
     const float angle = wanted + kWhiskerAngle[i];
     const Vec3 end{here.x + std::cos(angle) * kWhiskerLength[i],
@@ -706,7 +706,14 @@ void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
       ok = low;   // if it is a rail, it is a wall to go round
     } else if (can_look &&
                !WideClear(here, feet, end, ground, low_lines, 3)) {
-      if (WideClear(here, feet, end, ground, head_line, 1))
+      // Low enough to jump means low enough to jump - about waist height, a
+      // rail or a bench. It used to mean anything his head cleared, which is
+      // everything up to shoulder height, and a wall that tall is not hopped:
+      // he runs at it, catches the top and hangs there with his arms up until
+      // somebody notices. So the chest decides. Blocked at the knee and the
+      // waist but clear at the chest is a thing to jump; blocked at the chest
+      // is a wall, whatever the air above it is doing.
+      if (WideClear(here, feet, end, ground, chest_line, 1))
         low = true;   // something to jump over
       else
         ok = false;   // a wall
@@ -904,7 +911,12 @@ bool DecideStick(short* out_x, short* out_y) {
   // Off the ground and going nowhere: he is holding on to a ledge. Nothing
   // pressed for a moment and he drops, which is the only way down.
   if (now < g_letting_go_until) return false;
-  if (airborne && g_ground_known && g_above_ground > 1.2f &&
+  // Hanging is judged by where he is, not by whether the game calls him
+  // airborne. With his hands on a ledge and his feet off the ground he can
+  // read as standing, and the release that was meant to save him never
+  // fired: he stayed on the wall with his arms up while the walk reported
+  // walking.
+  if (g_ground_known && g_above_ground > 1.2f &&
       std::fabs(vz) < kStillVertical) {
     if (g_hanging_since == 0) g_hanging_since = now;
     if (now - g_hanging_since > kHangingMs) {
