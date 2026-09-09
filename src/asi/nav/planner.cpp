@@ -164,7 +164,11 @@ constexpr int kCallBudget = 200000;
 // the player has been standing there: a plan that has not been found in
 // this many milliseconds of trying is handed back as "no route", and the
 // journey feels its way instead.
-constexpr unsigned long long kPlanDeadlineMs = 6000;
+// Twelve seconds, not six: the collision field ahead of the graph paints a
+// street's worth of tiles and reads the ground under a metre grid, and on a
+// three-hundred-metre journey that is a few seconds by itself. The fallbacks
+// behind it must still have time to run when it does not reach.
+constexpr unsigned long long kPlanDeadlineMs = 12000;
 // A hillside: how much the ground may fall or rise over a quarter of a
 // metre and still be a surface he walks (or slides) on rather than an edge.
 constexpr float kSlopeSubStep    = 0.25f;
