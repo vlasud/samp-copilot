@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 
+#include "actions/chain.hpp"
 #include "actions/travel.hpp"
 #include "samp/chat.hpp"
 #include "samp/dialog.hpp"
@@ -85,6 +86,8 @@ void WatchEvents() {
 
   // A menu being walked, if one is.
   samp::DialogPathTick();
+  // And the chain of actions the brain handed over.
+  act::ChainTick();
 
   // The dialog on screen.
   const samp::Dialog dialog = samp::CurrentDialog();

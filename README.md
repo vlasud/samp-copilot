@@ -114,6 +114,25 @@ That is the shape of the whole thing: a brain that looks, consults the rules
 for the server it is on, and sends a chain of actions; and this module, which
 looks and does and decides nothing.
 
+### A chain of actions, walked by the module
+
+A brain that thinks in language cannot decide once a second: a look, a thought
+and an answer is seconds of work however short the thought. But the character
+has to act every second, and something has to be watching the world in
+between.
+
+So the brain does not drive. `act {steps:[...]}` hands over a chain - walk
+here, press this, say that, answer the dialog - and the module walks it,
+checking every tick. It stops by itself the moment something happens that the
+brain ought to know about: a dialog appeared, somebody used his name, he lost
+blood, a step got stuck, or the steps ran out. `act_status` says which of
+those it was, so the next thought is about a world that has changed rather
+than the one it last looked at.
+
+Reflexes belong in the module, where they are immediate and cost nothing;
+judgement belongs to whoever can weigh a roleplay server's etiquette against a
+locked door. Neither can do the other's job.
+
 ### Saying what it is doing
 
 `set_plan {summary, steps, doing}` puts the brain's intention on screen, under

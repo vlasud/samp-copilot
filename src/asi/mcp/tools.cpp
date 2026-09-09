@@ -12,6 +12,7 @@
 #include "log.hpp"
 #include "mcp/rpc.hpp"
 #include "mcp/server.hpp"
+#include "actions/chain.hpp"
 #include "actions/driver.hpp"
 #include "actions/travel.hpp"
 #include "actions/walker.hpp"
@@ -1038,6 +1039,111 @@ void RegisterTools(Server* server) {
                     {"routes_missed", facts.routes_missed},
                     {"loaded", facts.loaded},
                     {"note", facts.note}};
+      },
+  });
+
+  server->AddTool({
+      "act",
+      "Hands the module a chain of actions and lets it walk them, a step at a "
+      "time, checking the world every tick. This is how to drive the "
+      "character: a brain that thinks in language cannot decide once a "
+      "second, and the character has to act every second. The chain stops by "
+      "itself the moment something happens worth knowing about - a dialog "
+      "appeared, somebody used his name, he lost blood, a step got stuck - "
+      "and says which it was, so the next thought is about a world that has "
+      "changed. Returns at once; poll act_status. "
+      "Steps: {go:{x,y,stop_within}} walk somewhere; {press:\"walk\"} hold a "
+      "key (walk is the interaction key); {say:\"...\"} type a line of chat; "
+      "{answer:{choose|item,text,button}} answer the dialog on screen; "
+      "{wait:1500} do nothing for that many milliseconds.",
+      {{"type", "object"},
+       {"properties",
+        {{"steps",
+          {{"type", "array"}, {"items", {{"type", "object"}}},
+           {"description", "The chain, in order."}}},
+         {"stop_on_dialog", {{"type", "boolean"}}},
+         {"stop_on_spoken_to", {{"type", "boolean"}}},
+         {"stop_on_hurt", {{"type", "boolean"}}}}},
+       {"required", json::array({"steps"})}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              std::vector<act::Step> steps;
+              for (const json& one : args["steps"]) {
+                if (!one.is_object()) continue;
+                act::Step step;
+                if (one.contains("go")) {
+                  const json& go = one["go"];
+                  step.kind = "go";
+                  step.x = go.value("x", 0.0f);
+                  step.y = go.value("y", 0.0f);
+                  step.stop_within = go.value("stop_within", 2.0f);
+                } else if (one.contains("press")) {
+                  step.kind = "press";
+                  step.key = one["press"].is_string()
+                                 ? one["press"].get<std::string>()
+                                 : std::string{"walk"};
+                  step.ms = one.value("ms", 0);
+                } else if (one.contains("say")) {
+                  step.kind = "say";
+                  step.text = one["say"].get<std::string>();
+                } else if (one.contains("answer")) {
+                  const json& answer = one["answer"];
+                  step.kind = "answer";
+                  if (answer.is_object()) {
+                    step.item = answer.value("item", -1);
+                    step.choose = answer.value("choose", std::string{});
+                    step.text = answer.value("text", std::string{});
+                    step.button = answer.value("button", 1);
+                  }
+                } else if (one.contains("wait")) {
+                  step.kind = "wait";
+                  step.ms = one["wait"].get<int>();
+                } else {
+                  continue;
+                }
+                steps.push_back(std::move(step));
+              }
+              if (steps.empty()) throw std::runtime_error("no steps");
+              act::StopWhen when;
+              when.on_dialog = args.value("stop_on_dialog", true);
+              when.on_spoken_to = args.value("stop_on_spoken_to", true);
+              when.on_hurt = args.value("stop_on_hurt", true);
+              act::RunChain(std::move(steps), when);
+              const act::ChainStatus status = act::ChainGet();
+              return json{{"running", status.running},
+                          {"steps", status.steps},
+                          {"note", "poll act_status"}};
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "act_status",
+      "How the chain is going: how many steps are done, what is under way, "
+      "and - when it has stopped - which of the things worth knowing about "
+      "stopped it: done, dialog, spoken_to, hurt, blocked, cancelled.",
+      NoArguments(),
+      [](const json&) -> json {
+        const act::ChainStatus status = act::ChainGet();
+        return json{{"running", status.running},
+                    {"at", status.at},
+                    {"steps", status.steps},
+                    {"doing", status.doing},
+                    {"stopped_by", status.stopped_by},
+                    {"note", status.note},
+                    {"ran_ms", status.ran_ms}};
+      },
+  });
+
+  server->AddTool({
+      "act_stop",
+      "Drops whatever chain is running.",
+      NoArguments(),
+      [](const json&) -> json {
+        act::StopChain("asked to stop");
+        return json{{"running", false}};
       },
   });
 
