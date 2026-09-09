@@ -127,6 +127,26 @@ getting that wait wrong is how a step lands in the wrong menu. `follow_dialog`
 does the waiting; `dialog_path_status` says where it got to, and lists what
 was on screen when a step named something that was not there.
 
+### Whether he fits
+
+Two questions look the same and are not: "is the line ahead clear" and "does
+his body fit through there". The walker asked the first, so a chair leg half
+a metre off the centre line was invisible until he walked into it, and the
+room map drew routes through gaps between beds that his shoulders do not go
+through - after which he spent twenty seconds finding that out with his face,
+in the middle of a ward, in front of everybody.
+
+Both ask the second now. Each whisker is swept at the width of his shoulders,
+and a square of the room map counts only if a person could stand in the
+middle of it without touching anything - four short lines out to shoulder
+width at knee and chest, asked of the squares the flood actually reaches. In
+the picture such a square is an `o`: floor, but too narrow for him.
+
+Measured on the trip that used to fail - reception to the far ward - it went
+from stopping seven metres short after two minutes to arriving in seventy
+seconds, with the number of "leaned on it, stepped round it, dead end" moments
+down from twenty-seven to eleven.
+
 ### Who is who
 
 `get_people` keeps a record of everyone seen or heard and puts a standing on

@@ -21,13 +21,39 @@ constexpr float kChest = 1.05f;
 // How far the floor of a square may sit from the floor he is standing on
 // before it is a different storey rather than the same room.
 constexpr float kSameFloor = 2.0f;
-constexpr int   kMaxTests = 60000;
+constexpr int   kMaxTests = 140000;
+// Half the width of a person. A square he cannot stand in the middle of is
+// not a square he can walk through, however clear the line between it and
+// its neighbour looks - which is why a route could be drawn through a gap
+// between two beds that his shoulders do not fit into, and why he then spent
+// twenty seconds finding that out with his face.
+constexpr float kBodyRadius = 0.34f;
 // How near a door has to be to the step being taken for the thing stopping
 // him to be that door. A door leaf is about a metre wide.
 constexpr float kDoorReach = 1.4f;
 constexpr float kDoorHeight = 3.0f;
 
 int g_tests = 0;
+
+// Whether a person standing here would be touching anything: four short
+// lines out to the width of his shoulders, at knee and at chest. Asked only
+// of squares the flood actually reaches, so it costs a few thousand reads
+// for a room rather than a hundred thousand for the whole grid.
+bool BodyFits(const Vec3& at, float floor_z) {
+  if (g_tests >= kMaxTests) return false;
+  const float heights[2] = {kKnee, kChest};
+  const float out[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+  for (const float* side : out) {
+    for (const float height : heights) {
+      g_tests += 1;
+      const Vec3 from{at.x, at.y, floor_z + height};
+      const Vec3 to{at.x + side[0] * kBodyRadius,
+                    at.y + side[1] * kBodyRadius, floor_z + height};
+      if (!game::LineClear(from, to, /*include_vehicles=*/false)) return false;
+    }
+  }
+  return true;
+}
 
 bool Passable(const Vec3& a, const Vec3& b, float z) {
   if (g_tests >= kMaxTests) return false;
@@ -109,6 +135,8 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
 
   // Flooded from under his feet, one square at a time, through whatever a
   // knee and a chest can both pass.
+  // 0 not asked, 1 he fits, 2 he does not.
+  std::vector<char> fits(static_cast<std::size_t>(side) * side, 0);
   std::vector<int> came_from(static_cast<std::size_t>(side) * side, -1);
   std::vector<char> reached(static_cast<std::size_t>(side) * side, 0);
   std::deque<int> queue;
@@ -128,6 +156,10 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
       if (nx < 0 || ny < 0 || nx >= side || ny >= side) continue;
       const int next = index(nx, ny);
       if (reached[next] || !has_floor[next]) continue;
+      // Room for his shoulders in the square itself, asked once and kept.
+      if (fits[next] == 0)
+        fits[next] = BodyFits(centre(nx, ny), floor[next]) ? 1 : 2;
+      if (fits[next] == 2) continue;
       Vec3 door;
       bool through_a_door = false;
       if (!Passable(centre(hx, hy), centre(nx, ny), floor[here] + 1.0f)) {
@@ -184,6 +216,7 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
       if (at == start)            row += '@';
       else if (at == best)        row += '*';
       else if (reached[at])       row += '.';
+      else if (fits[at] == 2)     row += 'o';   // floor, but too narrow for him
       else if (has_floor[at])     row += '#';
       else                        row += ' ';
     }
