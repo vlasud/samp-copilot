@@ -1,5 +1,8 @@
 #include "hooks/cursor.hpp"
 
+#include "game/mouse_watch.hpp"
+#include "hooks/windowmode.hpp"
+
 #include <intrin.h>
 #include <MinHook.h>
 
@@ -37,6 +40,22 @@ std::atomic<LONG> g_last_set_y{-100000};
 std::atomic<unsigned long long> g_last_set_ms{0};
 std::atomic<bool> g_named_pinner{false};
 
+// Whether the game's attempt on the pointer is answered rather than done.
+//
+// Two reasons it should be. The panel is interactive and wants the mouse,
+// which is what this hook was built for. Or the game is running behind
+// another window: it believes it still has the focus, because this module
+// keeps the loss from it so that the character carries on walking, and a
+// game that believes that goes on putting the pointer back in the middle of
+// the screen every frame - which drags the pointer out of whatever the
+// person at the keyboard is actually doing.
+bool AnswerInstead() {
+  if (g_freed.load(std::memory_order_acquire)) return true;
+  if (!WindowMode::RunsInBackground()) return false;
+  const HWND window = game::GameWindow();
+  return window != nullptr && GetForegroundWindow() != window;
+}
+
 BOOL WINAPI HookedSetCursorPos(int x, int y) {
   g_last_set_x.store(x, std::memory_order_relaxed);
   g_last_set_y.store(y, std::memory_order_relaxed);
@@ -45,7 +64,7 @@ BOOL WINAPI HookedSetCursorPos(int x, int y) {
     LOG_INFO("the pointer is being placed by {} (SetCursorPos to {}, {})",
              mem::DescribeAddress(reinterpret_cast<std::uintptr_t>(_ReturnAddress())),
              x, y);
-  if (!g_freed.load(std::memory_order_acquire)) return g_real_set(x, y);
+  if (!AnswerInstead()) return g_real_set(x, y);
 
   if (!g_named_caller.exchange(true)) {
     LOG_INFO("the mouse is being recentred by {} - answering its "
@@ -61,7 +80,7 @@ BOOL WINAPI HookedSetCursorPos(int x, int y) {
 
 BOOL WINAPI HookedGetCursorPos(LPPOINT out) {
   if (out == nullptr) return g_real_get(out);
-  if (!g_freed.load(std::memory_order_acquire)) return g_real_get(out);
+  if (!AnswerInstead()) return g_real_get(out);
 
   out->x = g_pinned_x.load(std::memory_order_acquire);
   out->y = g_pinned_y.load(std::memory_order_acquire);
