@@ -97,6 +97,11 @@ Advance RolePlay. Мод — тело: он сообщает мир и выпо�
   забыть: у игрока можно спросить дорогу или где устроиться на работу, и это
   бывает быстрее, чем обойти полгорода. Заговаривай, когда это к месту.
   Помни про антифлуд.
+- Рядом с игроком может стоять пометка: friend, wary, enemy. Строка KEEP
+  AWAY значит, что от этих людей лучше держаться подальше - уходи, не
+  ввязывайся, не стой рядом. Если кто-то тебя ограбил, ударил или угрожал,
+  помечай его сам: set_standing {name, standing, why}. Кто помог или мирно
+  поговорил - friend. Это твоя память о людях, её больше вести некому.
 - В игре есть транспорт, и о нём тоже легко забыть. Пешком через весь город
   идти долго: use_vehicle сажает в ближайшую машину, drive_to везёт. Машину
   надо обслуживать — заправлять и чинить.
@@ -170,6 +175,7 @@ KNOWN = ("travel_to", "move_to", "act", "act_stop", "press_key",
          "set_standing", "follow_dialog", "find_text", "stop",
          "get_textdraws", "get_dialog", "get_trail", "get_people",
          "get_objects", "get_object_texts", "check_point", "walk_status",
+         "set_standing",
          "travel_status", "drive_status", "act_status", "probe_heights")
 
 

@@ -1323,11 +1323,24 @@ void RegisterTools(Server* server) {
                   const float dx = at[0] - here.x, dy = at[1] - here.y;
                   const float away = std::sqrt(dx * dx + dy * dy);
                   if (away > radius) continue;
-                  json who{{"name", one.value("name", std::string())},
+                  const std::string name = one.value("name", std::string());
+                  json who{{"name", name},
                            {"id", one.value("id", -1)},
                            {"away_m", away},
                            {"at", json{{"x", at[0]}, {"y", at[1]}, {"z", at[2]}}},
                            {"in_vehicle", one.value("in_vehicle", false)}};
+                  // What is thought of him, kept beside him rather than in a
+                  // list somebody has to go and ask for. A record nobody
+                  // reads at the moment of meeting is a record for nothing.
+                  for (const people::Person& known : people::Everyone()) {
+                    if (known.name != name) continue;
+                    if (!known.standing.empty() && known.standing != "neutral") {
+                      who["standing"] = known.standing;
+                      if (!known.why.empty()) who["why"] = known.why;
+                    }
+                    if (known.spoke_to_me > 0) who["has_spoken_to_me"] = true;
+                    break;
+                  }
                   if (one.contains("health")) who["health"] = one["health"];
                   if (one.contains("weapon_name"))
                     who["weapon_name"] = one["weapon_name"];

@@ -133,10 +133,18 @@ def report(c):
     if players:
         out.append("PLAYERS near (real people - you may talk to them): " + "; ".join(near(
             players, 8,
-            lambda r: "%s[%s] %.0fm%s%s"
+            lambda r: "%s[%s] %.0fm%s%s%s%s"
             % (r.get("name", "?"), r.get("id", "?"), r["away_m"],
                " hp%.0f" % r["health"] if r.get("health") is not None else "",
-               " in a car" if r.get("in_vehicle") else ""))))
+               " in a car" if r.get("in_vehicle") else "",
+               " **%s**" % r["standing"] if r.get("standing") else "",
+               " (has spoken to you)" if r.get("has_spoken_to_me") else ""))))
+    bad = [r for r in players if r.get("standing") in ("enemy", "wary")]
+    if bad:
+        out.append("KEEP AWAY: " + "; ".join(
+            "%s %.0fm - %s" % (r.get("name", "?"), r.get("away_m", 0),
+                               r.get("why", "no reason recorded"))
+            for r in bad[:4]))
     else:
         out.append("PLAYERS near: none")
 
