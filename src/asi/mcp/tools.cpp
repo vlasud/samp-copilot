@@ -1305,6 +1305,37 @@ void RegisterTools(Server* server) {
               }
               const game::Vec3 here{self.x, self.y, self.z};
 
+              // Other players, by name, and never mixed in with the NPCs.
+              //
+              // They used to be dropped here entirely - the loop below skipped
+              // every ped the pool called a player - so a brain looking at the
+              // world saw shopkeepers and medics and not one living soul. It
+              // could neither speak to anybody nor keep away from anybody,
+              // which is half of what it is for.
+              json players = json::array();
+              {
+                std::int64_t age_ms = -1;
+                const json world = asi::Bridge::GetWorld(&age_ms);
+                for (const json& one : world.value("players", json::array())) {
+                  if (!one.value("streamed", false)) continue;
+                  const auto at = one.value("pos", std::vector<float>{});
+                  if (at.size() != 3) continue;
+                  const float dx = at[0] - here.x, dy = at[1] - here.y;
+                  const float away = std::sqrt(dx * dx + dy * dy);
+                  if (away > radius) continue;
+                  json who{{"name", one.value("name", std::string())},
+                           {"id", one.value("id", -1)},
+                           {"away_m", away},
+                           {"at", json{{"x", at[0]}, {"y", at[1]}, {"z", at[2]}}},
+                           {"in_vehicle", one.value("in_vehicle", false)}};
+                  if (one.contains("health")) who["health"] = one["health"];
+                  if (one.contains("weapon_name"))
+                    who["weapon_name"] = one["weapon_name"];
+                  players.push_back(std::move(who));
+                }
+              }
+              out["players"] = std::move(players);
+
               json npcs = json::array();
               for (const game::Ped& who : game::PedsNear(here, radius, 12, self.game_ped)) {
                 if (who.is_player) continue;

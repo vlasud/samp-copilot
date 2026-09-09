@@ -2,9 +2,42 @@
 
 #include <windows.h>
 
+#include <fstream>
+
+#include "types.hpp"
+
+#include <windows.h>
+
 #include <mutex>
 
 namespace gtabot::state {
+namespace {
+
+std::string g_task;
+unsigned long long g_task_read_ms = 0;
+
+}  // namespace
+
+std::string TaskAsked() {
+  const unsigned long long now = GetTickCount64();
+  if (now - g_task_read_ms < 1000 && g_task_read_ms != 0) return g_task;
+  g_task_read_ms = now;
+  g_task.clear();
+  std::ifstream file(gtabot::ModuleDirectory() + "bot.task");
+  if (file) {
+    std::string line;
+    while (std::getline(file, line)) {
+      while (!line.empty() && (line.back() == 13 || line.back() == 10))
+        line.pop_back();
+      if (line.empty()) continue;
+      if (!g_task.empty()) g_task += " ";
+      g_task += line;
+    }
+  }
+  if (g_task.size() > 300) g_task.resize(300);
+  return g_task;
+}
+
 namespace {
 
 // More than this on screen is a wall of text nobody reads while a character

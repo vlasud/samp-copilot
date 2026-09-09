@@ -1736,6 +1736,10 @@ void DrawMenu(unsigned long long now) {
 // what the brain's honesty about itself is worth.
 void DrawPlan(unsigned long long now, float below) {
   const state::Plan plan = state::GetPlan();
+  // What the person asked for, before what the brain decided: it is the one
+  // line on this panel that somebody typed themselves, and it should be
+  // where they look first.
+  const std::string wanted_by_hand = state::TaskAsked();
   // An empty panel is indistinguishable from a broken one, and the brain
   // going quiet is exactly what somebody watching needs to see. So it always
   // says something: what was last said, or that nothing has been.
@@ -1751,13 +1755,21 @@ void DrawPlan(unsigned long long now, float below) {
   const float title_px = 13 * s, step_px = 12 * s;
   const float pad = 12 * s, gap = 6 * s;
 
+  const std::string asked_line =
+      wanted_by_hand.empty() ? std::string()
+                             : ("человек просит: " + wanted_by_hand);
   float width = Wid(g_bold, title_px, title.c_str());
+  if (!asked_line.empty()) {
+    const float w = Wid(g_body, step_px, asked_line.c_str());
+    if (w > width) width = w;
+  }
   for (const std::string& step : plan.steps) {
     const float w = Wid(g_body, step_px, step.c_str()) + 18 * s;
     if (w > width) width = w;
   }
   const float box_w = width + pad * 2;
   const float box_h = pad + title_px + gap + 2 * (kSmallPx * s) + gap * 1.2f +
+                      (asked_line.empty() ? 0.0f : step_px + gap * 0.8f) +
                       plan.steps.size() * (step_px + gap * 0.6f) + pad * 0.6f;
   const ImVec2 p0(io.DisplaySize.x - box_w - 28 * s, below + 8 * s);
   const ImVec2 p1(p0.x + box_w, p0.y + box_h);
@@ -1765,6 +1777,10 @@ void DrawPlan(unsigned long long now, float below) {
   draw->AddRect(p0, p1, kUiBorder, 8 * s);
 
   float y = p0.y + pad;
+  if (!asked_line.empty()) {
+    Txt(draw, g_body, step_px, ImVec2(p0.x + pad, y), kUiWarn, asked_line.c_str());
+    y += step_px + gap * 0.8f;
+  }
   Txt(draw, g_bold, title_px, ImVec2(p0.x + pad, y), nothing_said ? kUiDim : kUiText,
       title.c_str());
   y += title_px + gap;

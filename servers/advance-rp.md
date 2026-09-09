@@ -6,13 +6,27 @@ sort of thing a player learns once and then just knows.
 
 `185.169.134.239:7777` · launcher `Advance.exe` · client `omp-client.dll`
 
-## The keys
+## The world says which key
 
-The server's interaction key is **Left Alt** — controller action **17**, which
-`get_bindings` reads off the player's own table. Every prompt that says
-"Нажмите Alt" means that key. Under a Russian keyboard layout the game sees no
-letter keys at all, so the module asks its own window for English before
-anything else.
+Nothing here names the key for an action, because the server already does. It
+writes the instruction on the thing itself — a label over a bed reads "Койка
+свободна / Нажмите Alt / чтобы занять её" — and on the screen, where its own
+prompts appear beside whatever the character is standing in front of. Both
+reach the state page. Read the prompt in front of you and press the key it
+names; a key written down here would be one more thing to go stale the day
+the server changes it.
+
+Under a Russian keyboard layout the game sees no letter keys at all, so the
+module asks its own window for English before anything else.
+
+## Getting into a building
+
+Doors are mostly scenery. What lets a character inside is a pickup on the
+ground at the entrance: walk onto it and the server takes it from there —
+sometimes straight in, sometimes with a dialog first. So a building that
+looks shut is usually a pickup not yet stood on, not a door to be pushed. The
+state page lists the pickups near him with their places; the nearest one at a
+doorway is the way in.
 
 ## Who is who, by skin
 
@@ -36,7 +50,7 @@ Stand **in front of his face**, not beside him. `get_npcs` reads the game's own
 ped pool and gives each one's heading and the point to stand on; standing at
 his shoulder gets nothing at all.
 
-The dialog re-arms only after leaving his range and coming back. Pressing Alt
+The dialog re-arms only after leaving his range and coming back. Pressing the key
 twice in a row where you stand gets silence the second time — walk away ten
 metres and return.
 
@@ -55,8 +69,8 @@ The city hospital interior sits at about `x 1335..1375, y -860..-800, z 1013`.
 отпустить Вас в таком состоянии. Отправляйтесь на лечение" and does nothing.
 The order matters:
 
-1. **Take a free bed first.** A label reads "Койка свободна / Нажмите Alt
-   чтобы занять её"; stand about a metre from it and press Alt. The server
+1. **Take a free bed first.** A label over each one says what to press;
+   stand about a metre from it and press what it says. The server
    answers "Вы заняли койку" and "Чтобы выписаться подойдите к врачу или
    выйдите за пределы больницы".
 2. **Then the doctor**, found by skin (70, 274, 275, 276). A player medic if
@@ -64,7 +78,7 @@ The order matters:
    reception says "Дежурный врач: Свободен" when the post is vacant, and a
    working doctor advertises in the chat with a telephone number. With no
    player medic, the NPC at the counter: stand in front of his face and press
-   Alt. He offers a list, "Что Вас беспокоит?", of fifteen ailments.
+   the key his own prompt names. He offers a list, "Что Вас беспокоит?", of fifteen ailments.
 3. **Then the exit arrow.**
 
 Taking the bed is what starts the treatment, and it then runs by itself
@@ -112,7 +126,7 @@ kit from his inventory.
 Getting hired is not done from the station. `/fire` and `/tasks` both answer
 that the character has to be an employee already, the checkpoint standing on
 the station square does nothing when walked into, and the social workers there
-- skin **76**, not the medics' skins - do not open a dialog for Alt at all.
+- skin **76**, not the medics' skins - do not open a dialog at all.
 Each profession appears to have its own place of hiring: the fire station for
 a fireman, and so on. Go there rather than trying to be hired where he stands.
 

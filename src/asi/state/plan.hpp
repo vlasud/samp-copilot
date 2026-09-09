@@ -17,6 +17,13 @@
 
 namespace gtabot::state {
 
+// What the person watching has asked for, typed into `bot.task` beside the
+// module while the character plays. The brain sets its own goals; this is
+// the way somebody leans over and says "go and buy a car" without stopping
+// anything. Read afresh, so an edit shows up on the panel within a second
+// and reaches the brain on its next thought.
+std::string TaskAsked();
+
 struct Plan {
   std::string summary;              // what he is trying to do, in a line
   std::vector<std::string> steps;   // and how, in order

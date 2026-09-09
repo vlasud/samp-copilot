@@ -85,18 +85,38 @@ def report(c):
                   (" step %s of %s" % (act.get("at"), act.get("steps")))
                   if act.get("running") else "", going))
 
+    # People, and which of them are people.
+    #
+    # A player and a shopkeeper look the same in a list of peds, and the
+    # difference is most of what a character needs: one can be spoken to,
+    # asked the way, avoided; the other sells things and stands still. They
+    # were not even both here - players were dropped before they reached the
+    # page at all.
+    players = s.get("players") or []
+    if players:
+        out.append("PLAYERS near (real people - you may talk to them): " + "; ".join(near(
+            players, 6,
+            lambda r: "%s[%s] %.0fm%s%s"
+            % (r.get("name", "?"), r.get("id", "?"), r["away_m"],
+               " hp%.0f" % r["health"] if r.get("health") is not None else "",
+               " in a car" if r.get("in_vehicle") else ""))))
+    else:
+        out.append("PLAYERS near: none")
+
     npcs = s.get("npcs") or []
     if npcs:
-        out.append("people near: " + "; ".join(near(
+        out.append("NPCs near (server characters, not people): " + "; ".join(near(
             npcs, 5,
             lambda r: "skin %s %.1fm stand_at %.0f,%.0f"
             % (r.get("skin"), r["away_m"],
                (r.get("stand_at") or {}).get("x", 0),
                (r.get("stand_at") or {}).get("y", 0)))))
 
+    # A pickup on the ground at a door is how a character gets inside; a door
+    # itself is mostly scenery. So they are worth their place on the page.
     pickups = s.get("pickups") or []
     if pickups:
-        out.append("pickups: " + "; ".join(near(
+        out.append("pickups (standing on one is how you enter a place): " + "; ".join(near(
             pickups, 4,
             lambda r: "model %s %.0fm at %.0f,%.0f"
             % (r.get("model"), r["away_m"],
@@ -127,6 +147,18 @@ def report(c):
     carried = [plain(r.get("text", ""), 40) for r in labels if r.get("away_m", -1) < 0]
     if carried:
         out.append("signs on people and cars: " + " | ".join(carried[:5]))
+
+    # What the server has written on the screen. Its prompts say which key
+    # opens the thing in front of him, and the money and the hunger bar are
+    # here as well; none of it reaches the chat.
+    try:
+        drawn = c.tool("get_textdraws", {"limit": 40}).get("textdraws") or []
+    except Exception:
+        drawn = []
+    mine = [plain(d.get("text", ""), 70) for d in drawn if d.get("for_me")]
+    mine = [t for t in mine if len(t) > 1][:8]
+    if mine:
+        out.append("on screen: " + " | ".join(mine))
 
     out.append("chat:")
     for row in (s.get("chat") or [])[-6:]:

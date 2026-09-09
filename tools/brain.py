@@ -18,12 +18,29 @@ import re
 import sys
 import time
 import subprocess
+import io
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mcp_http import Client
 import step as digest
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# What the person wants, typed while the character is playing.
+#
+# The brain sets its own goals, and that is the point of it - but somebody
+# watching should be able to lean over and say "go and buy a car" without
+# stopping anything. The file is read afresh every turn, so an edit reaches
+# the character on his next thought and nothing has to be restarted.
+TASK_FILE = os.path.join("D:" + os.sep + "SAMP", "bot.task")
+
+
+def asked_of_him():
+    try:
+        with io.open(TASK_FILE, encoding="utf-8-sig") as f:
+            return f.read().strip()[:600]
+    except Exception:
+        return ""
 BASE = "https://api.aitunnel.ru/v1/"
 
 RULES = """Ты — мозг бота, играющего в GTA San Andreas на русском ролевом сервере
@@ -62,12 +79,34 @@ Advance RolePlay. Мод — тело: он сообщает мир и выпо�
   answer_dialog {item|button|text}   ответ в открытом диалоге
   send_chat {text}           сказать в чат или ввести команду сервера
   use_vehicle {}, drive_to {x,y}     машины
+Читающие, их тоже можно звать в do, они ничего не меняют:
+  look {radius,chat}         полное состояние, если страницы мало
+  get_labels {}, get_pickups {}, get_npcs {}, get_checkpoint {}
+  get_textdraws {}           что сервер написал на экране
+  get_chat {lines}           последние строки чата
 
 Правила, которые важнее дотошности:
 - Пока страница пишет "DIALOG IS OPEN", работает только answer_dialog.
 - В чате антифлуд: между своими сообщениями не меньше 30 секунд.
 - Если с персонажем заговорили — отвечай по-русски, в роли. Имя Lo_Vlasuddd.
 - Решай быстро и коротко. Медленный цикл — это провал.
+- Клавиш наизусть не знай. Сервер сам пишет, что нажать: на табличке над
+  предметом и в подсказках на экране. Прочитай подсказку и нажми то, что в
+  ней названо.
+- Рядом живые люди, и это не приоритет, а возможность, о которой легко
+  забыть: у игрока можно спросить дорогу или где устроиться на работу, и это
+  бывает быстрее, чем обойти полгорода. Заговаривай, когда это к месту.
+  Помни про антифлуд.
+- В игре есть транспорт, и о нём тоже легко забыть. Пешком через весь город
+  идти долго: use_vehicle сажает в ближайшую машину, drive_to везёт. Машину
+  надо обслуживать — заправлять и чинить.
+
+ЦЕЛИ ТЫ СТАВИШЬ СЕБЕ САМ. Никто не выдаёт тебе задание на каждый ход. Ты
+живёшь на этом сервере как обычный игрок: смотришь, чего тебе сейчас не
+хватает, и сам решаешь, чем заняться — вылечиться, заработать, освоить
+незнакомое место, познакомиться с кем-то. Держи в голове одну цель за раз,
+пиши её в summary, и меняй её сам, когда она достигнута или оказалась
+тупиковой.
 """
 
 
@@ -155,6 +194,20 @@ def as_call(one):
     return None, None
 
 
+def in_a_line(page):
+    """The past, as one honest line rather than half a page.
+
+    The history used to carry the first four hundred characters of each old
+    state, which cut off in the middle of a word - "NPCs near (server char" -
+    and told the brain a maimed version of a world that had moved on anyway.
+    What is worth remembering about a moment is where he was and what he was
+    doing; the whole truth is in the page for the moment he is in now.
+    """
+    lines = page.split(chr(10))
+    keep = [l for l in lines if l.startswith(("me:", "doing:", "dialog:"))]
+    return " | ".join(keep) if keep else lines[0][:120]
+
+
 def revive():
     """Start the game again and wait for it to be in the world.
 
@@ -189,8 +242,7 @@ def revive():
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("task", nargs="?",
-                   default="Осмотрись и веди себя как обычный игрок.")
+    p.add_argument("task", nargs="?", default="")
     p.add_argument("--model", default="deepseek-v4-flash-0731")
     # How often a question goes out, counted from the last one rather than
     # from the answer. Thinking already takes several seconds; resting a
@@ -227,6 +279,8 @@ def main():
     began = time.time()
     turn = 0
     just_revived = 0     # the turn the game last came back on
+    last_typed = None
+    args_task_holder = [""]
 
     while turn < args.turns and time.time() - began < args.minutes * 60:
         turn += 1
@@ -247,10 +301,22 @@ def main():
         for was, did in recent[-4:]:
             messages.append({"role": "user", "content": was})
             messages.append({"role": "assistant", "content": did})
+        # With no task given, none is invented: the brain decides
+        # for itself what it wants, and a line reading "Задача:"
+        # with nothing after it is just an invitation to make one up.
+        typed = asked_of_him()
+        if typed != last_typed:
+            last_typed = typed
+            print("   человек просит: %s" % (typed or "(ничего)"))
+        wanted = args.task.strip()
+        if typed:
+            wanted = (wanted + " " + typed).strip() if wanted else typed
+        args_task_holder[0] = wanted
+        asked_for = ("Задача от человека: %s\n\n" % wanted) if wanted else ""
         messages.append({
             "role": "user",
-            "content": "Задача: %s\n\nСостояние:\n%s\n\nОтветь одним JSON."
-                       % (args.task, page)})
+            "content": "%sСостояние:\n%s\n\nОтветь одним JSON."
+                       % (asked_for, page)})
         def ask(extra=None):
             said = list(messages)
             if extra:
@@ -284,7 +350,7 @@ def main():
         if order is None:
             print("%3d  %4.1f c  не разобрал (%s): %s"
                   % (turn, thought, why_stopped, answer.strip()[:80] or "пусто"))
-            recent.append((page[:400], answer[:200]))
+            recent.append((in_a_line(page), answer[:200]))
             continue
 
         summary = str(order.get("summary", "") or "").strip()[:120]
@@ -317,7 +383,7 @@ def main():
             except Exception as e:
                 print("       %s !! %s" % (name, e))
 
-        recent.append((page[:400], json.dumps(order, ensure_ascii=False)[:300]))
+        recent.append((in_a_line(page), json.dumps(order, ensure_ascii=False)[:300]))
         if order.get("stop"):
             # Not while the world is still coming back. The client had just
             # been restarted, the page said the connection was gone, and the
