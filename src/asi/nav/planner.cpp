@@ -678,14 +678,18 @@ struct Planner::Job {
     }
     const game::PathNode& node = start_candidates[start_i++];
     const Verdict verdict = WalkableFrom(a, a.z - kPedOrigin, Lifted(node));
-    if (verdict.ok && Penalty(verdict) == 0) {
-      start_node = node;
-      join_have = false;
-      stage = Stage::kJoinGoal;
-    } else if (verdict.ok) {
-      if (!join_have || Cost(verdict) < join_cost) {
+    if (verdict.ok) {
+      // Nearest is not best. The first walkable node used to win outright,
+      // and getting on the graph at the nearest one can mean getting on it
+      // behind you: measured on one journey, the first four legs were
+      // fifty-seven metres of walking that ended thirty-four metres further
+      // from where he was going than he started. What counts is what it
+      // costs to get on plus how much journey is left once he is on, so
+      // every candidate is weighed and the best kept.
+      const float score = Cost(verdict) + Distance2D(node.pos, b);
+      if (!join_have || score < join_cost) {
         join_have = true;
-        join_cost = Cost(verdict);
+        join_cost = score;
         join_best = node;
       }
     } else {
