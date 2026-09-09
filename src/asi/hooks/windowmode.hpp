@@ -58,8 +58,12 @@ class WindowMode {
   //
   // On, the module keeps the news of the loss from the game and sends keys
   // as messages to the window rather than through the system, so they reach
-  // the game and nothing else. bot.cfg `background=off` restores the plain
-  // behaviour.
+  // the game and nothing else.
+  //
+  // Off by default, because it is not finished: the password at the log-in
+  // screen does not arrive by that road, so a character started behind
+  // another window never gets in. bot.cfg `background=on` turns it on for
+  // anybody who wants the character walking while they work.
   static bool RunsInBackground();
 
   // Whether the investigation instruments run: hardware watchpoints on the

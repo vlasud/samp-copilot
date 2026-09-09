@@ -173,9 +173,16 @@ def revive():
         except Exception as e:
             print("!! %s: %s" % (" ".join(what), e))
             return None
-    body = Client(timeout=120)
-    body.handshake("brain")
-    body.tool("set_movement", {"on": True})
+    # The launch can fail, or the game can come up and not answer yet, and
+    # a rescue that throws is worse than no rescue at all - it takes the
+    # loop down with it.
+    try:
+        body = Client(timeout=120)
+        body.handshake("brain")
+        body.tool("set_movement", {"on": True})
+    except Exception as e:
+        print("!! игра не отозвалась: %s" % e)
+        return None
     print("игра снова на связи")
     return body
 
@@ -185,6 +192,11 @@ def main():
     p.add_argument("task", nargs="?",
                    default="Осмотрись и веди себя как обычный игрок.")
     p.add_argument("--model", default="deepseek-v4-flash-0731")
+    # How often a question goes out, counted from the last one rather than
+    # from the answer. Thinking already takes several seconds; resting a
+    # fixed amount on top of it would make the loop slower the harder the
+    # brain thought, which is backwards.
+    p.add_argument("--gap", type=float, default=5.0)
     p.add_argument("--minutes", type=float, default=20.0)
     p.add_argument("--turns", type=int, default=400)
     p.add_argument("--base", default=BASE)
@@ -315,7 +327,10 @@ def main():
             else:
                 print("мозг говорит: закончили")
                 break
-        time.sleep(max(1.0, min(5.0, float(order.get("wait", 2)))))
+        wanted = min(15.0, float(order.get("wait", 0) or 0))
+        rest = max(args.gap - (time.time() - asked), wanted)
+        if rest > 0:
+            time.sleep(rest)
 
     print("ходов %d, минут %.1f" % (turn, (time.time() - began) / 60.0))
 

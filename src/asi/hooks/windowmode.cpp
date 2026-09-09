@@ -1,5 +1,7 @@
 #include "hooks/windowmode.hpp"
 
+#include "game/mouse_watch.hpp"
+
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -39,7 +41,7 @@ std::string Trim(const std::string& in) {
   return a == std::string::npos ? std::string{} : in.substr(a, b - a + 1);
 }
 
-std::atomic<bool> g_background{true};
+std::atomic<bool> g_background{false};
 
 void ReadConfig() {
   const std::string path = ModuleDirectory() + "bot.cfg";
@@ -150,6 +152,34 @@ void WindowMode::ForceWindowed(D3DPRESENT_PARAMETERS* params) {
   if (g_width > 0 && g_height > 0) {
     params->BackBufferWidth  = static_cast<UINT>(g_width);
     params->BackBufferHeight = static_cast<UINT>(g_height);
+  }
+
+  // A minimised window has no size, and a device asked to reset to nothing
+  // does not come back: the game sat there with its frames stopped until
+  // somebody restored the window by hand. It happens because a size of zero
+  // means "take it from the window", and the window is an icon.
+  //
+  // Windows still remembers how big it will be when it is restored, so that
+  // is the size the device is given. The game then keeps its device, keeps
+  // drawing into a buffer nobody can see, and keeps walking - which is the
+  // whole point of running behind another window.
+  const HWND window = game::GameWindow();
+  if (window != nullptr && IsIconic(window)) {
+    WINDOWPLACEMENT placement{};
+    placement.length = sizeof(placement);
+    int width = 800, height = 600;
+    if (GetWindowPlacement(window, &placement)) {
+      const RECT& restored = placement.rcNormalPosition;
+      if (restored.right - restored.left > 64 &&
+          restored.bottom - restored.top > 64) {
+        width  = restored.right - restored.left;
+        height = restored.bottom - restored.top;
+      }
+    }
+    params->BackBufferWidth  = static_cast<UINT>(width);
+    params->BackBufferHeight = static_cast<UINT>(height);
+    LOG_INFO("the window is an icon - the device is reset to {}x{} rather "
+             "than to nothing", width, height);
   }
 }
 

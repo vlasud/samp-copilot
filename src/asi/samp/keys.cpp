@@ -1,6 +1,7 @@
 #include "samp/keys.hpp"
 
 #include "game/mouse_watch.hpp"
+#include "hooks/windowmode.hpp"
 
 #include <windows.h>
 
@@ -36,6 +37,23 @@ std::atomic<unsigned long long> g_last_event_ms{0};
 // reason it runs is that the game thread has stopped - so it cannot ask the
 // script what it was doing.
 std::atomic<bool> g_down[256] = {};
+// And how each one went down: as a message to the window, or through the
+// system. A key must be let go of the same way it was pressed. Choosing the
+// route afresh for the release is what left keys stuck: pressed through the
+// system with the game in front, then released as a message once somebody
+// alt-tabbed away - the game let go, and Windows went on believing the key
+// was held, in every other program on the desktop.
+std::atomic<bool> g_by_message[256] = {};
+
+// Whether a key pressed now would go as a message rather than through the
+// system: only when the game is not the window in front, and only when it
+// is meant to carry on back there.
+bool WouldPost() {
+  const HWND window = game::GameWindow();
+  if (window == nullptr) return false;
+  if (GetForegroundWindow() == window) return false;
+  return asi::WindowMode::RunsInBackground();
+}
 
 void Wipe() {
   if (!g_script.empty())
@@ -90,7 +108,15 @@ void SendKey(int vk, bool down) {
   // window messages, which is the same path the typed characters take, so
   // the key is posted to the window and reaches nothing else.
   const HWND window = game::GameWindow();
-  if (window != nullptr && GetForegroundWindow() != window) {
+  // Down: pick the route and remember it. Up: whatever the route was.
+  bool post = false;
+  if (down) {
+    post = WouldPost();
+    if (vk >= 0 && vk < 256) g_by_message[vk].store(post);
+  } else {
+    post = vk >= 0 && vk < 256 && g_by_message[vk].load();
+  }
+  if (post && window != nullptr) {
     const UINT scan = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC);
     LPARAM info = static_cast<LPARAM>(1) | (static_cast<LPARAM>(scan) << 16);
     if (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT ||
@@ -98,11 +124,18 @@ void SendKey(int vk, bool down) {
         vk == VK_DELETE || vk == VK_HOME || vk == VK_END)
       info |= 0x01000000;                     // an extended key
     if (!down) info |= 0xC0000000;            // it was down, and is going up
-    // Alt is a system key and arrives as one, or the game does not see it.
-    const bool alt = vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU;
-    UINT what = down ? WM_KEYDOWN : WM_KEYUP;
-    if (alt) what = down ? WM_SYSKEYDOWN : WM_SYSKEYUP;
-    PostMessageA(window, what, static_cast<WPARAM>(vk), info);
+    // Alt goes as a plain key like the rest.
+    //
+    // Windows delivers a real Alt as WM_SYSKEYDOWN, so that is what was sent
+    // at first, and the game ignored it: at a hospital bed, in front, Alt
+    // answered "Вы заняли койку", and the identical press behind another
+    // window answered nothing, while the window's own counter said the
+    // message had arrived. The game reads WM_KEYDOWN and not its system
+    // twin. Sending the plain one also keeps Windows from making a
+    // SC_KEYMENU of the release, which is the thing that opens the window
+    // menu and stops the game dead.
+    PostMessageA(window, down ? WM_KEYDOWN : WM_KEYUP,
+                 static_cast<WPARAM>(vk), info);
     return;
   }
 
@@ -149,6 +182,18 @@ void KeysPress(int virtual_key, int times) {
 
 void KeysHold(const std::vector<int>& keys) {
   std::lock_guard<std::mutex> lock(g_mutex);
+  // Somebody alt-tabbing changes the way a key has to be delivered while it
+  // is still held. The old press is let go of by the road it came in on and
+  // pressed again by the new one, so the two never cross.
+  const bool post_now = WouldPost();
+  for (int held : g_held) {
+    if (held < 0 || held >= 256) continue;
+    if (std::find(keys.begin(), keys.end(), held) == keys.end()) continue;
+    if (g_by_message[held].load() == post_now) continue;
+    SendKey(held, false);
+    SendKey(held, true);
+    g_events.fetch_add(2, std::memory_order_relaxed);
+  }
   for (int held : g_held)
     if (std::find(keys.begin(), keys.end(), held) == keys.end()) {
       SendKey(held, false);
@@ -168,6 +213,17 @@ void KeysPanicRelease() {
   for (int vk = 0; vk < 256; ++vk) {
     if (!g_down[vk].load()) continue;
     SendKey(vk, false);
+    // And through the system as well, whatever the key's own route was.
+    // This runs when things have already gone wrong, and a key left down at
+    // the system's level is the failure that follows the person out of the
+    // game and into everything else they use.
+    INPUT in{};
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = static_cast<WORD>(vk);
+    in.ki.wScan = static_cast<WORD>(MapVirtualKeyW(static_cast<UINT>(vk),
+                                                   MAPVK_VK_TO_VSC));
+    in.ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(1, &in, sizeof(in));
   }
 }
 
