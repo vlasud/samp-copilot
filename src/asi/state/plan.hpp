@@ -22,11 +22,21 @@ struct Plan {
   std::vector<std::string> steps;   // and how, in order
   int         doing = -1;           // which step is under way, -1 for none
   long long   posted_ms = 0;        // when it was last said
-  long long   age_ms = 0;
+  long long   age_ms = 0;           // and how long ago that was
+  // How long the brain took between looking and saying what it would do.
+  // Measured here rather than reported by the brain: the module knows when
+  // it was last asked for a snapshot and when the answer came back, and a
+  // number nobody has to be honest about is worth more than one they do.
+  long long   thought_ms = -1;
+  bool        ever = false;
 };
 
 void SetPlan(const std::string& summary, std::vector<std::string> steps,
              int doing);
 Plan GetPlan();
+
+// The brain has just asked what the world looks like. The clock for its
+// thinking starts here.
+void NotedLook();
 
 }  // namespace gtabot::state

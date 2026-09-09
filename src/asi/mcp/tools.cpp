@@ -1085,7 +1085,8 @@ void RegisterTools(Server* server) {
         return json{{"summary", plan.summary},
                     {"steps", plan.steps},
                     {"doing", plan.doing},
-                    {"age_ms", plan.age_ms}};
+                    {"age_ms", plan.age_ms},
+                    {"thought_ms", plan.thought_ms}};
       },
   });
 
@@ -1107,6 +1108,10 @@ void RegisterTools(Server* server) {
           {{"type", "integer"}, {"minimum", 0}, {"maximum", 40},
            {"description", "How many recent chat lines. Defaults to eight."}}}}}},
       [](const json& args) {
+        // The clock starts when the brain asks, not when the game thread gets
+        // round to answering: what is being measured is the brain's thinking,
+        // and a stalled frame is not that.
+        state::NotedLook();
         return Rpc::RunOnGameThread(
             [args]() -> json {
               const float radius = args.value("radius", 40.0f);

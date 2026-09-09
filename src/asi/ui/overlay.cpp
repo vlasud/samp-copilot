@@ -1724,7 +1724,7 @@ void DrawPlan(unsigned long long now, float below) {
     if (w > width) width = w;
   }
   const float box_w = width + pad * 2;
-  const float box_h = pad + title_px + gap +
+  const float box_h = pad + title_px + gap + kSmallPx * s + gap * 0.8f +
                       plan.steps.size() * (step_px + gap * 0.6f) + pad * 0.6f;
   const ImVec2 p0(io.DisplaySize.x - box_w - 28 * s, below + 8 * s);
   const ImVec2 p1(p0.x + box_w, p0.y + box_h);
@@ -1735,6 +1735,19 @@ void DrawPlan(unsigned long long now, float below) {
   Txt(draw, g_bold, title_px, ImVec2(p0.x + pad, y), kUiText,
       plan.summary.c_str());
   y += title_px + gap;
+
+  // When it last spoke, and how long it took to work this out. Both are the
+  // module's own measurements: how stale the caption is, and the gap between
+  // the brain asking what the world looked like and saying what it would do.
+  char when[96];
+  const long long seconds = plan.age_ms / 1000;
+  if (plan.thought_ms >= 0)
+    std::snprintf(when, sizeof(when), "%lld c назад  ·  думал %.1f c",
+                  seconds, plan.thought_ms / 1000.0);
+  else
+    std::snprintf(when, sizeof(when), "%lld c назад", seconds);
+  Txt(draw, g_body, kSmallPx * s, ImVec2(p0.x + pad, y), kUiDim, when);
+  y += kSmallPx * s + gap * 0.8f;
   for (std::size_t i = 0; i < plan.steps.size(); ++i) {
     const bool doing = static_cast<int>(i) == plan.doing;
     const ImU32 colour = doing ? kUiAccent : kUiDim;
