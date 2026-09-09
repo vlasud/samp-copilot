@@ -1148,7 +1148,10 @@ void RegisterTools(Server* server) {
       "act_status",
       "How the chain is going: how many steps are done, what is under way, "
       "and - when it has stopped - which of the things worth knowing about "
-      "stopped it: done, dialog, spoken_to, hurt, blocked, cancelled.",
+      "stopped it: done, dialog, spoken_to, hurt, blocked, cancelled. "
+      "'typing' is true while letters are still being played into the game: "
+      "a line of chat is not said the moment it is asked for, and deciding "
+      "again before it is finished is how the same sentence gets said twice.",
       NoArguments(),
       [](const json&) -> json {
         const act::ChainStatus status = act::ChainGet();
@@ -1158,7 +1161,8 @@ void RegisterTools(Server* server) {
                     {"doing", status.doing},
                     {"stopped_by", status.stopped_by},
                     {"note", status.note},
-                    {"ran_ms", status.ran_ms}};
+                    {"ran_ms", status.ran_ms},
+                    {"typing", samp::KeysBusy()}};
       },
   });
 

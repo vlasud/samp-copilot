@@ -117,10 +117,15 @@ def report(c):
         where = travel.get("destination") or [0, 0, 0]
         going += " %.0f m left to %.0f,%.0f" % (
             walk.get("remaining_m", 0), where[0], where[1])
-    out.append("doing: %s%s | walking: %s"
+    out.append("doing: %s%s%s | walking: %s"
                % (act.get("note", "idle"),
                   (" step %s of %s" % (act.get("at"), act.get("steps")))
-                  if act.get("running") else "", going))
+                  if act.get("running") else "",
+                  # Still saying the last thing. Worth a word on the page as
+                  # well as a wait in the loop: a sentence asked for is not a
+                  # sentence said.
+                  " (STILL TYPING - your last line is not finished)"
+                  if act.get("typing") else "", going))
 
     # People, and which of them are people.
     #

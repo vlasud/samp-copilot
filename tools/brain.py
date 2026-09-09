@@ -279,6 +279,26 @@ def main():
 
     while turn < args.turns and time.time() - began < args.minutes * 60:
         turn += 1
+
+        # Nothing is decided while the body is still talking.
+        #
+        # A line of chat is not said the moment it is asked for - the letters
+        # go into the game one at a time, like a hand. Deciding again in the
+        # middle of that got the same sentence said twice, because from the
+        # brain's side nothing had happened yet. So the turn waits for the
+        # keys to finish, up to a few seconds, and only then looks.
+        held = 0.0
+        while held < 6.0:
+            try:
+                if not (body.tool("act_status") or {}).get("typing"):
+                    break
+            except Exception:
+                break
+            time.sleep(0.4)
+            held += 0.4
+        if held >= 0.4:
+            print("      (подождал %.1f с, пока допечаталось)" % held)
+
         try:
             page = digest.report(body)
         except Exception as e:                       # the client went away
