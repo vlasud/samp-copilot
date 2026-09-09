@@ -18,6 +18,7 @@ import re
 import sys
 import time
 import subprocess
+import urllib.request
 import io
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -123,6 +124,68 @@ def read_key(base=""):
             return text
     print("No key. Put it in %s (git ignores it) or in BRAIN_API_KEY." % path)
     sys.exit(2)
+
+
+def ask_ollama(base, model, system, page, think, budget):
+    """A local model, taken by the collar.
+
+    A thinking model decides for itself how long to think, and this one
+    thought for eleven seconds on one turn and fifty-seven on the next - the
+    same question, the same settings. Neither ollama nor the OpenAI wrapper
+    will bound that: `num_predict` bounds tokens, and a long think then eats
+    the budget and leaves the object unfinished, which is worse than slow.
+
+    So the answer is read as it arrives and cut off at the first of two
+    things: the object is complete, or the time is up. Whatever has arrived
+    by then is what gets parsed - and a thinking model that has been thinking
+    for twelve seconds has usually written the object already and is
+    admiring it.
+
+    Returns (text, why_it_stopped).
+    """
+    body = json.dumps({
+        "model": model, "system": system, "prompt": page, "stream": True,
+        "think": think,
+        # One shape of request, always: changing the options between calls
+        # makes ollama reconsider the model and costs seconds.
+        "options": {"temperature": 0.4, "num_predict": 1500},
+        "keep_alive": "30m"}).encode()
+    where = base.rstrip("/")
+    if where.endswith("/v1"):
+        where = where[:-3]
+    request = urllib.request.Request(where + "/api/generate", body,
+                                     {"Content-Type": "application/json"})
+    said, thought = [], 0
+    deadline = time.time() + budget
+    # The socket's own patience is not the budget. Nothing arrives at all
+    # until the model starts writing, and it can spend a long time before
+    # that on a cold cache - a minute has been seen. The budget is counted
+    # here, chunk by chunk; the socket only has to outlast the wait for the
+    # first of them.
+    try:
+        stream = urllib.request.urlopen(request, timeout=max(90.0, budget * 6))
+    except Exception as e:
+        return "", "не дождался: %s" % str(e)[:60]
+    try:
+        for line in stream:
+            if not line.strip():
+                continue
+            try:
+                piece = json.loads(line.decode("utf-8"))
+            except ValueError:
+                continue
+            said.append(piece.get("response") or "")
+            thought += len(piece.get("thinking") or "")
+            if piece.get("done"):
+                break
+            whole = "".join(said)
+            if only_json(whole) is not None:
+                return whole, "объект собран"
+            if time.time() > deadline:
+                return whole, "вышло время"
+    finally:
+        stream.close()
+    return "".join(said), "договорил"
 
 
 def only_json(text):
@@ -271,6 +334,8 @@ def main():
     # OpenAI-shaped door is on 11434.
     p.add_argument("--local", action="store_true",
                    help="брать модель из ollama на этой машине")
+    # How long a local model may think before it is cut off mid-thought.
+    p.add_argument("--budget", type=float, default=12.0)
     p.add_argument("--models", action="store_true",
                    help="list what the service offers")
     args = p.parse_args()
@@ -384,6 +449,24 @@ def main():
             "content": "%sСостояние:\n%s\n\nОтветь одним JSON."
                        % (asked_for, page)})
         def ask(extra=None):
+            if is_local(args.base):
+                # Straight to ollama, so the answer can be read as it comes
+                # and stopped when it is done or when the time is up.
+                whole = page if not extra else page + "\n\n" + extra
+                think = args.reasoning != "off"
+                text, why = ask_ollama(args.base, args.model, system, whole,
+                                       think, args.budget)
+                # Cut off in the middle of a thought there is no object, and
+                # a turn spent musing is a turn the character stood still.
+                # So it is asked again with the thinking off, which on this
+                # model costs a second and a half and answers straight away.
+                if think and only_json(text) is None:
+                    print("      (%s - переспрашиваю без размышлений)" % why)
+                    text, why = ask_ollama(args.base, args.model, system, whole,
+                                           False, args.budget)
+                elif why != "объект собран":
+                    print("      (%s)" % why)
+                return text, why
             said = list(messages)
             if extra:
                 said.append({"role": "user", "content": extra})
