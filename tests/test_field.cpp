@@ -99,15 +99,16 @@ void TestField() {
     check::True(LeastClearance(g, cells) >= 3, "never within a cell of the corner");
   }
 
-  // A ledge: the east half of the room is a metre higher. The step is too
-  // tall, so the far side is out of reach and the search says so.
+  // A ledge: the east half of the room is a metre and a half higher. The
+  // step is too tall, so the far side is out of reach and the search says
+  // so. A metre exactly is allowed - that is a ramp at forty-five degrees.
   {
     Grid g = Room();
     for (int at = 0; at < g.W * g.H; ++at)
-      if (at % g.W >= 40) g.ground[at] = 11.0f;
+      if (at % g.W >= 40) g.ground[at] = 11.5f;
     bool reached = false;
-    const std::vector<int> cells = Route(&g, Vec3{5, 10, 11}, Vec3{35, 10, 12}, &reached);
-    check::True(!reached, "a metre of ledge is not stepped up");
+    const std::vector<int> cells = Route(&g, Vec3{5, 10, 11}, Vec3{35, 10, 12.5f}, &reached);
+    check::True(!reached, "a metre and a half of ledge is not stepped up");
     check::True(!cells.empty() && cells.back() % g.W == 39,
                 "the nearest reachable cell is at the foot of the ledge");
   }

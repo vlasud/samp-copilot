@@ -25,8 +25,8 @@ constexpr float kMargin = 40.0f;
 // The most field there is: three hundred and sixty metres a side. Beyond
 // that the world is not streamed anyway.
 constexpr int   kMaxSide = 720;
-// Painted in squares of this half-width, each with its own floor, because
-// the painter takes one floor height and a street is not one height.
+// Painted in squares of this half-width, each against its own floor,
+// because the painter takes one floor height and a street is not one height.
 constexpr float kTileRadius = 20.0f;
 // The band above the floor a body occupies: over the kerb, under the sign.
 constexpr float kBandLow  = 0.30f;
@@ -39,6 +39,9 @@ constexpr float kPersonRadius = 0.45f;
 constexpr int   kGroundStride = 2;
 constexpr int   kReadsPerStep = 800;
 constexpr int   kExpandPerStep = 6000;
+// How far a reading may differ from the height it was looked for at and
+// still be the ground rather than something else.
+constexpr float kSameLevel = 6.0f;
 // A pulled leg no longer than this, so the walker replans on a scale it can
 // see; and the squeeze out of whatever the start is painted inside.
 constexpr float kMaxLeg = 60.0f;
@@ -53,17 +56,21 @@ float Away(const Vec3& a, const Vec3& b) {
 }  // namespace
 
 struct Field::Work {
-  enum class Phase { kLayout, kPaint, kGround, kClearance, kSearch, kPull, kDone };
+  enum class Phase { kLayout, kGround, kPaint, kClearance, kSearch, kPull, kDone };
   Phase phase = Phase::kLayout;
   Vec3  from, to;
   unsigned long long began_ms = 0;
   Grid  grid;
   float ref_z = 0;
 
+  // Reading the ground, a batch a step, in two passes.
+  int ground_at = 0;
+  int ground_pass = 0;
+
+  // Painting, a tile a step.
   std::vector<Vec3> tile_centres;
   std::size_t tile_i = 0;
   std::vector<game::col::Body> bodies;
-  int ground_at = 0;
 
   int start = -1, goal = -1;
   Searcher searcher;
@@ -129,6 +136,7 @@ bool Field::Step() {
       const int H = std::min(kMaxSide, static_cast<int>(std::ceil((maxy - g.y0) / kCell)));
       g.Resize(W, H);
       w.ref_z = w.from.z - kPedOrigin;
+      result_.ref_z = w.ref_z;
 
       // Tiles across the box, overlapping a little so no seam is bare.
       const float pitch = kTileRadius * 2.0f - kCell * 2.0f;
@@ -143,23 +151,104 @@ bool Field::Step() {
         w.bodies.push_back(game::col::Body{who.position.x, who.position.y,
                                            who.position.z, kPersonRadius});
       }
-      w.phase = Phase::kPaint;
+      w.phase = Phase::kGround;
+      return false;
+    }
+
+    case Phase::kGround: {
+      // Two passes. The first reads every reading cell from the height of
+      // the start: on a flat city that settles nearly all of them. The
+      // second, only for the cells the first could not settle, reads from
+      // the height of a neighbour that was settled, so a hillside is
+      // followed up. Chaining from the neighbour for every cell was the
+      // mistake before: inside a building the chain climbed storey by
+      // storey, a tile's floor came out at fifty metres, and at the wall the
+      // chain came back down to a street it no longer believed in and left
+      // it unknown.
+      int reads = 0;
+      const int n = g.W * g.H;
+      while (w.ground_at < n && reads < kReadsPerStep) {
+        const int at = w.ground_at++;
+        const int ix = at % g.W, iy = at / g.W;
+        if (ix % kGroundStride != 0 || iy % kGroundStride != 0) continue;
+        if (w.ground_pass == 1 && g.known[at] != 2) continue;   // settled already
+        float start_z = w.ref_z;
+        if (w.ground_pass == 1) {
+          bool have = false;
+          const int dx[4] = {-kGroundStride, kGroundStride, 0, 0};
+          const int dy[4] = {0, 0, -kGroundStride, kGroundStride};
+          for (int d = 0; d < 4 && !have; ++d)
+            if (g.inside(ix + dx[d], iy + dy[d]) &&
+                g.known[g.index(ix + dx[d], iy + dy[d])] == 1) {
+              start_z = g.ground[g.index(ix + dx[d], iy + dy[d])];
+              have = true;
+            }
+          if (!have) continue;
+        }
+        const Vec3 c = g.centre(at);
+        float found = 0, water = 0;
+        ++reads;
+        ++result_.ground_reads;
+        // From the game's memory directly, not through the guarded call:
+        // that one spends a slot per read out of a small reserve per frame
+        // and, once the reserve is gone, answers "no ground" - which is how
+        // forty per cent of a street came back unknown and walled him in.
+        // Objects are left out: a bench top is not a floor.
+        if (game::col::GroundBelow(c.x, c.y, start_z + 4.0f, &found, false) &&
+            std::fabs(found - start_z) < kSameLevel &&
+            !(game::col::WaterAt(c.x, c.y, &water) && water > found + 0.5f)) {
+          g.known[at] = 1;
+          g.ground[at] = found;
+        } else {
+          g.known[at] = 2;
+        }
+      }
+      if (w.ground_at >= n) {
+        if (w.ground_pass == 0) {
+          w.ground_pass = 1;
+          w.ground_at = 0;
+        } else {
+          w.phase = Phase::kPaint;
+        }
+      }
       return false;
     }
 
     case Phase::kPaint: {
       if (w.tile_i >= w.tile_centres.size()) {
-        w.phase = Phase::kGround;
+        w.phase = Phase::kClearance;
         return false;
       }
       const Vec3 c = w.tile_centres[w.tile_i++];
-      // The tile's own floor: the ground under its middle, looked for from
-      // well above the start's, so a tile up the hill still finds it.
+      // The tile's floor is the ground it actually holds: the median of the
+      // readings inside it near the start's own level, and of all of them
+      // only when there are none near it. A probe from twenty-five metres
+      // up found roofs and canopies - floors of three and thirty-eight
+      // metres on a street at twelve - and half the tiles were painted in
+      // mid-air.
+      std::vector<float> heights, close_by;
+      {
+        int cx, cy;
+        const int reach = static_cast<int>(kTileRadius / kCell);
+        if (g.cell_of(Vec3{c.x, c.y, 0}, &cx, &cy)) {
+          for (int iy = cy - reach; iy < cy + reach; iy += kGroundStride)
+            for (int ix = cx - reach; ix < cx + reach; ix += kGroundStride) {
+              if (!g.inside(ix, iy)) continue;
+              const int at = g.index(ix, iy);
+              if (g.known[at] != 1) continue;
+              heights.push_back(g.ground[at]);
+              if (std::fabs(g.ground[at] - w.ref_z) < kSameLevel)
+                close_by.push_back(g.ground[at]);
+            }
+        }
+      }
+      std::vector<float>& pick = close_by.empty() ? heights : close_by;
       float floor = w.ref_z;
-      float found = 0;
-      if (game::GroundBelow(Vec3{c.x, c.y, w.ref_z + 25.0f}, &found) &&
-          std::fabs(found - w.ref_z) < 30.0f)
-        floor = found;
+      if (!pick.empty()) {
+        std::nth_element(pick.begin(), pick.begin() + pick.size() / 2, pick.end());
+        floor = pick[pick.size() / 2];
+      }
+      result_.tile_floors.push_back(floor);
       game::col::Footprint fp;
       if (!game::col::PaintFootprint(c.x, c.y, floor, kTileRadius, kCell, kBandLow,
                                      kBandHigh, kBodyRadius, {}, w.bodies, &fp))
@@ -177,51 +266,35 @@ bool Field::Step() {
       return false;
     }
 
-    case Phase::kGround: {
-      int reads = 0;
-      const int n = g.W * g.H;
-      while (w.ground_at < n && reads < kReadsPerStep) {
-        const int at = w.ground_at++;
-        const int ix = at % g.W, iy = at / g.W;
-        if (ix % kGroundStride != 0 || iy % kGroundStride != 0) continue;
-        if (g.blocked[at]) continue;      // solid: its ground is not walked on
-        // From a little above the nearest reading already made, so a slope
-        // is followed up and down rather than lost.
-        float start_z = w.ref_z;
-        if (ix >= kGroundStride && g.known[g.index(ix - kGroundStride, iy)] == 1)
-          start_z = g.ground[g.index(ix - kGroundStride, iy)];
-        else if (iy >= kGroundStride && g.known[g.index(ix, iy - kGroundStride)] == 1)
-          start_z = g.ground[g.index(ix, iy - kGroundStride)];
-        const Vec3 c = g.centre(at);
-        float found = 0, water = 0;
-        ++reads;
-        ++result_.ground_reads;
-        if (game::GroundBelow(Vec3{c.x, c.y, start_z + 4.0f}, &found) &&
-            std::fabs(found - start_z) < 6.0f &&
-            !(game::WaterLevel(Vec3{c.x, c.y, found}, &water) && water > found + 0.5f)) {
-          g.known[at] = 1;
-          g.ground[at] = found;
-        } else {
-          g.known[at] = 2;
-        }
-      }
-      if (w.ground_at >= n) w.phase = Phase::kClearance;
-      return false;
-    }
-
     case Phase::kClearance: {
       // The cells between the readings take the reading beside them.
       for (int iy = 0; iy < g.H; ++iy)
         for (int ix = 0; ix < g.W; ++ix) {
           const int at = g.index(ix, iy);
-          if (g.known[at] != 0 || g.blocked[at]) continue;
+          if (g.known[at] != 0) continue;
           const int src = g.index(ix - ix % kGroundStride, iy - iy % kGroundStride);
           g.known[at] = g.known[src];
           g.ground[at] = g.ground[src];
         }
       Chamfer(&g);
-      for (int at = 0; at < g.W * g.H; ++at)
-        if (!g.passable(at)) ++result_.blocked;
+      for (int at = 0; at < g.W * g.H; ++at) {
+        if (g.blocked[at]) ++result_.blocked;
+        else if (g.known[at] != 1) ++result_.unknown;
+      }
+      // What was read along the line toward the target, for looking at
+      // when the route comes out wrong.
+      {
+        const float span = std::min(80.0f, Away(w.from, w.to));
+        const float len = std::max(1.0f, Away(w.from, w.to));
+        const float ux = (w.to.x - w.from.x) / len, uy = (w.to.y - w.from.y) / len;
+        for (float m = 0; m <= span; m += 1.0f) {
+          int ix, iy;
+          const Vec3 p{w.from.x + ux * m, w.from.y + uy * m, 0};
+          if (!g.cell_of(p, &ix, &iy)) { result_.ground_line.push_back(-2); continue; }
+          const int at = g.index(ix, iy);
+          result_.ground_line.push_back(g.blocked[at] ? -3 : g.known[at] == 1 ? g.ground[at] : -1);
+        }
+      }
 
       // Where he stands, squeezed out of whatever the paint put him in.
       int sx, sy, gx, gy;
@@ -258,12 +331,35 @@ bool Field::Step() {
       result_.reaches_target = w.searcher.reached_goal() && Away(g.centre(end), w.to) < 2.0f;
       result_.short_by_m = Away(g.centre(end), w.to);
       result_.reached = w.searcher.expanded();
+      result_.refused_shut = w.searcher.refused_shut();
+      result_.refused_step = w.searcher.refused_step();
+      result_.refused_corner = w.searcher.refused_corner();
+      result_.tallest_step = w.searcher.tallest_step();
       if (end == w.start) {
         result_.ok = false;
         return finish("no way out of the start cell");
       }
       const std::vector<int> cells = w.searcher.Cells();
       const std::vector<int> pulled = Pull(g, cells, kMaxLeg, SearchRules{}.max_step);
+      if (!result_.reaches_target) {
+        const int ex = end % g.W, ey = end / g.W;
+        char line[120];
+        std::snprintf(line, sizeof(line), "end cell ground %.2f clear %.1f",
+                      g.ground[end], g.clear[end] / 3.0f);
+        result_.end_neighbours.push_back(line);
+        for (int dy = -1; dy <= 1; ++dy)
+          for (int dx = -1; dx <= 1; ++dx) {
+            if (dx == 0 && dy == 0) continue;
+            if (!g.inside(ex + dx, ey + dy)) continue;
+            const int at = g.index(ex + dx, ey + dy);
+            std::snprintf(line, sizeof(line),
+                          "%+d,%+d: %s ground %.2f (step %.2f) clear %.1f known %d blocked %d",
+                          dx, dy, g.passable(at) ? "free" : "shut", g.ground[at],
+                          g.ground[at] - g.ground[end], g.clear[at] / 3.0f,
+                          g.known[at], g.blocked[at]);
+            result_.end_neighbours.push_back(line);
+          }
+      }
 
       result_.points.clear();
       result_.points.push_back(w.from);
@@ -291,18 +387,20 @@ bool Field::Step() {
           else if (at == end)           row += '*';
           else if (on_route[at])        row += 'o';
           else if (g.blocked[at])       row += '#';
+          else if (w.searcher.visited(at)) row += 'x';
           else if (g.known[at] != 1)    row += ' ';
           else                          row += '.';
         }
         result_.picture.push_back(std::move(row));
       }
 
-      char note[240];
+      char note[260];
       std::snprintf(note, sizeof(note),
                     "collision field %dx%d at %.1f m: %d tiles, %d ground reads, "
-                    "%d%% solid or unknown, route %.0f m in %d legs%s",
+                    "%d%% solid, %d%% unknown, route %.0f m in %d legs%s",
                     g.W, g.H, kCell, result_.tiles, result_.ground_reads,
                     static_cast<int>(100.0f * result_.blocked / std::max(1, g.W * g.H)),
+                    static_cast<int>(100.0f * result_.unknown / std::max(1, g.W * g.H)),
                     result_.length_m, static_cast<int>(result_.points.size()) - 1,
                     result_.reaches_target ? "" : " - ends short of the target");
       result_.note = note;

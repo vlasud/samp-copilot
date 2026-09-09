@@ -41,7 +41,10 @@ struct Grid {
 void Chamfer(Grid* g);
 
 struct SearchRules {
-  float max_step = 0.70f;     // a ledge taller than this is not crossed
+  // A metre of rise over a metre of ground - forty-five degrees, what the
+  // game's own peds manage on a ramp. Seven-tenths cut the stairs off a
+  // beach promenade and walled him onto it.
+  float max_step = 1.00f;
   int   clear_wanted = 4;     // cells from a wall before walking is free
   float near_wall_cost = 0.35f;
   int   max_expand = 250000;
@@ -59,6 +62,14 @@ class Searcher {
   bool reached_goal() const { return reached_; }
   int  end() const;                 // the goal, or the nearest cell
   int  expanded() const { return expanded_; }
+  // Why neighbours were turned away, for the times the search ends short:
+  // shut (solid or unknown), too tall a step, or the corner of a wall.
+  int  refused_shut() const { return refused_shut_; }
+  int  refused_step() const { return refused_step_; }
+  int  refused_corner() const { return refused_corner_; }
+  float tallest_step() const { return tallest_step_; }
+  // Whether a cell was expanded, for drawing where the search got to.
+  bool visited(int at) const { return !closed_.empty() && closed_[at] != 0; }
   // The way back from `end()` to the start, start first.
   std::vector<int> Cells() const;
 
@@ -75,6 +86,8 @@ class Searcher {
   std::vector<Open>  heap_;
   bool done_ = false, reached_ = false, started_ = false;
   int  expanded_ = 0;
+  int  refused_shut_ = 0, refused_step_ = 0, refused_corner_ = 0;
+  float tallest_step_ = 0;
 };
 
 // The few cells the way really needs: from each, the furthest later one

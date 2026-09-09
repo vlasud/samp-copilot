@@ -49,9 +49,21 @@ struct FieldResult {
   float length_m = 0;
   std::string note;
   // How much world went into it.
-  int   cells = 0, blocked = 0, reached = 0, tiles = 0, ground_reads = 0,
-        expanded = 0;
+  int   cells = 0, blocked = 0, unknown = 0, reached = 0, tiles = 0,
+        ground_reads = 0, expanded = 0;
   int   took_ms = 0;
+  // What went into it, for looking at when it goes wrong: the floor each
+  // tile was painted against, and the ground read along the line from the
+  // start toward the target, a metre a step (-1 where none was found).
+  std::vector<float> tile_floors;
+  std::vector<float> ground_line;
+  float ref_z = 0;
+  // The eight cells round where the route ended, when it ended short: for
+  // each, whether it is passable, its ground and its clearance - the
+  // question being why the search would not go on from there.
+  std::vector<std::string> end_neighbours;
+  int refused_shut = 0, refused_step = 0, refused_corner = 0;
+  float tallest_step = 0;
   // One character a cell, every other cell, rows from the north down.
   std::vector<std::string> picture;
 };

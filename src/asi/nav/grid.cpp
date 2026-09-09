@@ -84,6 +84,8 @@ void Searcher::Start(const Grid* g, int start, int goal, const Vec3& aim,
   done_ = reached_ = false;
   started_ = true;
   expanded_ = 0;
+  refused_shut_ = refused_step_ = refused_corner_ = 0;
+  tallest_step_ = 0;
 }
 
 int Searcher::end() const { return reached_ ? goal_ : nearest_; }
@@ -111,13 +113,21 @@ bool Searcher::Step(int budget) {
       const int nx = hx + step_x[d], ny = hy + step_y[d];
       if (!g.inside(nx, ny)) continue;
       const int next = g.index(nx, ny);
-      if (closed_[next] || !g.passable(next)) continue;
+      if (closed_[next]) continue;
+      if (!g.passable(next)) { ++refused_shut_; continue; }
       // A diagonal only between two free orthogonal neighbours: a body does
       // not pass through the corner where two walls meet.
       if (d >= 4 && (!g.passable(g.index(hx + step_x[d], hy)) ||
-                     !g.passable(g.index(hx, hy + step_y[d]))))
+                     !g.passable(g.index(hx, hy + step_y[d])))) {
+        ++refused_corner_;
         continue;
-      if (std::fabs(g.ground[next] - g.ground[cur.at]) > rules_.max_step) continue;
+      }
+      const float rise = std::fabs(g.ground[next] - g.ground[cur.at]);
+      if (rise > rules_.max_step) {
+        ++refused_step_;
+        tallest_step_ = std::max(tallest_step_, rise);
+        continue;
+      }
       const float run = g.cell * (d >= 4 ? 1.41421f : 1.0f);
       const float clear_cells = g.clear[next] / 3.0f;
       const float penalty = clear_cells < rules_.clear_wanted

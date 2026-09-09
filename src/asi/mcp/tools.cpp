@@ -1483,6 +1483,13 @@ void RegisterTools(Server* server) {
                        {"tiles", r.tiles}, {"ground_reads", r.ground_reads},
                        {"expanded", r.expanded}, {"took_ms", r.took_ms}};
               if (args.value("picture", false)) out["picture"] = r.picture;
+              out["ref_z"] = r.ref_z;
+              out["tile_floors"] = r.tile_floors;
+              out["ground_line"] = r.ground_line;
+              out["end_neighbours"] = r.end_neighbours;
+              out["refused"] = json{{"shut", r.refused_shut}, {"step", r.refused_step},
+                                    {"corner", r.refused_corner},
+                                    {"tallest_step", r.tallest_step}};
               return out;
             },
             25000);
