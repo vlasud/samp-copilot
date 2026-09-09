@@ -8,6 +8,7 @@
 
 #include "game/collision.hpp"
 #include "log.hpp"
+#include "game/peds.hpp"
 #include "samp/objects.hpp"
 
 namespace gtabot::nav {
@@ -51,6 +52,8 @@ constexpr float kDoorOpen = 0.75f;
 // Where he already stands is proof enough that a person can; the first
 // metre round him is not asked.
 constexpr float kSqueezeOut = 1.0f;
+// How much room a person standing in the way takes up.
+constexpr float kPersonRadius = 0.45f;
 // How wide a berth a pickup gets. A pickup fires within about a metre.
 constexpr float kPickupDisc = 1.4f;
 constexpr int   kMaxFloorReads = 40000;
@@ -92,9 +95,21 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
     door_leaves.push_back(game::col::Leaf{door.at.x, door.at.y, door.at.z});
   }
 
+  // Everybody standing about. A player in a doorway is as solid as the
+  // doorway; the difference is that he walks off, which is why the room is
+  // drawn again every few seconds rather than remembered.
+  std::vector<game::col::Body> bodies;
+  for (const game::Ped& who : game::PedsNear(from, span, 48)) {
+    if (Distance2D(who.position, from) < 0.8f) continue;   // himself
+    if (std::fabs(who.position.z - from.z) > 2.5f) continue;
+    bodies.push_back(game::col::Body{who.position.x, who.position.y,
+                                     who.position.z, kPersonRadius});
+  }
+
   game::col::Footprint fp;
   if (!game::col::PaintFootprint(from.x, from.y, floor_z, span, kCell, kBandLow,
-                                 kBandHigh, kBodyRadius, door_leaves, &fp) ||
+                                 kBandHigh, kBodyRadius, door_leaves, bodies,
+                                 &fp) ||
       fp.side <= 0) {
     room.note = "the world could not be painted";
     return room;
@@ -299,6 +314,8 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
     room.note += "; through " + std::to_string(room.doors.size()) + " door(s)";
   if (pickups_painted > 0)
     room.note += "; round " + std::to_string(pickups_painted) + " pickup(s)";
+  if (!bodies.empty())
+    room.note += "; round " + std::to_string(bodies.size()) + " person(s)";
   return room;
 }
 

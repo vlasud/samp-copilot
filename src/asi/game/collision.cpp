@@ -922,7 +922,8 @@ bool LineClear(const Vec3& a, const Vec3& b, bool vehicles) {
 
 bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
                     float z_lo, float z_hi, float inflate,
-                    const std::vector<Leaf>& skip_here, Footprint* out) {
+                    const std::vector<Leaf>& skip_here,
+                    const std::vector<Body>& also, Footprint* out) {
   if (!Ready() || out == nullptr || cell <= 0.05f || radius <= 0) return false;
   EnsureWindow(cx, cy);
   const int side = static_cast<int>(std::ceil(radius * 2.0f / cell));
@@ -955,6 +956,14 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
       const int count = bucket >= 0 ? static_cast<int>(g_bucket[bucket].size()) : 0;
       PaintSector(&p, sx, sy, items, count);
     }
+  // And whoever is standing about. A player in a doorway is as solid as the
+  // doorway, and he is the one obstacle that walks off on his own - which is
+  // why the map is redrawn rather than remembered.
+  for (const Body& body : also) {
+    if (body.z + 1.0f < p.z_lo || body.z - 1.0f > p.z_hi) continue;
+    PaintCircle(p, body.x, body.y, body.radius, body.z - 1.0f, body.z + 1.0f);
+    ++out->entities;
+  }
   g_queries.fetch_add(1, std::memory_order_relaxed);
   return true;
 }

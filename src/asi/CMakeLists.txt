@@ -24,6 +24,7 @@ add_library(bot MODULE
   game/paths.cpp
   nav/indoors.cpp
   nav/planner.cpp
+  nav/ring.cpp
   nav/roads.cpp
   nav/trail.cpp
   hooks/cursor.cpp

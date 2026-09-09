@@ -88,9 +88,15 @@ struct Leaf { float x = 0, y = 0, z = 0; };
 // wall is built out of the same model as its doors, and skipping the model
 // erased the whole wall: the map showed a way through and the character
 // stood against the glass looking at the sea.
+// One more thing standing in the way, that the pools do not hold: a player.
+// Peds live in their own pool and move every frame, so they are handed in
+// rather than looked up here.
+struct Body { float x = 0, y = 0, z = 0, radius = 0; };
+
 bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
                     float z_lo, float z_hi, float inflate,
-                    const std::vector<Leaf>& skip_here, Footprint* out);
+                    const std::vector<Leaf>& skip_here,
+                    const std::vector<Body>& also, Footprint* out);
 
 // For the input line: queries, entities and primitives looked at.
 std::string Line();

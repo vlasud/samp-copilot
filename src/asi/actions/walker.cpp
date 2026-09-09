@@ -1,6 +1,7 @@
 #include "actions/walker.hpp"
 
 #include "actions/contact.hpp"
+#include "nav/ring.hpp"
 #include "nav/trail.hpp"
 
 #include "samp/input_state.hpp"
@@ -217,6 +218,13 @@ float             g_arrive_last = kArriveLast;
 int               g_backouts = 0;
 bool              g_last_leg_is_the_destination = false;
 bool              g_strict = false;
+// The ring: how often it is asked, how far it looks, and what it last said.
+constexpr unsigned long long kRingEveryMs = 120;
+constexpr float   kRingReach = 2.4f;
+unsigned long long g_ring_ms = 0;
+bool              g_ring_turned = false;
+float             g_ring_steer = 0;
+float             g_ring_free = 0;
 // How many points ahead the smoothing may look. The route is half-metre
 // squares, so eight of them is four metres - about as far as a person sees a
 // clear line across a room.
@@ -1189,8 +1197,21 @@ bool DecideStick(short* out_x, short* out_y) {
   // predicted. The whiskers stay for the open street, where a plan really
   // can be ignorant of a parked car; in here the game answers the question
   // every frame by how far he got.
+  // Indoors: look all the way round first and turn off before touching
+  // anything, then let contact deal with whatever was not seen. The ring is
+  // answered from the collision pools and the ped pool - the map of the room
+  // as it is this instant, players included - and never by calling the game.
+  float ring_aim = wanted;
+  if (g_strict && now - g_ring_ms >= kRingEveryMs && game::CallSlotsLeft() > 600) {
+    g_ring_ms = now;
+    const nav::Ring ring = nav::LookRound(here, wanted, kRingReach);
+    g_ring_turned = ring.ok && ring.turned;
+    g_ring_steer = ring.ok ? ring.steer : wanted;
+    g_ring_free = ring.ok ? ring.free_ahead_m : kRingReach;
+  }
+  if (g_strict && g_ring_turned) ring_aim = g_ring_steer;
   const float steered = g_strict
-                            ? ContactSteer(here, wanted, pace_for_contact, now)
+                            ? ContactSteer(here, ring_aim, pace_for_contact, now)
                             : Normalise(wanted + g_lean);
 
   // The stick is camera-relative: the game itself subtracts the camera's
@@ -1480,6 +1501,8 @@ void WalkTo(std::vector<Vec3> route) {
   g_backouts = 0;
   g_strict = false;
   g_last_leg_is_the_destination = false;
+  g_ring_ms = 0;
+  g_ring_turned = false;
   ContactReset();
   g_leg = 0;
   g_walking = true;
