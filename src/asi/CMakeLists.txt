@@ -14,6 +14,7 @@ add_library(bot MODULE
   game/world_query.cpp
   game/input_probe.cpp
   game/pad_watch.cpp
+  game/blips.cpp
   game/map_marker.cpp
   game/mouse_watch.cpp
   game/peds.cpp

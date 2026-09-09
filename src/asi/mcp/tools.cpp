@@ -17,6 +17,7 @@
 #include "actions/travel.hpp"
 #include "actions/walker.hpp"
 #include "game/bindings.hpp"
+#include "game/blips.hpp"
 #include "game/paths.hpp"
 #include "game/peds.hpp"
 #include "game/world_query.hpp"
@@ -1442,6 +1443,50 @@ void RegisterTools(Server* server) {
                           {"note", samp::FindTextNote()}};
             },
             kSlowTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "get_blips",
+      "Every mark on the game's own radar, with its place. A server marks "
+      "where it wants you to go with one of these - what /gps answers with is "
+      "a blip, not a SA-MP checkpoint, which is why get_checkpoint reads "
+      "empty while the radar plainly has a new mark on it. The player's own "
+      "map waypoint is in here too. Nothing is interpreted: position, colour, "
+      "whether it follows an entity, and the raw bytes of the trace go out as "
+      "found.",
+      NoArguments(),
+      [](const json&) -> json {
+        return Rpc::RunOnGameThread(
+            []() -> json {
+              const samp::LocalPed self = samp::ReadLocalPed();
+              const game::Vec3 here{self.x, self.y, self.z};
+              const std::vector<game::Blip> blips = game::BlipsNow(here);
+              json rows = json::array();
+              for (const game::Blip& one : blips)
+                rows.push_back(json{{"index", one.index},
+                                    {"at", {{"x", one.at.x}, {"y", one.at.y},
+                                            {"z", one.at.z}}},
+                                    {"away_m", one.away_m},
+                                    {"colour", one.colour},
+                                    {"entity", one.entity},
+                                    {"tracking", one.tracking},
+                                    {"kind", one.kind},
+                                    {"fresh", one.fresh},
+                                    {"flags", one.flags},
+                                    {"bytes", one.bytes}});
+              json newest = nullptr;
+              game::Blip last;
+              if (game::AppearedLast(&last))
+                newest = json{{"index", last.index},
+                              {"at", {{"x", last.at.x}, {"y", last.at.y},
+                                      {"z", last.at.z}}},
+                              {"away_m", last.away_m}};
+              return json{{"blips", rows}, {"count", rows.size()},
+                          {"waypoint_index", game::WaypointIndex()},
+                          {"appeared_last", newest}};
+            },
+            kFastTimeoutMs);
       },
   });
 

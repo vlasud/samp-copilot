@@ -104,6 +104,21 @@ def report(c):
     else:
         out.append("dialog: none open")
 
+    # The radar, read every turn - both to see where a server has just sent
+    # him and to keep the mod's memory of the marks current, since it can
+    # only notice a new one by being asked twice.
+    try:
+        radar = c.tool("get_blips") or {}
+    except Exception:
+        radar = {}
+    newest = radar.get("appeared_last")
+    if newest:
+        out.append("GPS DESTINATION: %.0f,%.0f (%.0f m) - a mark appeared on the "
+                   "radar; travel_to it"
+                   % ((newest.get("at") or {}).get("x", 0),
+                      (newest.get("at") or {}).get("y", 0),
+                      newest.get("away_m", 0)))
+
     cp = s.get("checkpoint") or c.tool("get_checkpoint")
     if isinstance(cp, dict) and cp.get("shown"):
         at = cp.get("at") or {}
