@@ -169,6 +169,8 @@ constexpr int kCallBudget = 200000;
 // three-hundred-metre journey that is a few seconds by itself. The fallbacks
 // behind it must still have time to run when it does not reach.
 constexpr unsigned long long kPlanDeadlineMs = 12000;
+// How far short of the target a field route may end and still be taken.
+constexpr float kFieldShortOk = 40.0f;
 // A hillside: how much the ground may fall or rise over a quarter of a
 // metre and still be a surface he walks (or slides) on rather than an edge.
 constexpr float kSlopeSubStep    = 0.25f;
@@ -666,7 +668,13 @@ struct Planner::Job {
     }
     if (!field.Step()) return;
     const nav::FieldResult& r = field.result();
-    if (r.ok && r.reaches_target && r.points.size() >= 2) {
+    // A route that ends a little short is still the best route there is:
+    // the journey replans from wherever a leg ends, and the pavement graph
+    // it would fall back to walks through fences. Only a long way short
+    // means the field has not reached at all.
+    const bool near_enough = r.ok && !r.reaches_target && r.points.size() >= 2 &&
+                             r.short_by_m <= kFieldShortOk;
+    if (r.ok && (r.reaches_target || near_enough) && r.points.size() >= 2) {
       plan.waypoints = r.points;
       plan.legs.clear();
       for (std::size_t i = 1; i < r.points.size(); ++i) {

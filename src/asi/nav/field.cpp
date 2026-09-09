@@ -127,10 +127,15 @@ bool Field::Step() {
       // along the line: the way out of the courtyard he stood in was forty
       // metres behind him, opposite the target, and a box drawn round the
       // line alone cut it off.
-      float minx = std::min(std::min(w.from.x, w.to.x) - kMargin, w.from.x - kRoundStart);
-      float maxx = std::max(std::max(w.from.x, w.to.x) + kMargin, w.from.x + kRoundStart);
-      float miny = std::min(std::min(w.from.y, w.to.y) - kMargin, w.from.y - kRoundStart);
-      float maxy = std::max(std::max(w.from.y, w.to.y) + kMargin, w.from.y + kRoundStart);
+      // Round both ends, not only the start: the way into the courtyard
+      // the target sat in was a staircase forty metres past it, on the very
+      // edge of a box drawn round the line, and the field ended short of the
+      // target by the length of that detour.
+      const float roomx0 = std::min(w.from.x, w.to.x) - kRoundStart;
+      const float roomx1 = std::max(w.from.x, w.to.x) + kRoundStart;
+      const float roomy0 = std::min(w.from.y, w.to.y) - kRoundStart;
+      const float roomy1 = std::max(w.from.y, w.to.y) + kRoundStart;
+      float minx = roomx0, maxx = roomx1, miny = roomy0, maxy = roomy1;
       const float most = kMaxSide * kCell;
       if (maxx - minx > most) {
         if (w.to.x > w.from.x) { minx = w.from.x - kMargin; maxx = minx + most; }
@@ -297,6 +302,8 @@ bool Field::Step() {
           g.known[at] = g.known[src];
           g.ground[at] = g.ground[src];
         }
+      // The lip of every drop is a wall as far as the clearance is concerned.
+      result_.ledges = MarkLedges(&g, SearchRules{}.max_step);
       Chamfer(&g);
       for (int at = 0; at < g.W * g.H; ++at) {
         if (g.blocked[at]) ++result_.blocked;
@@ -418,10 +425,11 @@ bool Field::Step() {
       char note[260];
       std::snprintf(note, sizeof(note),
                     "collision field %dx%d at %.1f m: %d tiles, %d ground reads, "
-                    "%d%% solid, %d%% unknown, route %.0f m in %d legs%s",
+                    "%d%% solid, %d%% unknown, %d ledge cells, route %.0f m in %d legs%s",
                     g.W, g.H, kCell, result_.tiles, result_.ground_reads,
                     static_cast<int>(100.0f * result_.blocked / std::max(1, g.W * g.H)),
                     static_cast<int>(100.0f * result_.unknown / std::max(1, g.W * g.H)),
+                    result_.ledges,
                     result_.length_m, static_cast<int>(result_.points.size()) - 1,
                     result_.reaches_target ? "" : " - ends short of the target");
       result_.note = note;

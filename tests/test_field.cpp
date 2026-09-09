@@ -36,6 +36,7 @@ void Wall(Grid* g, int x0, int y0, int x1, int y1) {
 }
 
 std::vector<int> Route(Grid* g, const Vec3& from, const Vec3& to, bool* reached) {
+  gtabot::nav::MarkLedges(g, gtabot::nav::SearchRules{}.max_step);
   gtabot::nav::Chamfer(g);
   int sx, sy, gx, gy;
   g->cell_of(from, &sx, &sy);
@@ -109,8 +110,12 @@ void TestField() {
     bool reached = false;
     const std::vector<int> cells = Route(&g, Vec3{5, 10, 11}, Vec3{35, 10, 12.5f}, &reached);
     check::True(!reached, "a metre and a half of ledge is not stepped up");
-    check::True(!cells.empty() && cells.back() % g.W == 39,
-                "the nearest reachable cell is at the foot of the ledge");
+    check::True(!cells.empty() && cells.back() % g.W == 38,
+                "the nearest reachable cell is a step back from the lip of the ledge");
+    int lip_cells_open = 0;
+    for (int iy = 0; iy < g.H; ++iy)
+      if (g.passable(g.index(39, iy)) || g.passable(g.index(40, iy))) ++lip_cells_open;
+    check::Is(lip_cells_open, 0, "both sides of the lip are shut");
   }
 
   // Pulled tight: an empty room needs one leg, and a room with a wall in

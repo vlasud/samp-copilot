@@ -65,6 +65,32 @@ void Chamfer(Grid* g) {
     }
 }
 
+int MarkLedges(Grid* g, float max_step) {
+  const int W = g->W, H = g->H;
+  std::vector<std::uint8_t> ledge(static_cast<std::size_t>(W) * H, 0);
+  const int dx[4] = {1, -1, 0, 0};
+  const int dy[4] = {0, 0, 1, -1};
+  int shut = 0;
+  for (int iy = 0; iy < H; ++iy)
+    for (int ix = 0; ix < W; ++ix) {
+      const int at = g->index(ix, iy);
+      if (!g->passable(at)) continue;
+      for (int d = 0; d < 4; ++d) {
+        const int nx = ix + dx[d], ny = iy + dy[d];
+        if (!g->inside(nx, ny)) continue;
+        const int next = g->index(nx, ny);
+        if (g->known[next] != 1) continue;
+        if (std::fabs(g->ground[next] - g->ground[at]) > max_step) {
+          ledge[at] = 1;
+          break;
+        }
+      }
+    }
+  for (int at = 0; at < W * H; ++at)
+    if (ledge[at]) { g->blocked[at] = 1; ++shut; }
+  return shut;
+}
+
 void Searcher::Start(const Grid* g, int start, int goal, const Vec3& aim,
                      SearchRules rules) {
   g_ = g;

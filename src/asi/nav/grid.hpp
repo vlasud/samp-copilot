@@ -40,6 +40,14 @@ struct Grid {
 // solid. Cells that are not passable get nought.
 void Chamfer(Grid* g);
 
+// Shuts every cell that stands at the edge of a drop or a rise taller than
+// `max_step` - the lip of an embankment, the top of a wall - so that the
+// clearance keeps a route off the edge the way it keeps it off a wall.
+// Without this the field routed along the very lip of the beach embankment,
+// every cell of it free and flat, and the walker went over the side.
+// Returns how many cells were shut.
+int MarkLedges(Grid* g, float max_step);
+
 struct SearchRules {
   // A metre of rise over a metre of ground - forty-five degrees, what the
   // game's own peds manage on a ramp. Seven-tenths cut the stairs off a
