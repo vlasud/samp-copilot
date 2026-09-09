@@ -1041,6 +1041,121 @@ void RegisterTools(Server* server) {
   });
 
   server->AddTool({
+      "look",
+      "Everything worth knowing about where he is, in one answer: himself, "
+      "the dialog on screen, what has just been said to him, the people and "
+      "the things around, and what he is in the middle of doing. This is the "
+      "call to make on a loop - one snapshot a second is plenty - so that "
+      "deciding what to do next is done against a whole picture rather than "
+      "a dozen separate questions. Nothing here is interpreted: what a skin "
+      "or a label means belongs in the server's own notes.",
+      {{"type", "object"},
+       {"properties",
+        {{"radius",
+          {{"type", "number"}, {"minimum", 2}, {"maximum", 200},
+           {"description", "How far to look. Defaults to forty metres."}}},
+         {"chat",
+          {{"type", "integer"}, {"minimum", 0}, {"maximum", 40},
+           {"description", "How many recent chat lines. Defaults to eight."}}}}}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              const float radius = args.value("radius", 40.0f);
+              const int lines = args.value("chat", 8);
+              json out;
+
+              const samp::LocalPed self = samp::ReadLocalPed();
+              std::int64_t age_ms = -1;
+              const json world = asi::Bridge::GetWorld(&age_ms);
+              out["self"] = world.value("self", json::object());
+              out["connection"] = world.value("connection", "unknown");
+
+              const samp::Dialog dialog = samp::CurrentDialog();
+              if (dialog.valid && dialog.shown)
+                out["dialog"] = json{{"id", dialog.id},
+                                     {"style", samp::DialogStyleName(dialog.style)},
+                                     {"style_number", dialog.style},
+                                     {"caption", dialog.caption},
+                                     {"text", dialog.text}};
+
+              // What has been said, already sorted into kinds, with the lines
+              // that used his name marked.
+              json chat = samp::ReadChat(lines);
+              std::string me;
+              if (world.contains("self"))
+                me = world["self"].value("name", std::string{});
+              json said = json::array();
+              for (json& line : chat["lines"]) {
+                const samp::TalkLine talk =
+                    samp::Classify(line.value("text", std::string{}),
+                                   line.value("from", std::string{}), me);
+                json one{{"kind", talk.kind}, {"text", talk.plain}};
+                if (!talk.speaker.empty()) one["speaker"] = talk.speaker;
+                if (talk.to_me) one["to_me"] = true;
+                said.push_back(std::move(one));
+              }
+              out["chat"] = std::move(said);
+
+              if (!self.valid) {
+                out["note"] = "the local player is not readable yet";
+                return out;
+              }
+              const game::Vec3 here{self.x, self.y, self.z};
+
+              json npcs = json::array();
+              for (const game::Ped& who : game::PedsNear(here, radius, 12, self.game_ped)) {
+                if (who.is_player) continue;
+                const game::Vec3 stand = game::InFrontOf(who, 1.2f);
+                npcs.push_back(json{{"skin", who.skin},
+                                    {"away_m", who.away_m},
+                                    {"heading_deg", who.heading * 57.2957795f},
+                                    {"at", json{{"x", who.position.x},
+                                                {"y", who.position.y},
+                                                {"z", who.position.z}}},
+                                    {"stand_at", json{{"x", stand.x}, {"y", stand.y}}}});
+              }
+              out["npcs"] = std::move(npcs);
+
+              json labels = json::array();
+              for (const samp::Label& one : samp::LabelsNear(here, radius, 20))
+                labels.push_back(json{{"text", one.text},
+                                      {"away_m", one.away_m},
+                                      {"at", json{{"x", one.at.x},
+                                                  {"y", one.at.y},
+                                                  {"z", one.at.z}}}});
+              out["labels"] = std::move(labels);
+
+              json pickups = json::array();
+              for (const samp::Pickup& one : samp::PickupsNear(here, radius, 16))
+                pickups.push_back(json{{"model", one.model},
+                                       {"type", one.type},
+                                       {"away_m", one.away_m},
+                                       {"at", json{{"x", one.at.x},
+                                                   {"y", one.at.y},
+                                                   {"z", one.at.z}}}});
+              out["pickups"] = std::move(pickups);
+
+              json doors = json::array();
+              for (const samp::NearObject& one : samp::DoorsNear(here, radius, 10))
+                doors.push_back(json{{"model", one.model},
+                                     {"away_m", one.away_m},
+                                     {"at", json{{"x", one.at.x},
+                                                 {"y", one.at.y},
+                                                 {"z", one.at.z}}}});
+              out["doors"] = std::move(doors);
+
+              out["travel"] = TravelStatusJson();
+              const nav::TrailFacts trail = nav::TrailGet();
+              out["learned"] = json{{"squares", trail.squares},
+                                    {"steps", trail.steps}};
+              out["movement_armed"] = game::Enabled();
+              return out;
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
       "get_npcs",
       "The people the game itself is holding, nearest first, with the "
       "direction each is facing and the spot to stand on to be in front of "

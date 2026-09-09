@@ -102,6 +102,18 @@ readable - and names the next call to make in `next`. `wait` also answers
 message-box dialogs on the way in, since a message box has no way past but
 its button and nothing else happens until it is pressed.
 
+### One look, then act
+
+`look` answers with the whole picture at once - himself, the dialog on screen,
+what has just been said and by whom, the people and things around, what he is
+in the middle of doing. It is meant to be called on a loop, about once a
+second, so that deciding what to do next happens against a snapshot rather
+than a dozen separate questions asked at slightly different moments.
+
+That is the shape of the whole thing: a brain that looks, consults the rules
+for the server it is on, and sends a chain of actions; and this module, which
+looks and does and decides nothing.
+
 ### Where knowledge lives
 
 The module gathers facts and works the controls. It does not know anything
