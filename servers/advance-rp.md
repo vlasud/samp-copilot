@@ -21,10 +21,13 @@ is written here.
 
 | Skin | Who |
 |---|---|
-| 70, 274, 275, 276 | medics — the duty doctor at the hospital reception is one of these |
+| 70, 274, 275, 276 | medics — the duty doctor at the hospital reception, and the nurses standing about the wards |
 
-`get_npcs skins:[70,274,275,276]` finds the doctor without guessing at "the
-nearest ped that is not a player", which picks up any passer-by.
+`get_npcs skins:[70,274,275,276]` finds the medics without guessing at "the
+nearest ped that is not a player", which picks up any passer-by. The nearest
+medic is usually not the one wanted: the wards are full of nurses in the same
+skin, and the one who talks is the one standing at the reception counter, so
+pick by distance to the counter rather than to the character.
 
 ## Talking to an NPC behind a counter
 
@@ -63,8 +66,16 @@ The order matters:
    Alt. He offers a list, "Что Вас беспокоит?", of fifteen ailments.
 3. **Then the exit arrow.**
 
-Treatment does not happen by standing about: health sits where it is - it was
-watched at 13.1 for four minutes with the connection alive.
+Taking the bed is what starts the treatment, and it then runs by itself
+wherever he goes - about a point of health every four seconds, from fifteen to
+ninety-five in a few minutes. Standing about without having taken a bed does
+nothing at all: health was watched at 13.1 for four minutes with the
+connection alive and did not move.
+
+The duty doctor answers "Дежурный врач занят. Ожидайте очереди" when somebody
+else is being seen. He is not needed for the exit: once the treatment has run,
+the arrow lets him out on its own - the character walked out at 95 health and
+landed on the street at about (1189, -1302, 13.6).
 
 Ways that do **not** work: `/healme` needs a first aid kit ("У Вас нет с собой
 аптечек") and kits are sold outside; the staff health point on the lab floor
