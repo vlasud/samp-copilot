@@ -1254,13 +1254,30 @@ void RegisterTools(Server* server) {
               out["self"] = world.value("self", json::object());
               out["connection"] = world.value("connection", "unknown");
 
+              // Always present, and always says whether one is up. A field
+              // that appears only when there is a dialog makes its absence
+              // the signal, and absence is indistinguishable from a reader
+              // that failed - which is how the character came to stand in
+              // front of an open dialog pressing keys the game never saw.
               const samp::Dialog dialog = samp::CurrentDialog();
-              if (dialog.valid && dialog.shown)
-                out["dialog"] = json{{"id", dialog.id},
-                                     {"style", samp::DialogStyleName(dialog.style)},
-                                     {"style_number", dialog.style},
-                                     {"caption", dialog.caption},
-                                     {"text", dialog.text}};
+              json on_screen{{"shown", dialog.valid && dialog.shown},
+                             {"readable", dialog.valid}};
+              if (dialog.valid && dialog.shown) {
+                on_screen["id"] = dialog.id;
+                on_screen["style"] = samp::DialogStyleName(dialog.style);
+                on_screen["style_number"] = dialog.style;
+                on_screen["caption"] = dialog.caption;
+                on_screen["text"] = dialog.text;
+                // The rows of a list, ready to be named back in an answer.
+                if (dialog.style == 2 || dialog.style == 4 || dialog.style == 5) {
+                  json rows = json::array();
+                  for (const std::string& row : samp::Rows(dialog.text))
+                    rows.push_back(row);
+                  on_screen["rows"] = std::move(rows);
+                }
+                on_screen["blocks_everything"] = true;
+              }
+              out["dialog"] = std::move(on_screen);
 
               // What has been said, already sorted into kinds, with the lines
               // that used his name marked.
