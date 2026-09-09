@@ -26,21 +26,32 @@ import step as digest
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# What the person wants, typed while the character is playing.
+# What the person wants, said once.
 #
-# The brain sets its own goals, and that is the point of it - but somebody
-# watching should be able to lean over and say "go and buy a car" without
-# stopping anything. The file is read afresh every turn, so an edit reaches
-# the character on his next thought and nothing has to be restarted.
+# Somebody watching leans over and says "go and buy a car"; the character
+# hears it and gets on with it. It is not kept: an errand that came back on
+# every turn for the rest of the session stopped being a thing he was asked
+# to do and became a thing he could never finish, and he could never move on
+# to anything else afterwards.
+#
+# So it is taken and the file is emptied in the same breath. The brain sets
+# its own goals; this only ever nudges them.
 TASK_FILE = os.path.join("D:" + os.sep + "SAMP", "bot.task")
 
 
 def asked_of_him():
     try:
         with io.open(TASK_FILE, encoding="utf-8-sig") as f:
-            return f.read().strip()[:600]
+            said = f.read().strip()[:600]
     except Exception:
         return ""
+    if said:
+        try:
+            with io.open(TASK_FILE, "w", encoding="utf-8") as f:
+                f.write("")
+        except Exception:
+            pass          # unreadable is one thing; unwritable is not fatal
+    return said
 BASE = "https://api.aitunnel.ru/v1/"
 
 # The contract, and nothing else.
