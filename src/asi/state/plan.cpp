@@ -15,18 +15,23 @@ std::mutex g_mutex;
 Plan g_plan;
 // When the brain last looked, and whether it has looked since it last spoke.
 long long g_looked_ms = 0;
+long long g_last_look_ms = 0;
 bool g_looked_since = false;
 
 }  // namespace
 
 void NotedLook() {
   std::lock_guard<std::mutex> lock(g_mutex);
-  // Only the first look after a plan starts the clock: a brain that looks
-  // three times before deciding was thinking through all three.
+  const long long now = static_cast<long long>(GetTickCount64());
+  // Only the first look after a plan starts the thinking clock: a brain that
+  // looks three times before deciding was thinking through all three. But
+  // every look is remembered, because "when did it last ask" is the one sign
+  // of life that shows while it is still making up its mind.
   if (!g_looked_since) {
-    g_looked_ms = static_cast<long long>(GetTickCount64());
+    g_looked_ms = now;
     g_looked_since = true;
   }
+  g_last_look_ms = now;
 }
 
 void SetPlan(const std::string& summary, std::vector<std::string> steps,
@@ -46,6 +51,10 @@ void SetPlan(const std::string& summary, std::vector<std::string> steps,
 Plan GetPlan() {
   std::lock_guard<std::mutex> lock(g_mutex);
   Plan out = g_plan;
+  out.looked_ago_ms =
+      g_last_look_ms == 0
+          ? -1
+          : static_cast<long long>(GetTickCount64()) - g_last_look_ms;
   out.age_ms = out.posted_ms == 0
                    ? 0
                    : static_cast<long long>(GetTickCount64()) - out.posted_ms;

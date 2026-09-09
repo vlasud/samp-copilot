@@ -28,6 +28,9 @@ struct Plan {
   // it was last asked for a snapshot and when the answer came back, and a
   // number nobody has to be honest about is worth more than one they do.
   long long   thought_ms = -1;
+  // When the brain last asked what the world looks like. Seeing this move is
+  // how somebody watching knows it is alive even while it is still deciding.
+  long long   looked_ago_ms = -1;
   bool        ever = false;
 };
 

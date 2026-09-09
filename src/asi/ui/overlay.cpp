@@ -1729,7 +1729,7 @@ void DrawPlan(unsigned long long now, float below) {
     if (w > width) width = w;
   }
   const float box_w = width + pad * 2;
-  const float box_h = pad + title_px + gap + kSmallPx * s + gap * 0.8f +
+  const float box_h = pad + title_px + gap + 2 * (kSmallPx * s) + gap * 1.2f +
                       plan.steps.size() * (step_px + gap * 0.6f) + pad * 0.6f;
   const ImVec2 p0(io.DisplaySize.x - box_w - 28 * s, below + 8 * s);
   const ImVec2 p1(p0.x + box_w, p0.y + box_h);
@@ -1754,6 +1754,19 @@ void DrawPlan(unsigned long long now, float below) {
   else
     std::snprintf(when, sizeof(when), "%lld c назад", seconds);
   Txt(draw, g_body, kSmallPx * s, ImVec2(p0.x + pad, y), kUiDim, when);
+  y += kSmallPx * s + gap * 0.4f;
+
+  // And when it last asked what the world looks like. A brain still making up
+  // its mind posts nothing, and this is the only thing that moves meanwhile.
+  char asked[64];
+  if (plan.looked_ago_ms >= 0)
+    std::snprintf(asked, sizeof(asked), "спрашивал %llds назад",
+                  plan.looked_ago_ms / 1000);
+  else
+    std::snprintf(asked, sizeof(asked), "ещё не спрашивал");
+  Txt(draw, g_body, kSmallPx * s, ImVec2(p0.x + pad, y),
+      plan.looked_ago_ms >= 0 && plan.looked_ago_ms < 15000 ? kUiOk : kUiDim,
+      asked);
   y += kSmallPx * s + gap * 0.8f;
   for (std::size_t i = 0; i < plan.steps.size(); ++i) {
     const bool doing = static_cast<int>(i) == plan.doing;
