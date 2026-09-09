@@ -389,7 +389,15 @@ def main():
                 said.append({"role": "user", "content": extra})
             spoken = dict(model=args.model, messages=said, temperature=0.4,
                           max_tokens=4000)
-            if not no_reasoning_refused[0]:
+            # Ollama has a switch of its own, and it is the only one that
+            # works on a local thinking model: the OpenAI-shaped ones are
+            # ignored, and the reasoning then arrives inside the answer -
+            # "We need answer user with only JSON object" and half a minute
+            # gone. With its own switch the object comes back on its own,
+            # and a third of the time with it.
+            if is_local(args.base):
+                spoken["extra_body"] = {"think": args.reasoning != "off"}
+            elif not no_reasoning_refused[0]:
                 if args.reasoning == "off":
                     spoken["extra_body"] = {"reasoning": {"enabled": False,
                                                           "exclude": True},
