@@ -103,6 +103,20 @@ not a patient's: `/out` discharges a patient, `/medhelp` treats one for money,
 `/heal` treats in an ambulance. The patient's own is `/healme`, which uses a
 kit from his inventory.
 
+## Checkpoints
+
+The server marks where it wants somebody to go with a red checkpoint, not a
+pickup: a job's delivery point, the next corner of a route, a spot to park.
+`get_checkpoint` reports the one being shown and, separately, a racing
+checkpoint with the position of the one after it — `look` carries both too.
+Walk to `at` with `travel_to` or a `go` step.
+
+Only one of each exists at a time: SA-MP keeps them in its own CGame rather
+than in a pool, because a player is only ever shown one.
+
+Seen live at the Los Santos train station: a checkpoint at (1763.7, -1885.8),
+radius 2.1, sitting on the social worker's spot.
+
 ## Pickups and labels
 
 Pickups are streamed: a scan finds only what is near, so walk the floor and

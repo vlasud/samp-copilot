@@ -24,6 +24,7 @@
 #include "nav/planner.hpp"
 #include "nav/trail.hpp"
 #include "samp/chat.hpp"
+#include "samp/checkpoints.hpp"
 #include "samp/dialog.hpp"
 #include "samp/dialog_path.hpp"
 #include "samp/input_state.hpp"
@@ -734,6 +735,29 @@ void RegisterTools(Server* server) {
               for (const game::Vec3& point : room.points)
                 path.push_back(json{{"x", point.x}, {"y", point.y}});
               out["way_there"] = std::move(path);
+              // The red cylinder a server puts on the ground to say "go
+              // here". It is in none of the pools; SA-MP keeps one of each
+              // in its own CGame, because a player is only ever shown one.
+              const samp::Checkpoint mark = samp::CheckpointNow(here);
+              if (mark.shown)
+                out["checkpoint"] = json{{"at", json{{"x", mark.at.x},
+                                                     {"y", mark.at.y},
+                                                     {"z", mark.at.z}}},
+                                         {"size", mark.size},
+                                         {"away_m", mark.away_m}};
+              const samp::RaceCheckpoint race = samp::RaceCheckpointNow(here);
+              if (race.shown)
+                out["race_checkpoint"] =
+                    json{{"at", json{{"x", race.at.x},
+                                     {"y", race.at.y},
+                                     {"z", race.at.z}}},
+                         {"next", json{{"x", race.next.x},
+                                       {"y", race.next.y},
+                                       {"z", race.next.z}}},
+                         {"size", race.size},
+                         {"type", race.type},
+                         {"away_m", race.away_m}};
+
               json doors = json::array();
               for (const game::Vec3& door : room.doors)
                 doors.push_back(
@@ -1309,6 +1333,50 @@ void RegisterTools(Server* server) {
               out["learned"] = json{{"squares", trail.squares},
                                     {"steps", trail.steps}};
               out["movement_armed"] = game::Enabled();
+              return out;
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "get_checkpoint",
+      "The red cylinder the server is showing, if any, and the racing marker "
+      "with the position of the one after it. A server marks where it wants "
+      "somebody to go with a checkpoint rather than a pickup - the delivery "
+      "point of a job, the next corner of a route, the spot to park - and "
+      "they are in none of the pools, so nothing else reports them. Walk to "
+      "'at' with travel_to.",
+      NoArguments(),
+      [](const json&) {
+        return Rpc::RunOnGameThread(
+            []() -> json {
+              const samp::LocalPed self = samp::ReadLocalPed();
+              const game::Vec3 here = self.valid
+                                          ? game::Vec3{self.x, self.y, self.z}
+                                          : game::Vec3{};
+              json out{{"note", samp::CheckpointsNote()}};
+              const samp::Checkpoint mark = samp::CheckpointNow(here);
+              out["checkpoint"] =
+                  mark.shown ? json{{"at", json{{"x", mark.at.x},
+                                                {"y", mark.at.y},
+                                                {"z", mark.at.z}}},
+                                    {"size", mark.size},
+                                    {"away_m", mark.away_m}}
+                             : json(nullptr);
+              const samp::RaceCheckpoint race = samp::RaceCheckpointNow(here);
+              out["race_checkpoint"] =
+                  race.shown ? json{{"at", json{{"x", race.at.x},
+                                                {"y", race.at.y},
+                                                {"z", race.at.z}}},
+                                    {"next", json{{"x", race.next.x},
+                                                  {"y", race.next.y},
+                                                  {"z", race.next.z}}},
+                                    {"size", race.size},
+                                    {"type", race.type},
+                                    {"away_m", race.away_m}}
+                             : json(nullptr);
+              out["note"] = samp::CheckpointsNote();
               return out;
             },
             kFastTimeoutMs);

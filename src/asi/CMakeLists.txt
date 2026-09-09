@@ -42,6 +42,7 @@ add_library(bot MODULE
   samp/login.cpp
   samp/discovery.cpp
   samp/chat.cpp
+  samp/checkpoints.cpp
   samp/world.cpp
   samp/input_state.cpp
   state/memory.cpp
