@@ -174,6 +174,11 @@ constexpr float kDescending   = 1.2f;
 constexpr unsigned long long kProbeMs = 100;
 // How near a low thing has to be before he jumps it.
 constexpr float kJumpAt = 2.2f;
+// How far past a raised edge to ask whether it is a floor, and how much the
+// ground may fall away there and still be one. Half a metre of step down is
+// a terrace with a kerb; a metre and a half is the far side of a fence.
+constexpr float kBeyondLedge     = 1.5f;
+constexpr float kLedgeKeepsGoing = 0.8f;
 
 // Going round something. Once a side is chosen he keeps it - along a fence
 // the way to the target stays blocked for as long as the fence is, and a
@@ -656,6 +661,18 @@ void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
   std::vector<bool> clear;
   ends.reserve(kWhiskers);
   clear.reserve(kWhiskers);
+  // Whether a raised edge is a floor or the top of a rail. Asked a stride
+  // beyond it: on a terrace the ground is still up there, on a fence it has
+  // gone back down to the street.
+  const auto StandsOnTop = [](const Vec3& from, float angle, float reach,
+                              float top) {
+    const Vec3 over{from.x + std::cos(angle) * (reach + kBeyondLedge),
+                    from.y + std::sin(angle) * (reach + kBeyondLedge), from.z};
+    float behind = 0;
+    if (!game::GroundBelow(Vec3{over.x, over.y, top + 2.0f}, &behind))
+      return false;
+    return top - behind <= kLedgeKeepsGoing;
+  };
   const bool can_look = game::LineOfSightAvailable();
   const float feet = here.z - 1.0f;
   const float max_drop = descending ? kMaxJumpDrop : kMaxDrop;
@@ -678,7 +695,15 @@ void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
                (feet - ground > max_drop && !ContinuousSlope(here, end, feet, ground))) {
       ok = false;   // a wall he cannot get onto, or a drop he should not take
     } else if (ground - feet > kMaxClimb) {
-      low = true;   // a ledge: up it with a jump
+      // A ledge - but a ledge is only worth climbing if there is somewhere to
+      // stand on it. The top of a fence reads exactly like the edge of a
+      // terrace: ground, a metre and a half up, straight ahead. He would jump,
+      // land astride the rail, and stay there, which is what kept happening.
+      // So the ground is asked for again a stride further on, at the height
+      // he would be standing at: a terrace goes on, a fence has nothing
+      // behind it but the drop back to where he started.
+      low = StandsOnTop(here, angle, kWhiskerLength[i], ground);
+      ok = low;   // if it is a rail, it is a wall to go round
     } else if (can_look &&
                !WideClear(here, feet, end, ground, low_lines, 3)) {
       if (WideClear(here, feet, end, ground, head_line, 1))
@@ -1307,6 +1332,14 @@ bool DecideStick(short* out_x, short* out_y) {
   // whether running or not. The jump has priority: deciding one takes
   // sprint up at once, and the press follows with sprint still up.
   const bool way_clear = g_whisker_clear[0] && !g_whisker_low[0];
+  // Open ground, not merely a clear line straight ahead. The hop that follows
+  // is a runner's stride and nothing else - it gets him nowhere the running
+  // would not - so it is not worth taking anywhere near a thing he could
+  // land on. The centre whisker alone said nothing about the fence he was
+  // running beside.
+  bool nothing_about = true;
+  for (int i = 0; i < 5; ++i)
+    if (!g_whisker_clear[i] || g_whisker_low[i]) nothing_about = false;
   const bool could_sprint =
       g_sprint_on && !g_strict && !bootstrapping && !stepping && !airborne &&
       g_follow_side == 0 && way_clear && !descending &&
@@ -1318,8 +1351,8 @@ bool DecideStick(short* out_x, short* out_y) {
   const bool arriving = g_leg + 1 >= g_route.size() && distance < 6.0f;
   if (jump_low_now && !arriving && !g_strict) {
     WantJump(now, "something low ahead - jumping it");
-  } else if (could_sprint && !arriving && g_hop_on && settled &&
-             distance > kHopMinToNext &&
+  } else if (could_sprint && nothing_about && !arriving && g_hop_on &&
+             settled && distance > kHopMinToNext &&
              now - g_last_jump_ms >= g_hop_gap_ms) {
     WantJump(now, nullptr);
     // The next after a gap of its own, and now and then a longer one. A hop
