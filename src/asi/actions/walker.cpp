@@ -74,6 +74,9 @@ constexpr short kFullStick = 127;
 // How close counts as arrived. A person does not stop on a coin, and the
 // route's own legs are metres long. Running, he needs a little more.
 constexpr float kArriveNext = 1.8f;
+// How near a point has to be before walking past it counts as having
+// walked it: a stride or two, no more.
+constexpr float kPassedWithin = 3.0f;
 constexpr float kArriveLast = 1.4f;
 // The floor: closer than this and he is standing on the point, which is a
 // thing no amount of stick can reliably hold.
@@ -307,6 +310,14 @@ bool  g_whisker_low[kWhiskers]   = {false, false, false, false, false, false, fa
 // chosen on the local picture, and a blocked route goes back to the journey
 // at once. See SetPrecise.
 bool  g_precise = false;
+int   g_wedged_hops = 0;
+unsigned long long g_wedged_hops_ms = 0;
+// Set while a hop meant to free him is in the air: the stick is let go for
+// it. Pressed into what he is wedged against, the hop got him fifteen
+// centimetres twenty-three times over; with nothing held it took him three
+// metres and seven out of the pocket between two hospital beds on the
+// first try.
+bool  g_hop_loose = false;
 nav::LocalPicture g_local;
 Vec3  g_route_start;              // the first leg runs from here
 float g_precise_delta = 0;        // off the line, as the picture last chose
@@ -339,6 +350,14 @@ constexpr unsigned long long kWaitForPersonMs = 3000;
 // Blocked ahead and getting no nearer for this long: the plan is wrong,
 // not merely a hand's breadth out.
 constexpr unsigned long long kBlockedNoProgressMs = 2500;
+// Hops allowed to a walk that is wedged, how far apart, and how long the
+// count is remembered. The count does not belong to the walk: the journey
+// draws a fresh route every second or two when a walk keeps handing itself
+// back, and a per-walk count let him hop twenty-three times on the spot
+// against a character the server had frozen.
+constexpr int kJumpsWhenWedged = 2;
+constexpr unsigned long long kJumpAgainMs = 1200;
+constexpr unsigned long long kForgetWedgedMs = 30000;
 // With the camera readable the frame cannot be wrong by a little; only a
 // gross error - a mirrored or backward frame - is corrected, and only while
 // the route ahead is open, because sliding along a wall is not a wrong
@@ -1107,7 +1126,16 @@ bool DecideStick(short* out_x, short* out_y) {
     const bool last = g_leg + 1 == g_route.size();
     const float d = Distance2D(here, g_route[g_leg]);
     bool done = d <= (last ? g_arrive_last : kArriveNext);
-    if (!done && !last && Distance2D(here, g_route[g_leg + 1]) < d) done = true;
+    // Having passed a point means being near it and past it, not merely
+    // standing somewhere the next point happens to be nearer from. On a
+    // route of one-metre squares - which is what the trail he has walked
+    // before is made of - the loose reading swallowed nine legs in a frame
+    // without a step being taken, the walk reported that it had arrived,
+    // the journey drew the same route again, and that went round and round
+    // with the character standing perfectly still.
+    if (!done && !last && d <= kPassedWithin &&
+        Distance2D(here, g_route[g_leg + 1]) < d)
+      done = true;
     if (!done) break;
     ++g_leg;
     g_best_distance = 0;
@@ -1415,6 +1443,24 @@ bool DecideStick(short* out_x, short* out_y) {
                    "(push {})", door.x, door.y, g_pushes);
           return true;
         }
+        // Wedged on top of something, or against something the picture
+        // shows no way round: a hop is what a person does, and it is the
+        // one improvisation that costs nothing and cannot walk him into a
+        // trap. He stood on a hospital bed between two others for as long
+        // as anybody let him, with the floor half a metre below and a step
+        // to one side.
+        if (now - g_wedged_hops_ms > kForgetWedgedMs) g_wedged_hops = 0;
+        if (g_wedged_hops < kJumpsWhenWedged && std::fabs(vz) < kStillVertical &&
+            now - g_last_jump_ms > kJumpAgainMs) {
+          ++g_wedged_hops;
+          g_wedged_hops_ms = now;
+          g_hop_loose = true;
+          WantJump(now, "wedged and getting nowhere - hopping out of it");
+          g_closer_ms = now;
+          g_window_ms = now;
+          g_window_pos = here;
+          return true;
+        }
         // Standing against something the picture did not show - or did,
         // and he is wedged in it. Stepping round it by guesswork is what
         // walked him into traps; the spot is remembered and the journey
@@ -1563,6 +1609,27 @@ bool DecideStick(short* out_x, short* out_y) {
           return false;        // stand
         }
         if (now - g_closer_ms > kBlockedNoProgressMs) {
+          // A hop first. It is what a person does when a step will not do,
+          // it costs nothing, and it cannot walk him into a trap - and it
+          // is the difference between getting off a hospital bed he was
+          // standing on and standing on it for as long as anybody lets him.
+          // Steady on his feet is what matters, not what the ground probe
+          // makes of him: standing on a hospital bed he reads as airborne,
+          // because the ray under him finds the floor half a metre below
+          // and not the bed he is on, and a hop refused on that account is
+          // a hop refused exactly where it was needed.
+          if (now - g_wedged_hops_ms > kForgetWedgedMs) g_wedged_hops = 0;
+          if (g_wedged_hops < kJumpsWhenWedged && std::fabs(vz) < kStillVertical &&
+              now - g_last_jump_ms > kJumpAgainMs) {
+            ++g_wedged_hops;
+            g_wedged_hops_ms = now;
+            g_hop_loose = true;
+            WantJump(now, "the way is shut and he is getting nowhere - hopping");
+            g_closer_ms = now;
+            g_window_ms = now;
+            g_window_pos = here;
+            return true;
+          }
           const Vec3 past = RoutePoint(here, free + 0.4f);
           nav::RememberObstacle(past, somebody ? "somebody standing on the route"
                                                : "something across the route");
@@ -1800,8 +1867,12 @@ bool DecideStick(short* out_x, short* out_y) {
     g_sprinting = could_sprint;
   }
 
-  const float want_x = std::sin(emit) * hand * kFullStick * pace;
-  const float want_y = -std::cos(emit) * kFullStick * pace;
+  // A hop meant to free him is taken with nothing held.
+  if (g_hop_loose && g_jump_countdown < 0 && !airborne && now - g_last_jump_ms > 600)
+    g_hop_loose = false;
+  const float loose = g_hop_loose ? 0.0f : 1.0f;
+  const float want_x = std::sin(emit) * hand * kFullStick * pace * loose;
+  const float want_y = -std::cos(emit) * kFullStick * pace * loose;
   g_stick_x += (want_x - g_stick_x) * kStickEase;
   g_stick_y += (want_y - g_stick_y) * kStickEase;
   // The direction eases; the deflection stays full, as a keyboard's does.
@@ -2003,6 +2074,7 @@ void WalkTo(std::vector<Vec3> route) {
   g_jumps = 0;
   g_jump_countdown = -1;
   g_hanging_since = 0;
+  g_hop_loose = false;
   g_pushing_until = 0;
   g_pushes = 0;
   g_door_known = false;
