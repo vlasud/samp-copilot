@@ -51,7 +51,7 @@ _before = {}
 
 
 def report(c):
-    s = c.tool("look", {"radius": 30, "chat": 6})
+    s = c.tool("look", {"radius": 40, "chat": 14})
     me = s.get("self") or {}
     act = c.tool("act_status")
     out = []
@@ -132,7 +132,7 @@ def report(c):
     players = s.get("players") or []
     if players:
         out.append("PLAYERS near (real people - you may talk to them): " + "; ".join(near(
-            players, 6,
+            players, 8,
             lambda r: "%s[%s] %.0fm%s%s"
             % (r.get("name", "?"), r.get("id", "?"), r["away_m"],
                " hp%.0f" % r["health"] if r.get("health") is not None else "",
@@ -143,7 +143,7 @@ def report(c):
     npcs = s.get("npcs") or []
     if npcs:
         out.append("NPCs near (server characters, not people): " + "; ".join(near(
-            npcs, 5,
+            npcs, 8,
             lambda r: "skin %s %.1fm stand_at %.0f,%.0f"
             % (r.get("skin"), r["away_m"],
                (r.get("stand_at") or {}).get("x", 0),
@@ -154,7 +154,7 @@ def report(c):
     pickups = s.get("pickups") or []
     if pickups:
         out.append("pickups (standing on one is how you enter a place): " + "; ".join(near(
-            pickups, 4,
+            pickups, 8,
             lambda r: "model %s %.0fm at %.0f,%.0f"
             % (r.get("model"), r["away_m"],
                (r.get("at") or {}).get("x", 0), (r.get("at") or {}).get("y", 0)))))
@@ -162,7 +162,7 @@ def report(c):
     doors = s.get("doors") or []
     if doors:
         out.append("doors: " + "; ".join(near(
-            doors, 3, lambda r: "%.1fm at %.0f,%.0f"
+            doors, 6, lambda r: "%.1fm at %.0f,%.0f"
             % (r["away_m"], (r.get("at") or {}).get("x", 0),
                (r.get("at") or {}).get("y", 0)))))
 
@@ -175,15 +175,15 @@ def report(c):
     # its whole answer reasoning about where the thing might be instead of
     # going there - which is exactly what one of them did, at length, in
     # front of a row of free hospital beds.
-    standing = near(labels, 4,
+    standing = near(labels, 10,
                     lambda r: "%.0f,%.0f (%.0fm) %s"
                     % ((r.get("at") or {}).get("x", 0), (r.get("at") or {}).get("y", 0),
                        r["away_m"], plain(r.get("text", ""), 60)))
     if standing:
         out.append("signs: " + " | ".join(standing))
-    carried = [plain(r.get("text", ""), 40) for r in labels if r.get("away_m", -1) < 0]
+    carried = [plain(r.get("text", ""), 60) for r in labels if r.get("away_m", -1) < 0]
     if carried:
-        out.append("signs on people and cars: " + " | ".join(carried[:5]))
+        out.append("signs on people and cars: " + " | ".join(carried[:8]))
 
     # What the server has written on the screen. Its prompts say which key
     # opens the thing in front of him, and the money and the hunger bar are
@@ -199,9 +199,37 @@ def report(c):
     if mine:
         out.append("on screen: " + " | ".join(mine))
 
-    out.append("chat:")
-    for row in (s.get("chat") or [])[-6:]:
-        out.append("  <%s> %s" % (row.get("kind", "?"), plain(row.get("text", ""), 110)))
+    # The cars near him. He is meant to drive, and a world with no vehicles
+    # in it is one he will always cross on foot.
+    try:
+        world = (c.tool("get_world") or {}).get("world") or {}
+    except Exception:
+        world = {}
+    cars = []
+    for v in world.get("vehicles") or []:
+        at = v.get("pos") or []
+        if len(at) != 3:
+            continue
+        away = math.hypot(at[0] - pos[0], at[1] - pos[1])
+        if away > 60:
+            continue
+        cars.append((away, "%s %.0fm at %.0f,%.0f%s"
+                     % (v.get("model_name") or ("model %s" % v.get("model", "?")),
+                        away, at[0], at[1],
+                        " (someone in it)" if v.get("occupied") else "")))
+    cars.sort()
+    if cars:
+        out.append("vehicles near: " + "; ".join(t for _, t in cars[:8]))
+
+    out.append("chat (newest last):")
+    said = s.get("chat") or []
+    if not said:
+        out.append("  (nothing said lately)")
+    for row in said[-14:]:
+        who = row.get("speaker")
+        out.append("  <%s%s> %s"
+                   % (row.get("kind", "?"), (" " + who) if who else "",
+                      plain(row.get("text", ""), 160)))
     return "\n".join(out)
 
 

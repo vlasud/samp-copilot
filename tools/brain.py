@@ -251,6 +251,11 @@ def main():
     # from the answer. Thinking already takes several seconds; resting a
     # fixed amount on top of it would make the loop slower the harder the
     # brain thought, which is backwards.
+    # Thinking out loud is the slowest thing in this loop and the least use
+    # here: the answer is a short object, not an argument. Asked for both
+    # ways, since providers spell it differently, and dropped altogether if
+    # the endpoint will not have it.
+    p.add_argument("--reasoning", default="off")
     p.add_argument("--gap", type=float, default=5.0)
     p.add_argument("--minutes", type=float, default=20.0)
     p.add_argument("--turns", type=int, default=400)
@@ -283,6 +288,7 @@ def main():
     turn = 0
     just_revived = 0     # the turn the game last came back on
     last_typed = None
+    no_reasoning_refused = [False]
     args_task_holder = [""]
 
     while turn < args.turns and time.time() - began < args.minutes * 60:
@@ -324,9 +330,25 @@ def main():
             said = list(messages)
             if extra:
                 said.append({"role": "user", "content": extra})
-            got = client.chat.completions.create(
-                model=args.model, messages=said, temperature=0.4,
-                max_tokens=4000).choices[0]
+            spoken = dict(model=args.model, messages=said, temperature=0.4,
+                          max_tokens=4000)
+            if args.reasoning == "off" and not no_reasoning_refused[0]:
+                spoken["extra_body"] = {"reasoning": {"enabled": False,
+                                                      "exclude": True},
+                                        "reasoning_effort": "none",
+                                        "thinking": {"type": "disabled"}}
+            try:
+                got = client.chat.completions.create(**spoken).choices[0]
+            except Exception as e:
+                if "extra_body" not in spoken or no_reasoning_refused[0]:
+                    raise
+                # The endpoint will not take the switch: say so once and go
+                # on without it rather than stopping.
+                no_reasoning_refused[0] = True
+                print("   (модель не приняла выключение рассуждений: %s)"
+                      % str(e)[:90])
+                spoken.pop("extra_body")
+                got = client.chat.completions.create(**spoken).choices[0]
             return (got.message.content or ""), got.finish_reason
 
         try:

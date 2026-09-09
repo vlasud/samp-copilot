@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "actions/chain.hpp"
 #include "actions/experiments.hpp"
 #include "actions/travel.hpp"
 #include "actions/walker.hpp"
@@ -536,7 +537,11 @@ LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   // from anybody by reading them here.
   if (g_mode == Mode::kMenu && g_typing_task) {
     if (message == WM_CHAR) {
-      const auto ch = static_cast<unsigned char>(wparam);
+      // A whole character, not a byte of one. This procedure is hooked with
+      // the wide call, so the window is a Unicode one and WM_CHAR carries a
+      // UTF-16 code unit. Reading the low byte of it turned "поговори" into
+      // "?>3>2>@8" - each letter's code point with its top half thrown away.
+      const auto ch = static_cast<wchar_t>(wparam);
       if (ch == 13) {           // Enter: keep it
         if (GetTickCount64() - g_typing_since < 350) return 0;
         SaveTypedTask();
@@ -546,7 +551,10 @@ LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
       } else if (ch == 8) {
         RubOutLastLetter();
       } else if (ch >= 0x20 && g_task_typed.size() < 300) {
-        g_task_typed += ToUtf8(std::string(1, static_cast<char>(ch)));
+        char utf8[8] = {};
+        const int made = WideCharToMultiByte(CP_UTF8, 0, &ch, 1, utf8,
+                                             sizeof(utf8) - 1, nullptr, nullptr);
+        if (made > 0) g_task_typed.append(utf8, static_cast<std::size_t>(made));
       }
       return 0;
     }
@@ -1848,12 +1856,36 @@ void DrawPlan(unsigned long long now, float below) {
   const float title_px = 13 * s, step_px = 12 * s;
   const float pad = 12 * s, gap = 6 * s;
 
+  // Whether the body finished what it was told. A panel that shows a plan
+  // and never says it was carried out leaves somebody watching unable to
+  // tell a chain that ended from one that never started.
+  const act::ChainStatus chain = act::ChainGet();
+  std::string chain_line;
+  if (chain.running) {
+    char text[96];
+    std::snprintf(text, sizeof(text), "цепочка: шаг %d из %d",
+                  static_cast<int>(chain.at) + 1, static_cast<int>(chain.steps));
+    chain_line = text;
+  } else if (chain.steps > 0) {
+    const std::string& why = chain.stopped_by;
+    chain_line = why == "done"      ? "цепочка выполнена"
+               : why == "dialog"    ? "цепочка встала: открылся диалог"
+               : why == "blocked"   ? "цепочка встала: не пройти"
+               : why == "hurt"      ? "цепочка встала: ранили"
+               : why == "spoken_to" ? "цепочка встала: с ним заговорили"
+               : why == "cancelled" ? "цепочка отменена"
+               : why.empty() ? std::string("цепочка закончилась") : ("цепочка: " + why);
+  }
   const std::string asked_line =
       wanted_by_hand.empty() ? std::string()
                              : ("человек просит: " + wanted_by_hand);
   float width = Wid(g_bold, title_px, title.c_str());
   if (!asked_line.empty()) {
     const float w = Wid(g_body, step_px, asked_line.c_str());
+    if (w > width) width = w;
+  }
+  if (!chain_line.empty()) {
+    const float w = Wid(g_body, step_px, chain_line.c_str());
     if (w > width) width = w;
   }
   for (const std::string& step : plan.steps) {
@@ -1863,6 +1895,7 @@ void DrawPlan(unsigned long long now, float below) {
   const float box_w = width + pad * 2;
   const float box_h = pad + title_px + gap + 2 * (kSmallPx * s) + gap * 1.2f +
                       (asked_line.empty() ? 0.0f : step_px + gap * 0.8f) +
+                      (chain_line.empty() ? 0.0f : step_px + gap * 0.8f) +
                       plan.steps.size() * (step_px + gap * 0.6f) + pad * 0.6f;
   const ImVec2 p0(io.DisplaySize.x - box_w - 28 * s, below + 8 * s);
   const ImVec2 p1(p0.x + box_w, p0.y + box_h);
@@ -1877,6 +1910,13 @@ void DrawPlan(unsigned long long now, float below) {
   Txt(draw, g_bold, title_px, ImVec2(p0.x + pad, y), nothing_said ? kUiDim : kUiText,
       title.c_str());
   y += title_px + gap;
+  if (!chain_line.empty()) {
+    Txt(draw, g_body, step_px, ImVec2(p0.x + pad, y),
+        chain.running ? kUiAccent
+                      : (chain.stopped_by == "done" ? kUiOk : kUiWarn),
+        chain_line.c_str());
+    y += step_px + gap * 0.8f;
+  }
 
   // When it last spoke, and how long it took to work this out. Both are the
   // module's own measurements: how stale the caption is, and the gap between
@@ -2138,7 +2178,12 @@ void Overlay::WatchForLostInput() {
   // The layout, from here as well as from the panel: the panel only draws
   // when it is on screen, and a character who cannot press a letter is
   // stuck whether anybody is watching or not.
-  if (CyrillicLayout()) AskForALatinLayout();
+  // Not while a task is being typed. The English layout is forced so that W
+  // and S reach the game at all - but it also means a Russian keyboard hands
+  // this panel Latin letters, and somebody writing "устройся на работу" got
+  // "cnhjqcz yf hf,jne". While the field is open the person's own layout is
+  // theirs; the game is not being driven by hand at that moment anyway.
+  if (!g_typing_task && CyrillicLayout()) AskForALatinLayout();
 
   // The moment the calls are armed, the whole picture as it was while
   // everything still worked - so the one taken when it stops has something
