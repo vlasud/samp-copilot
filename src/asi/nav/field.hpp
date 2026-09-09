@@ -81,6 +81,10 @@ class Field {
   bool Step();
   bool finished() const;
   const FieldResult& result() const;
+  // What a point of the finished field is: for looking at a cell the route
+  // would not cross. Returns false outside the field or before it is done.
+  struct CellInfo { bool passable = false, blocked = false; int known = 0; float ground = 0, clear = 0; };
+  bool At(const Vec3& p, CellInfo* out) const;
 
  private:
   struct Work;

@@ -370,21 +370,54 @@ void TestEntity(Query& q, std::uintptr_t entity) {
 struct Paint {
   Footprint* out = nullptr;
   const std::vector<Leaf>* skip = nullptr;   // leaves left unpainted, by position
-  float z_lo = 0, z_hi = 0;     // the band, in the world
+  float z_lo = 0, z_hi = 0;     // the band, in the world, over the default floor
   float inflate = 0;
   float x1 = 0, y1 = 0;         // the far corner of the square
   long  budget = 0;             // cell tests left
+  // The band as offsets, and the floors to judge it against per cell. With
+  // no floors every cell uses the default, which is the old behaviour.
+  const Floors* floors = nullptr;
+  float band_lo = 0, band_hi = 0, floor_default = 0;
+  float floor_min = 0, floor_max = 0;   // over the square, for the early out
 };
 
 struct P2 { float x, y; };
+
+// The floor under a point: the reading there when there is one, the
+// square's default otherwise.
+float FloorAt(const Paint& p, float px, float py) {
+  const Floors* f = p.floors;
+  if (f == nullptr || f->z == nullptr) return p.floor_default;
+  const int ix = static_cast<int>(std::floor((px - f->x0) / f->cell));
+  const int iy = static_cast<int>(std::floor((py - f->y0) / f->cell));
+  if (ix < 0 || iy < 0 || ix >= f->w || iy >= f->h) return p.floor_default;
+  const std::size_t at = static_cast<std::size_t>(iy) * f->w + ix;
+  if (f->known != nullptr && f->known[at] != 1) return p.floor_default;
+  return f->z[at];
+}
+
+// A surface's height at a point, from three of its corners. Only asked of
+// surfaces that are not near vertical.
+float HeightOn(const V& a, const V& b, const V& c, float px, float py) {
+  const float ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+  const float vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+  const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+  if (std::fabs(nz) < 1e-6f) return a.z;
+  return a.z - (nx * (px - a.x) + ny * (py - a.y)) / nz;
+}
 
 // The cells within reach of a polygon: inside it, or nearer to one of its
 // edges than the inflation. Works for a triangle, a rotated box's hull, and
 // a wall seen edge-on - a two-point "polygon" - which is the one that
 // matters most.
-void PaintPolygon(Paint& p, const P2* poly, int n, float lo_z, float hi_z) {
+// `surface`, when given, is the three corners of a floor-like triangle: at
+// each cell the triangle's own height there decides, so a ramp that is the
+// ground under a cell is not painted at that cell, while a wall - judged by
+// its span - is.
+void PaintPolygon(Paint& p, const P2* poly, int n, float lo_z, float hi_z,
+                  const V* surface = nullptr) {
   if (n < 2) return;
-  if (hi_z < p.z_lo || lo_z > p.z_hi) return;
+  if (hi_z < p.floor_min + p.band_lo || lo_z > p.floor_max + p.band_hi) return;
   Footprint& f = *p.out;
   float min_x = poly[0].x, max_x = poly[0].x, min_y = poly[0].y, max_y = poly[0].y;
   for (int i = 1; i < n; ++i) {
@@ -412,6 +445,16 @@ void PaintPolygon(Paint& p, const P2* poly, int n, float lo_z, float hi_z) {
       if (cell) continue;
       const float px = f.x0 + (cx + 0.5f) * f.cell;
       const float py = f.y0 + (cy + 0.5f) * f.cell;
+      // This cell's own band.
+      const float floor = FloorAt(p, px, py);
+      const float blo = floor + p.band_lo, bhi = floor + p.band_hi;
+      if (surface != nullptr) {
+        float zc = HeightOn(surface[0], surface[1], surface[2], px, py);
+        zc = zc < lo_z ? lo_z : (zc > hi_z ? hi_z : zc);
+        if (zc < blo || zc > bhi) continue;      // the ground itself, or overhead
+      } else if (hi_z < blo || lo_z > bhi) {
+        continue;
+      }
       bool inside = false;
       if (n >= 3) {
         for (int i = 0, j = n - 1; i < n; j = i++) {
@@ -444,7 +487,7 @@ void PaintPolygon(Paint& p, const P2* poly, int n, float lo_z, float hi_z) {
 }
 
 void PaintCircle(Paint& p, float cx, float cy, float r, float lo_z, float hi_z) {
-  if (hi_z < p.z_lo || lo_z > p.z_hi) return;
+  if (hi_z < p.floor_min + p.band_lo || lo_z > p.floor_max + p.band_hi) return;
   Footprint& f = *p.out;
   const float reach = r + p.inflate;
   int cx0 = static_cast<int>(std::floor((cx - reach - f.x0) / f.cell));
@@ -460,8 +503,10 @@ void PaintCircle(Paint& p, float cx, float cy, float r, float lo_z, float hi_z) 
       if (--p.budget < 0) return;
       std::uint8_t& cell = f.blocked[static_cast<std::size_t>(y) * f.side + x];
       if (cell) continue;
-      const float dx = f.x0 + (x + 0.5f) * f.cell - cx;
-      const float dy = f.y0 + (y + 0.5f) * f.cell - cy;
+      const float px = f.x0 + (x + 0.5f) * f.cell, py = f.y0 + (y + 0.5f) * f.cell;
+      const float floor = FloorAt(p, px, py);
+      if (hi_z < floor + p.band_lo || lo_z > floor + p.band_hi) continue;
+      const float dx = px - cx, dy = py - cy;
       if (dx * dx + dy * dy <= reach * reach) {
         cell = 1;
         ++f.painted;
@@ -558,7 +603,7 @@ void PaintEntity(Paint& p, std::uintptr_t entity) {
   P2 h[10];
   float z0 = 0, z1 = 0;
   corners(lo, hi, q, &z0, &z1);
-  if (z1 < p.z_lo || z0 > p.z_hi) return;
+  if (z1 < p.floor_min + p.band_lo || z0 > p.floor_max + p.band_hi) return;
   {
     float min_x = q[0].x, max_x = q[0].x, min_y = q[0].y, max_y = q[0].y;
     for (int k = 1; k < 8; ++k) {
@@ -614,7 +659,19 @@ void PaintEntity(Paint& p, std::uintptr_t entity) {
     const P2 tri[3] = {{v0.x, v0.y}, {v1.x, v1.y}, {v2.x, v2.y}};
     const float t0 = v0.z < v1.z ? (v0.z < v2.z ? v0.z : v2.z) : (v1.z < v2.z ? v1.z : v2.z);
     const float t1 = v0.z > v1.z ? (v0.z > v2.z ? v0.z : v2.z) : (v1.z > v2.z ? v1.z : v2.z);
-    PaintPolygon(p, tri, 3, t0, t1);
+    // A floor-like triangle - one that is not near vertical - is judged by
+    // its own height at each cell, so a ramp is the ground where it is the
+    // ground; a wall is judged by its span. Only with floors to judge by.
+    const V* surface = nullptr;
+    V corner[3] = {v0, v1, v2};
+    if (p.floors != nullptr) {
+      const float ux = v1.x - v0.x, uy = v1.y - v0.y, uz = v1.z - v0.z;
+      const float vx = v2.x - v0.x, vy = v2.y - v0.y, vz = v2.z - v0.z;
+      const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+      if (len > 1e-6f && std::fabs(nz) / len >= 0.5f) surface = corner;
+    }
+    PaintPolygon(p, tri, 3, t0, t1, surface);
   }
 }
 
@@ -923,7 +980,8 @@ bool LineClear(const Vec3& a, const Vec3& b, bool vehicles) {
 bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
                     float z_lo, float z_hi, float inflate,
                     const std::vector<Leaf>& skip_here,
-                    const std::vector<Body>& also, Footprint* out) {
+                    const std::vector<Body>& also, Footprint* out,
+                    const Floors* floors) {
   if (!Ready() || out == nullptr || cell <= 0.05f || radius <= 0) return false;
   EnsureWindow(cx, cy);
   const int side = static_cast<int>(std::ceil(radius * 2.0f / cell));
@@ -944,6 +1002,20 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
   p.x1 = out->x0 + side * cell;
   p.y1 = out->y0 + side * cell;
   p.budget = 4000000;
+  p.floors = floors;
+  p.band_lo = z_lo;
+  p.band_hi = z_hi;
+  p.floor_default = floor_z;
+  p.floor_min = p.floor_max = floor_z;
+  if (floors != nullptr && floors->z != nullptr) {
+    // The lowest and highest floor over the square, for the early outs.
+    for (int cy = 0; cy < side; ++cy)
+      for (int cx = 0; cx < side; ++cx) {
+        const float fl = FloorAt(p, out->x0 + (cx + 0.5f) * cell, out->y0 + (cy + 0.5f) * cell);
+        p.floor_min = fl < p.floor_min ? fl : p.floor_min;
+        p.floor_max = fl > p.floor_max ? fl : p.floor_max;
+      }
+  }
 
   // Every sector the square touches, and one all round for things whose
   // collision reaches in from next door.
@@ -960,7 +1032,7 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
   // doorway, and he is the one obstacle that walks off on his own - which is
   // why the map is redrawn rather than remembered.
   for (const Body& body : also) {
-    if (body.z + 1.0f < p.z_lo || body.z - 1.0f > p.z_hi) continue;
+    if (body.z + 1.0f < p.floor_min + p.band_lo || body.z - 1.0f > p.floor_max + p.band_hi) continue;
     PaintCircle(p, body.x, body.y, body.radius, body.z - 1.0f, body.z + 1.0f);
     ++out->entities;
   }

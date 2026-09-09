@@ -93,10 +93,24 @@ struct Leaf { float x = 0, y = 0, z = 0; };
 // rather than looked up here.
 struct Body { float x = 0, y = 0, z = 0, radius = 0; };
 
+// The floor under each cell, read beforehand, so the band is judged against
+// the ground a cell actually has rather than one height for the whole
+// square. Without it a staircase rising through the band is painted as a
+// wall - which is how a courtyard whose only way out was a staircase came
+// out sealed. With it, a surface that is the ground at a cell is not an
+// obstacle there, and only what stands above that ground is.
+struct Floors {
+  const float*        z = nullptr;      // row-major from (x0, y0)
+  const std::uint8_t* known = nullptr;  // 1 where z is a reading
+  int   w = 0, h = 0;
+  float x0 = 0, y0 = 0, cell = 0.5f;
+};
+
 bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
                     float z_lo, float z_hi, float inflate,
                     const std::vector<Leaf>& skip_here,
-                    const std::vector<Body>& also, Footprint* out);
+                    const std::vector<Body>& also, Footprint* out,
+                    const Floors* floors = nullptr);
 
 // For the input line: queries, entities and primitives looked at.
 std::string Line();

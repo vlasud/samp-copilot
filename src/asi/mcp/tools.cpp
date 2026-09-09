@@ -18,6 +18,7 @@
 #include "actions/walker.hpp"
 #include "game/bindings.hpp"
 #include "game/blips.hpp"
+#include "game/collision.hpp"
 #include "nav/field.hpp"
 #include "game/paths.hpp"
 #include "game/peds.hpp"
@@ -1460,7 +1461,11 @@ void RegisterTools(Server* server) {
         {{"x", {{"type", "number"}}},
          {"y", {{"type", "number"}}},
          {"deadline_ms", {{"type", "integer"}, {"minimum", 200}, {"maximum", 20000}}},
-         {"picture", {{"type", "boolean"}}}}},
+         {"picture", {{"type", "boolean"}}},
+         {"probe", {{"type", "array"},
+                    {"description", "Points to classify on the finished field: "
+                                    "[{x,y}, ...]. A blocked one is explained "
+                                    "in the log - which entity is under it."}}}}},
        {"required", json::array({"x", "y"})}},
       [](const json& args) -> json {
         return Rpc::RunOnGameThread(
@@ -1470,8 +1475,38 @@ void RegisterTools(Server* server) {
               float ground = self.z - 1.0f;
               game::GroundBelow(game::Vec3{args["x"], args["y"], self.z + 20.0f}, &ground);
               const game::Vec3 to{args["x"], args["y"], ground + 1.0f};
-              const nav::FieldResult r =
-                  nav::PlanField(from, to, args.value("deadline_ms", 8000));
+              nav::Field field;
+              field.Start(from, to);
+              const unsigned long long until =
+                  GetTickCount64() + args.value("deadline_ms", 8000);
+              while (!field.Step())
+                if (GetTickCount64() > until) break;
+              const nav::FieldResult r = field.result();
+              json probes = json::array();
+              if (args.contains("probe") && args["probe"].is_array()) {
+                for (const json& pt : args["probe"]) {
+                  if (!pt.is_object()) continue;
+                  const game::Vec3 at{pt.value("x", 0.0f), pt.value("y", 0.0f), self.z};
+                  nav::Field::CellInfo info;
+                  json one{{"x", at.x}, {"y", at.y}};
+                  if (field.At(at, &info)) {
+                    one["passable"] = info.passable;
+                    one["blocked"] = info.blocked;
+                    one["known"] = info.known;
+                    one["ground"] = info.ground;
+                    one["clear"] = info.clear;
+                    if (info.blocked) {
+                      float gz = 0;
+                      game::col::GroundBelow(at.x, at.y, self.z + 3.0f, &gz, false);
+                      game::col::Explain(at.x, at.y, gz + 1.2f);
+                      one["explained_in_log"] = true;
+                    }
+                  } else {
+                    one["outside"] = true;
+                  }
+                  probes.push_back(one);
+                }
+              }
               json points = json::array();
               for (const game::Vec3& p : r.points)
                 points.push_back(json{{"x", p.x}, {"y", p.y}, {"z", p.z}});
@@ -1486,6 +1521,7 @@ void RegisterTools(Server* server) {
               out["ref_z"] = r.ref_z;
               out["tile_floors"] = r.tile_floors;
               out["ground_line"] = r.ground_line;
+              out["probes"] = probes;
               out["end_neighbours"] = r.end_neighbours;
               out["refused"] = json{{"shut", r.refused_shut}, {"step", r.refused_step},
                                     {"corner", r.refused_corner},

@@ -22,6 +22,7 @@ constexpr float kCell = 0.5f;
 // round a whole block is forty metres; anything further is a different
 // route, not a detour.
 constexpr float kMargin = 40.0f;
+constexpr float kRoundStart = 80.0f;
 // The most field there is: three hundred and sixty metres a side. Beyond
 // that the world is not streamed anyway.
 constexpr int   kMaxSide = 720;
@@ -31,7 +32,13 @@ constexpr float kTileRadius = 20.0f;
 // The band above the floor a body occupies: over the kerb, under the sign.
 constexpr float kBandLow  = 0.30f;
 constexpr float kBandHigh = 1.75f;
-constexpr float kBodyRadius   = 0.34f;
+// Painted as it is, not grown by a body's width. Growing every wall by
+// thirty-four centimetres on half-metre cells left no free centre in a
+// metre-wide staircase between two handrails, and the courtyard whose only
+// way out it was came out sealed. The body's width is honoured instead by
+// the clearance every cell already knows - walking beside a wall costs
+// more, and the walker keeps him off it - which is how Recast does it.
+constexpr float kBodyRadius   = 0.0f;
 constexpr float kPersonRadius = 0.45f;
 // The ground is read every other cell - a metre - and the cells between
 // take the reading beside them. A kerb is not lost at that spacing; the
@@ -116,10 +123,14 @@ bool Field::Step() {
       // The box round both ends with the margin, capped at the biggest
       // field there is - a far target gets a field that reaches toward it
       // and stops, and says by how much.
-      float minx = std::min(w.from.x, w.to.x) - kMargin;
-      float maxx = std::max(w.from.x, w.to.x) + kMargin;
-      float miny = std::min(w.from.y, w.to.y) - kMargin;
-      float maxy = std::max(w.from.y, w.to.y) + kMargin;
+      // And a good deal of room round the start in every direction, not only
+      // along the line: the way out of the courtyard he stood in was forty
+      // metres behind him, opposite the target, and a box drawn round the
+      // line alone cut it off.
+      float minx = std::min(std::min(w.from.x, w.to.x) - kMargin, w.from.x - kRoundStart);
+      float maxx = std::max(std::max(w.from.x, w.to.x) + kMargin, w.from.x + kRoundStart);
+      float miny = std::min(std::min(w.from.y, w.to.y) - kMargin, w.from.y - kRoundStart);
+      float maxy = std::max(std::max(w.from.y, w.to.y) + kMargin, w.from.y + kRoundStart);
       const float most = kMaxSide * kCell;
       if (maxx - minx > most) {
         if (w.to.x > w.from.x) { minx = w.from.x - kMargin; maxx = minx + most; }
@@ -249,9 +260,19 @@ bool Field::Step() {
         floor = pick[pick.size() / 2];
       }
       result_.tile_floors.push_back(floor);
+      // The floors go with the paint, so a staircase that is the ground
+      // under a cell is not a wall at that cell.
+      game::col::Floors floors;
+      floors.z = g.ground.data();
+      floors.known = g.known.data();
+      floors.w = g.W;
+      floors.h = g.H;
+      floors.x0 = g.x0;
+      floors.y0 = g.y0;
+      floors.cell = kCell;
       game::col::Footprint fp;
       if (!game::col::PaintFootprint(c.x, c.y, floor, kTileRadius, kCell, kBandLow,
-                                     kBandHigh, kBodyRadius, {}, w.bodies, &fp))
+                                     kBandHigh, kBodyRadius, {}, w.bodies, &fp, &floors))
         return false;
       ++result_.tiles;
       const int dx = static_cast<int>(std::lround((fp.x0 - g.x0) / kCell));
@@ -412,6 +433,21 @@ bool Field::Step() {
     case Phase::kDone:
       return true;
   }
+  return true;
+}
+
+bool Field::At(const Vec3& p, CellInfo* out) const {
+  if (w_ == nullptr || out == nullptr) return false;
+  const Grid& g = w_->grid;
+  if (g.W == 0) return false;
+  int ix, iy;
+  if (!g.cell_of(p, &ix, &iy)) return false;
+  const int at = g.index(ix, iy);
+  out->passable = g.passable(at);
+  out->blocked = g.blocked[at] != 0;
+  out->known = g.known[at];
+  out->ground = g.ground[at];
+  out->clear = g.clear[at] / 3.0f;
   return true;
 }
 
