@@ -113,8 +113,15 @@ def report(c):
     # so it has no distance either. Those were being dropped by the sort,
     # and a shop's name is worth as much as a signpost's.
     labels = s.get("labels") or []
+    # With their places, not just their distances. Without the coordinates a
+    # sign is something the brain can see and cannot walk to, and it spends
+    # its whole answer reasoning about where the thing might be instead of
+    # going there - which is exactly what one of them did, at length, in
+    # front of a row of free hospital beds.
     standing = near(labels, 4,
-                    lambda r: "%.0fm %s" % (r["away_m"], plain(r.get("text", ""), 60)))
+                    lambda r: "%.0f,%.0f (%.0fm) %s"
+                    % ((r.get("at") or {}).get("x", 0), (r.get("at") or {}).get("y", 0),
+                       r["away_m"], plain(r.get("text", ""), 60)))
     if standing:
         out.append("signs: " + " | ".join(standing))
     carried = [plain(r.get("text", ""), 40) for r in labels if r.get("away_m", -1) < 0]
@@ -149,4 +156,5 @@ def main():
     print(report(c))
 
 
-main()
+if __name__ == "__main__":
+    main()

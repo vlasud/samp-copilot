@@ -6,3 +6,6 @@ __pycache__/
 # The player's own password for the server, read by the module and
 # nobody else. Never committed.
 bot.login
+
+# The key for whatever model is being the brain. Never committed.
+bot.brain-key
