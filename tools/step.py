@@ -133,8 +133,14 @@ def report(c):
     if players:
         out.append("PLAYERS near (real people - you may talk to them): " + "; ".join(near(
             players, 8,
-            lambda r: "%s[%s] %.0fm%s%s%s%s"
-            % (r.get("name", "?"), r.get("id", "?"), r["away_m"],
+            # With their places. Without them a player is somebody the brain
+            # can see and cannot walk to: asked to go and talk to Revor it
+            # sent the character to his own position, because that was the
+            # only pair of coordinates on the page.
+            lambda r: "%s[%s] at %.0f,%.0f (%.0fm)%s%s%s%s"
+            % (r.get("name", "?"), r.get("id", "?"),
+               (r.get("at") or {}).get("x", 0), (r.get("at") or {}).get("y", 0),
+               r["away_m"],
                " hp%.0f" % r["health"] if r.get("health") is not None else "",
                " in a car" if r.get("in_vehicle") else "",
                " **%s**" % r["standing"] if r.get("standing") else "",
