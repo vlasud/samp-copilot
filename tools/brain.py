@@ -100,7 +100,16 @@ RULES = """Ответь ОДНИМ объектом JSON и ничем боль�
 """
 
 
-def read_key():
+def is_local(base):
+    """A model running on this machine, which nobody has to pay or trust."""
+    return "localhost" in base or "127.0.0.1" in base or "::1" in base
+
+
+def read_key(base=""):
+    # Ollama and the rest want no key at all, but the client library insists
+    # on a string, so it gets one and nothing is sent anywhere.
+    if is_local(base):
+        return "local"
     from_env = os.environ.get("BRAIN_API_KEY")
     if from_env and from_env.strip():
         return from_env.strip()
@@ -118,6 +127,12 @@ def read_key():
 
 def only_json(text):
     """The object out of whatever the model wrapped it in."""
+    # Thinking out loud, kept out of the way. A local model reasons in the
+    # answer itself rather than in a field of its own, and that reasoning is
+    # full of braces - the first "{" in the reply belongs to the thinking,
+    # not to the order.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    text = re.sub(r"^.*?</think>", "", text, flags=re.S)   # opened, never closed
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```[a-zA-Z]*\n?|```$", "", text).strip()
@@ -252,12 +267,21 @@ def main():
     p.add_argument("--minutes", type=float, default=20.0)
     p.add_argument("--turns", type=int, default=400)
     p.add_argument("--base", default=BASE)
+    # A model on this machine: no key, no bill, no network. Ollama's
+    # OpenAI-shaped door is on 11434.
+    p.add_argument("--local", action="store_true",
+                   help="брать модель из ollama на этой машине")
     p.add_argument("--models", action="store_true",
                    help="list what the service offers")
     args = p.parse_args()
 
+    if args.local and args.base == BASE:
+        args.base = "http://localhost:11434/v1/"
+
     from openai import OpenAI
-    client = OpenAI(api_key=read_key(), base_url=args.base)
+    client = OpenAI(api_key=read_key(args.base), base_url=args.base)
+    if is_local(args.base):
+        print("модель локальная: %s на %s" % (args.model, args.base))
 
     if args.models:
         for m in client.models.list().data:
