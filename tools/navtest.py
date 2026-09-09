@@ -73,7 +73,11 @@ def main():
             notes.append("%5.1f s  DIALOG at %.0f,%.0f: %s" % (time.time() - began, here[0], here[1], title))
         t = s.get("travel") or {}
         w = t.get("walk") or {}
-        note = "%s / %s" % (t.get("note", "-"), w.get("note", "-"))
+        # Who has the pad matters as much as what the walk meant to do: a
+        # character who did not move because SA-MP had the keyboard is not a
+        # navigation failure, and reading it as one wastes an evening.
+        note = "%s / %s%s" % (t.get("note", "-"), w.get("note", "-"),
+                              " [HELD BY: %s]" % w["held_by"] if w.get("held_by") else "")
         if not notes or not notes[-1].endswith(note):
             notes.append("%5.1f s  %s" % (time.time() - began, note))
         if not t.get("travelling") and not w.get("walking"):

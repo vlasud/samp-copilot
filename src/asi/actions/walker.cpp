@@ -310,6 +310,7 @@ bool  g_whisker_low[kWhiskers]   = {false, false, false, false, false, false, fa
 // chosen on the local picture, and a blocked route goes back to the journey
 // at once. See SetPrecise.
 bool  g_precise = false;
+std::string g_held_by;
 int   g_wedged_hops = 0;
 unsigned long long g_wedged_hops_ms = 0;
 // Set while a hop meant to free him is in the air: the stick is let go for
@@ -1897,6 +1898,10 @@ void PadFrameInner() {
   // that standing still is not read as being stuck.
   const char* why = "";
   const bool off = samp::InputLegitimatelyOff(&why);
+  {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_held_by = off ? why : "";
+  }
   if (g_test_keys.load(std::memory_order_relaxed)) {
     // The experiment: keys and nothing else. No walk is decided, no probe
     // is made, no call into the game.
@@ -2179,6 +2184,7 @@ Status Get() {
   status.to_next_m   = g_to_next;
   status.remaining_m = g_remaining;
   status.note        = g_note;
+  status.held_by     = g_held_by;
   status.corrected   = g_corrected;
   status.error_deg   = g_error_deg;
   status.sidesteps   = g_sidesteps;

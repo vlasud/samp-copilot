@@ -143,6 +143,9 @@ json WalkStatus() {
            {"to_next_m", walk.to_next_m},
            {"remaining_m", walk.remaining_m},
            {"sidesteps", walk.sidesteps}};
+  // Who has the pad, when it is not the walk. Read this before concluding
+  // anything from a character who did not move.
+  if (!walk.held_by.empty()) out["held_by"] = walk.held_by;
   if (walk.corrected) out["steering_corrected_deg"] = walk.error_deg;
   return out;
 }

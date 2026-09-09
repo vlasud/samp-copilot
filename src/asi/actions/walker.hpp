@@ -52,6 +52,12 @@ struct Status {
   float       remaining_m = 0;
   // What the last walk ended with: arrived, stuck, blocked, given up, stopped.
   std::string note;
+  // Why the pad is being left alone this instant, if it is: a dialog is up,
+  // the server has frozen him, SA-MP has the keyboard, the game is not
+  // rendering. Empty while the walk is actually driving him. Read it before
+  // concluding anything from a character who did not move: three walks in a
+  // row measured as failures were a keyboard SA-MP had taken.
+  std::string held_by;
   // Whether the camera-relative transform had to correct its own sign, and
   // how far off the character's actual heading is from the intended one.
   bool        corrected = false;
