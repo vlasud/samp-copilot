@@ -390,7 +390,7 @@ def main():
     # picks the wrong one; on high it never closes the object.
     here = is_local(args.base)
     if args.model is None:
-        args.model = "gpt-oss:20b" if here else "qwen3.8-flash"
+        args.model = "gpt-oss:20b" if here else "glm-5.3-flash"
     if args.reasoning is None:
         args.reasoning = "medium" if here else "off"
 
