@@ -392,7 +392,11 @@ def main():
     if args.model is None:
         args.model = "gpt-oss:20b" if here else "glm-5.3-flash"
     if args.reasoning is None:
-        args.reasoning = "medium" if here else "off"
+        # Low, not off, over the network: GLM refuses to have it turned off
+        # at all ("Reasoning is mandatory for this endpoint"), and asking
+        # anyway threw the first call of every session away. Low costs little
+        # and every model here accepts it.
+        args.reasoning = "medium" if here else "low"
 
     from openai import OpenAI
     client = OpenAI(api_key=read_key(args.base), base_url=args.base)
