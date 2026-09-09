@@ -83,6 +83,14 @@ at (2672.5, 1527.0) answers "Вы не можете пользоваться э�
 восстановления здоровья"; the roof exit at (2624.6, 1527.0) does nothing for a
 patient; the reception pickup is an information box only.
 
+## A dialog takes the keyboard
+
+While any dialog is on screen nothing else works: no walking, no key, no chat
+line. The character stands there and every action is swallowed. So a dialog is
+always the first thing to deal with, and `act` refuses to run any chain whose
+first step is not `answer` while one is up - it stops at once with
+`stopped_by: dialog` rather than reporting steps the game never saw.
+
 ## Commands worth knowing
 
 `/menu` opens the player menu — Статистика, Задания, Список команд, Личные

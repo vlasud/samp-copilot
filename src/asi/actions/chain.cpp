@@ -82,10 +82,13 @@ void FinishLocked(const char* why, std::string note) {
 
 // Has the world done something the brain should hear about?
 const char* SomethingHappened(bool answering) {
+  // A dialog on screen takes the keyboard: nothing walks, nothing presses,
+  // nothing is typed while one is up. So the chain stops for any dialog that
+  // is showing, not only for one that has just appeared - a chain started
+  // while a dialog was already up used to walk its whole length blind,
+  // reporting steps done that the game never saw.
   const samp::Dialog dialog = samp::CurrentDialog();
-  if (g_when.on_dialog && dialog.valid && dialog.shown && !answering &&
-      !g_had_dialog)
-    return "dialog";
+  if (dialog.valid && dialog.shown && !answering) return "dialog";
   g_had_dialog = dialog.valid && dialog.shown;
 
   if (g_when.on_hurt && g_health_was >= 0 && g_health_now >= 0) {
@@ -115,6 +118,11 @@ void RunChain(std::vector<Step> steps, const StopWhen& when) {
   RefreshWorld(g_began_ms, true);
   g_health_was = g_health_now;
   g_last_chat.clear();
+  if (g_running && g_had_dialog && g_steps.front().kind != "answer") {
+    FinishLocked("dialog", "a dialog is on screen and takes the keyboard - "
+                           "answer it before anything else");
+    return;
+  }
   if (g_running)
     LOG_INFO("chain: {} steps, first {}", static_cast<int>(g_steps.size()),
              Describe(g_steps.front()));
