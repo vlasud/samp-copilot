@@ -218,6 +218,9 @@ bool              g_strict = false;
 // squares, so eight of them is four metres - about as far as a person sees a
 // clear line across a room.
 constexpr int     kLookAhead = 8;
+// How long a strict walk is given to get going before standing still counts
+// as being blocked.
+constexpr unsigned long long kStrictGraceMs = 3000;
 bool              g_walking = false;
 std::string       g_note = "idle";
 unsigned long long g_started_ms = 0;
@@ -468,6 +471,22 @@ bool DoorwayAhead(const Vec3& here, float wanted) {
       return true;
   }
   return false;
+}
+
+// The nearest of the route's doors within reach, if any.
+bool NearestDoorway(const Vec3& here, Vec3* door) {
+  float best = kDoorwayNear;
+  bool found = false;
+  for (const Vec3& one : g_doorways) {
+    const float dx = one.x - here.x, dy = one.y - here.y;
+    const float span = std::sqrt(dx * dx + dy * dy);
+    if (span <= best) {
+      best = span;
+      *door = one;
+      found = true;
+    }
+  }
+  return found;
 }
 
 void StopLocked(const char* why) {
@@ -879,6 +898,55 @@ bool DecideStick(short* out_x, short* out_y) {
       // answer is another look, not a sidestep. Improvising here is what
       // walked him into the furniture in the first place.
       if (g_strict) {
+        // Not before he has had time to turn and lean into it. From a
+        // standstill, facing the wrong way, half a metre takes longer than
+        // the stuck window - and calling that blocked threw the route away
+        // and drew it again, over and over, with the character standing
+        // perfectly still throughout.
+        if (now - g_started_ms < kStrictGraceMs) {
+          g_window_ms = now;
+          g_window_pos = here;
+          return true;
+        }
+        // A shut door on the map's route. The map went through it because
+        // the server says it is a door, and a door is opened by walking into
+        // it - so into it, not away from it. Backing out here is how he
+        // reached the ward door, retreated from it, walked up to it and
+        // retreated again, five times over, with the corridor beyond it
+        // plotted and waiting.
+        Vec3 door;
+        if (g_pushes < kPushesPerPlace && NearestDoorway(here, &door)) {
+          ++g_pushes;
+          g_pushing_until = now + kPushForMs;
+          g_push_at = door;
+          g_pushing_at_something = true;
+          g_closer_ms = now;
+          g_window_ms = now;
+          g_window_pos = here;
+          LOG_INFO("walk: a shut door on the map's route at ({:.0f},{:.0f}) - "
+                   "pushing it (push {})", door.x, door.y, g_pushes);
+          return true;
+        }
+        // Otherwise the one thing a strict walk may improvise: a step back. Where he
+        // starts is the one square the map never checked - it flooded out
+        // from under his feet - and a character who spawned with his face in
+        // a potted plant presses forward into it for ever. Backing out of
+        // whatever he is wedged in is what a person does before anything
+        // else, and it costs three metres.
+        if (g_backouts < kMaxBackOuts && !airborne) {
+          ++g_backouts;
+          const float behind = Normalise(ahead + 3.14159265f);
+          g_sidestep_target = Vec3{here.x + std::cos(behind) * kBackOutMetres,
+                                   here.y + std::sin(behind) * kBackOutMetres,
+                                   here.z};
+          g_sidestep_until = now + kBackOutMs;
+          g_window_ms = now;
+          g_window_pos = here;
+          g_closer_ms = now;
+          LOG_INFO("walk: wedged at the start of the map's route - backing out "
+                   "(try {})", g_backouts);
+          return true;
+        }
         StopLocked("the way the map found is blocked - looking again");
         LOG_INFO("walk: {} ({:.1f} m along it)", g_note, distance);
         return false;

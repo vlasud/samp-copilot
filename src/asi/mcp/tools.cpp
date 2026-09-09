@@ -971,6 +971,56 @@ void RegisterTools(Server* server) {
   });
 
   server->AddTool({
+      "probe_heights",
+      "Diagnostic. From where the character stands, a one-metre horizontal "
+      "line in each of four directions at a ladder of heights above the "
+      "floor, and whether each is clear. Says at what height the world "
+      "starts to be seen - which is how the room map's own lines are chosen, "
+      "rather than by guessing where a server's floor slab ends.",
+      {{"type", "object"},
+       {"properties",
+        {{"length",
+          {{"type", "number"}, {"minimum", 0.05}, {"maximum", 5.0},
+           {"description", "How long each line is. Defaults to one metre."}}}}}},
+      [](const json& args) {
+        const float length = args.value("length", 1.0f);
+        return Rpc::RunOnGameThread(
+            [length]() -> json {
+              const samp::LocalPed self = samp::ReadLocalPed();
+              if (!self.valid)
+                throw std::runtime_error("the local player is not readable");
+              json out{{"z", self.z}, {"length", length}};
+              float with = 0, without = 0;
+              const bool got_with = game::GroundBelow(
+                  game::Vec3{self.x, self.y, self.z + 1.2f}, &with, true);
+              const bool got_without = game::GroundBelow(
+                  game::Vec3{self.x, self.y, self.z + 1.2f}, &without, false);
+              if (got_with) out["floor_with_objects"] = with;
+              if (got_without) out["floor_without_objects"] = without;
+              const float base = got_with ? with : self.z - 1.0f;
+              out["base"] = base;
+              const float heights[] = {0.1f, 0.2f, 0.35f, 0.5f, 0.7f, 0.9f,
+                                       1.1f, 1.35f, 1.6f, 2.0f, 2.4f};
+              const float dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+              json ladder = json::array();
+              for (const float h : heights) {
+                int clear = 0;
+                for (const float* d : dirs) {
+                  const game::Vec3 a{self.x, self.y, base + h};
+                  const game::Vec3 b{self.x + d[0] * length,
+                                     self.y + d[1] * length, base + h};
+                  if (game::LineClear(a, b, false)) ++clear;
+                }
+                ladder.push_back(json{{"above_floor", h}, {"clear_of_4", clear}});
+              }
+              out["ladder"] = ladder;
+              return out;
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
       "get_npcs",
       "The people the game itself is holding, nearest first, with the "
       "direction each is facing and the spot to stand on to be in front of "

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <deque>
 #include <vector>
 
@@ -17,8 +18,14 @@ namespace {
 // the grid was drawn.
 constexpr float kCell = 0.5f;
 constexpr int   kMaxSide = 96;          // squares across, whatever the radius
-constexpr float kKnee  = 0.35f;
-constexpr float kChest = 1.05f;
+// Above the floor. The knee line is what sees a bed, a bench, a low table -
+// everything a server furnishes a room with and everything he was walking
+// into - and it has to sit above the slab the floor is built from, which the
+// ladder of probes put at well under half a metre. The old lines were
+// measured from a metre above the floor and never saw anything below chest
+// height at all.
+constexpr float kKnee  = 0.45f;
+constexpr float kChest = 1.2f;
 // How far the floor of a square may sit from the floor he is standing on
 // before it is a different storey rather than the same room.
 constexpr float kSameFloor = 2.0f;
@@ -29,6 +36,9 @@ constexpr int   kMaxTests = 140000;
 // between two beds that his shoulders do not fit into, and why he then spent
 // twenty seconds finding that out with his face.
 constexpr float kBodyRadius = 0.34f;
+// How far from where he stands the body test is waived: a squeeze out of
+// whatever he spawned in.
+constexpr float kSqueezeOut = 1.1f;
 // How near a door has to be to the step being taken for the thing stopping
 // him to be that door. A door leaf is about a metre wide.
 constexpr float kDoorReach = 1.4f;
@@ -40,16 +50,17 @@ int g_tests = 0;
 // lines out to the width of his shoulders, at knee and at chest. Asked only
 // of squares the flood actually reaches, so it costs a few thousand reads
 // for a room rather than a hundred thousand for the whole grid.
-bool BodyFits(const Vec3& at, float floor_z) {
+// `base_z` is the floor, the same base the passability lines use.
+bool BodyFits(const Vec3& at, float base_z) {
   if (g_tests >= kMaxTests) return false;
   const float heights[2] = {kKnee, kChest};
   const float out[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
   for (const float* side : out) {
     for (const float height : heights) {
       g_tests += 1;
-      const Vec3 from{at.x, at.y, floor_z + height};
+      const Vec3 from{at.x, at.y, base_z + height};
       const Vec3 to{at.x + side[0] * kBodyRadius,
-                    at.y + side[1] * kBodyRadius, floor_z + height};
+                    at.y + side[1] * kBodyRadius, base_z + height};
       if (!game::LineClear(from, to, /*include_vehicles=*/false)) return false;
     }
   }
@@ -65,12 +76,12 @@ bool BodyFits(const Vec3& at, float floor_z) {
 // which is worse than the coarse test it replaced. So the centre is tried
 // first and then a few points inside the square, and whichever fits becomes
 // the point the route goes through.
-bool FindStanding(const Vec3& centre, float floor_z, Vec3* where) {
+bool FindStanding(const Vec3& centre, float base_z, Vec3* where) {
   const float nudge = kCell * 0.35f;
   const float tries[5][2] = {{0, 0}, {nudge, 0}, {-nudge, 0}, {0, nudge}, {0, -nudge}};
   for (const float* at : tries) {
     const Vec3 point{centre.x + at[0], centre.y + at[1], centre.z};
-    if (!BodyFits(point, floor_z)) continue;
+    if (!BodyFits(point, base_z)) continue;
     *where = point;
     return true;
   }
@@ -193,15 +204,42 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
       const int next = index(nx, ny);
       if (reached[next] || !has_floor[next]) continue;
       // Room for his shoulders in the square itself, asked once and kept.
+      //
+      // Except within reach of where he stands. He is standing there, which
+      // is proof enough that a person can, and a character who spawned with
+      // his shoulder against a bed and his back to a plant has to be allowed
+      // to squeeze out of it before the rule that he may not stand in such a
+      // place starts to apply - or the room he is in is one square and the
+      // way out of it does not exist.
       if (fits[next] == 0) {
         Vec3 where;
-        fits[next] = FindStanding(centre(nx, ny), floor[next], &where) ? 1 : 2;
-        if (fits[next] == 1) stand[next] = where;
+        if (Distance2D(centre(nx, ny), centre(middle, middle)) <= kSqueezeOut) {
+          fits[next] = 1;
+          stand[next] = centre(nx, ny);
+        } else if (FindStanding(centre(nx, ny), floor[next], &where)) {
+          fits[next] = 1;
+          stand[next] = where;
+        } else {
+          // Too narrow for his shoulders - or a shut door. A door leaf
+          // inside the square is exactly what makes the body test fail, and
+          // it is the one obstacle that gets out of the way when he walks
+          // into it. Refusing the square here, before the door test ever
+          // ran, is how a ward with a door twelve metres down the wall mapped
+          // as a room with no way out and sent him into the wall instead.
+          Vec3 leaf;
+          if (DoorBetween(doors, centre(nx, ny), centre(nx, ny), floor[next],
+                          &leaf)) {
+            fits[next] = 1;
+            stand[next] = centre(nx, ny);
+          } else {
+            fits[next] = 2;
+          }
+        }
       }
       if (fits[next] == 2) continue;
       Vec3 door;
       bool through_a_door = false;
-      if (!Passable(centre(hx, hy), centre(nx, ny), floor[here] + 1.0f)) {
+      if (!Passable(centre(hx, hy), centre(nx, ny), floor[here])) {
         if (!DoorBetween(doors, centre(hx, hy), centre(nx, ny), floor[here],
                          &door))
           continue;
@@ -216,6 +254,42 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
   }
   room.ok = true;
   room.cells_reached = reached_count;
+
+  // A room of one square is a bug, not a room, and the bug is in whichever
+  // test refused the four squares round him. Say which, and why.
+  if (reached_count == 1) {
+    std::string why;
+    for (int d = 0; d < 4; ++d) {
+      const int nx = middle + step_x[d], ny = middle + step_y[d];
+      const int next = index(nx, ny);
+      const Vec3 at = centre(nx, ny);
+      char line[200];
+      if (!has_floor[next]) {
+        std::snprintf(line, sizeof(line), " [%+d,%+d: no floor]", step_x[d], step_y[d]);
+      } else {
+        const float base = floor[next];
+        const float heights[2] = {kKnee, kChest};
+        const char* names[2] = {"knee", "chest"};
+        const float out[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+        std::string failed;
+        for (int h = 0; h < 2; ++h)
+          for (int o = 0; o < 4; ++o) {
+            const Vec3 a{at.x, at.y, base + heights[h]};
+            const Vec3 b{at.x + out[o][0] * kBodyRadius,
+                         at.y + out[o][1] * kBodyRadius, base + heights[h]};
+            if (!game::LineClear(a, b, false))
+              failed += std::string(" ") + names[h] + (o == 0 ? "+x" : o == 1 ? "-x" : o == 2 ? "+y" : "-y");
+          }
+        std::snprintf(line, sizeof(line), " [%+d,%+d at (%.2f,%.2f) floor %.2f: fits=%d passable=%d blocked:%s]",
+                      step_x[d], step_y[d], at.x, at.y, base, fits[next],
+                      Passable(centre(middle, middle), at, floor[start]) ? 1 : 0,
+                      failed.empty() ? " nothing" : failed.c_str());
+      }
+      why += line;
+    }
+    room.note = "one square:" + why;
+    LOG_WARN("room: {}", room.note);
+  }
 
   // The square of the room nearest to wherever he was going. If the target
   // itself is in the room this is it; if it is not, this is the way out.

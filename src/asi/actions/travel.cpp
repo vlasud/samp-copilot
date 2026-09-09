@@ -211,6 +211,11 @@ bool LooksIndoors(const Vec3& here) {
 void Decide(const Vec3& here) {
   const float straight = Distance2D(here, g_destination);
   if (LooksIndoors(here)) {
+    // The map is expensive and only redrawn every so often. A decision that
+    // arrives inside that gap has not failed at anything - it has arrived
+    // early - and counting it as a failure gave up on the journey eight
+    // times in five seconds without the map ever being asked.
+    if (GetTickCount64() < g_room_next_ms) return;
     if (WalkTheRoom(here)) return;
     // The room map has nothing either: say so rather than drawing a line
     // through the walls, which is what asking the planner would produce.
@@ -234,6 +239,16 @@ void Decide(const Vec3& here) {
 // managed, so shuffling back and forth counts as the failure it is. Returns
 // false when the journey has given up.
 bool Progress(float straight) {
+  // Indoors, "no closer in a straight line" is not failure. The way out of a
+  // room is regularly sideways or briefly backwards, and now that the grid is
+  // pinned to the world the map gives the same way out every time - which is
+  // what makes the path stable, and what stopped the old "a new way out is a
+  // new room" reset from ever firing. While he is walking a route the map
+  // drew, the walker's own progress along it is the measure.
+  if (g_indoors && Get().walking) {
+    g_failures = 0;
+    return true;
+  }
   if (g_best_straight == 0 || straight < g_best_straight - 1.5f) {
     g_best_straight = straight;
     g_failures = 0;
@@ -270,9 +285,15 @@ bool WalkTheRoom(const Vec3& here) {
   // into the door, which is the only thing that opens one.
   if (!room.reaches_target && !g_route.empty()) {
     const Vec3 edge = g_route.back();
+    // Only where the edge is a door. Where it is a wall the point beyond it
+    // is inside the wall, and walking at that is what "he is running into a
+    // wall and there is no door anywhere near" looks like.
+    bool door_at_edge = false;
+    for (const Vec3& door : room.doors)
+      if (Distance2D(door, edge) <= 2.5f) door_at_edge = true;
     const float dx = g_destination.x - edge.x, dy = g_destination.y - edge.y;
     const float span = std::sqrt(dx * dx + dy * dy);
-    if (span > 0.5f)
+    if (door_at_edge && span > 0.5f)
       g_route.push_back(Vec3{edge.x + dx / span * kThroughTheWayOut,
                              edge.y + dy / span * kThroughTheWayOut, edge.z});
   }
