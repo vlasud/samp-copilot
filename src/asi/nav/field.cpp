@@ -12,6 +12,7 @@
 #include "samp/objects.hpp"
 #include "log.hpp"
 #include "nav/grid.hpp"
+#include "nav/planner.hpp"
 
 namespace gtabot::nav {
 namespace {
@@ -64,6 +65,10 @@ constexpr float kSqueeze = 1.0f;
 // the character three metres nine from the icon. Four and a half covers the
 // ranges servers use, and a street is wide enough to go round.
 constexpr float kPickupDisc = 4.5f;
+// A spot he got stuck at is painted this wide, unless he is still standing
+// at it or it is where he is going.
+constexpr float kStuckDisc = 1.0f;
+constexpr float kStuckKeepOut = 1.5f;
 constexpr float kPedOrigin = 1.0f;
 
 float Away(const Vec3& a, const Vec3& b) {
@@ -200,6 +205,14 @@ bool Field::Step() {
         w.bodies.push_back(game::col::Body{pickup.at.x, pickup.at.y, pickup.at.z,
                                            kPickupDisc});
       }
+      // Where he got stuck lately - against a gate the paint slipped
+      // through, a car that has since moved on. The walker remembers them
+      // and the graph plans round them; the field did not, and so planned
+      // the same route through the same spot every time he handed back.
+      for (const Vec3& spot : RememberedObstacles()) {
+        if (Away(spot, w.from) <= kStuckKeepOut || Away(spot, w.to) <= kStuckKeepOut) continue;
+        w.bodies.push_back(game::col::Body{spot.x, spot.y, spot.z, kStuckDisc});
+      }
       {
         const samp::Checkpoint cp = samp::CheckpointNow(w.from);
         if (cp.shown && Away(cp.at, w.to) > cp.size + 1.0f && Away(cp.at, w.from) > kSqueeze)
@@ -322,6 +335,7 @@ bool Field::Step() {
                                      true))
         return false;
       ++result_.tiles;
+      if (fp.starved) ++result_.starved;
       const int dx = static_cast<int>(std::lround((fp.x0 - g.x0) / kCell));
       const int dy = static_cast<int>(std::lround((fp.y0 - g.y0) / kCell));
       for (int iy = 0; iy < fp.side; ++iy)
@@ -467,11 +481,11 @@ bool Field::Step() {
       char note[260];
       std::snprintf(note, sizeof(note),
                     "collision field %dx%d at %.1f m: %d tiles, %d ground reads, "
-                    "%d%% solid, %d%% unknown, %d ledge cells, route %.0f m in %d legs%s",
+                    "%d%% solid, %d%% unknown, %d ledge cells, %d starved, route %.0f m in %d legs%s",
                     g.W, g.H, kCell, result_.tiles, result_.ground_reads,
                     static_cast<int>(100.0f * result_.blocked / std::max(1, g.W * g.H)),
                     static_cast<int>(100.0f * result_.unknown / std::max(1, g.W * g.H)),
-                    result_.ledges,
+                    result_.ledges, result_.starved,
                     result_.length_m, static_cast<int>(result_.points.size()) - 1,
                     result_.reaches_target ? "" : " - ends short of the target");
       result_.note = note;

@@ -144,6 +144,8 @@ bool BestDirection(const Vec3& here, const Vec3& target, Vec3* out,
 // different route and not the same one again.
 void RememberObstacle(const Vec3& at, const char* what);
 void ForgetObstacles();
+// The ones still remembered, for the field to paint.
+std::vector<Vec3> RememberedObstacles();
 
 // The last plan asked for, from anywhere - the panel draws it in the world.
 // Also the target, the reach fan the panel maintains itself, and what the

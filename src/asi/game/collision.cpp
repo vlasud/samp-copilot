@@ -76,6 +76,8 @@ constexpr unsigned kMaxFaceGroups = 4096;
 constexpr std::uint32_t kSphereSize = 0x14, kBoxSize = 0x1C, kTriangleSize = 0x08;
 constexpr float kVertexScale = 1.0f / 128.0f;
 constexpr int   kMaxPrimitives = 20000;
+// The box of a boom gate (bar_gatebox01), whose arm is bar_gatebar01, 968.
+constexpr std::int16_t kGateBox = 966;
 constexpr float kEpsilon = 1e-6f;
 
 // Our own grid: a square of sectors around wherever the questions are being
@@ -441,7 +443,7 @@ void PaintPolygon(Paint& p, const P2* poly, int n, float lo_z, float hi_z,
   const float r2 = p.inflate * p.inflate;
   for (int cy = cy0; cy <= cy1; ++cy) {
     for (int cx = cx0; cx <= cx1; ++cx) {
-      if (--p.budget < 0) return;
+      if (--p.budget < 0) { f.starved = true; return; }
       std::uint8_t& cell = f.blocked[static_cast<std::size_t>(cy) * f.side + cx];
       if (cell) continue;
       const float px = f.x0 + (cx + 0.5f) * f.cell;
@@ -501,7 +503,7 @@ void PaintCircle(Paint& p, float cx, float cy, float r, float lo_z, float hi_z) 
   cy1 = cy1 >= f.side ? f.side - 1 : cy1;
   for (int y = cy0; y <= cy1; ++y)
     for (int x = cx0; x <= cx1; ++x) {
-      if (--p.budget < 0) return;
+      if (--p.budget < 0) { f.starved = true; return; }
       std::uint8_t& cell = f.blocked[static_cast<std::size_t>(y) * f.side + x];
       if (cell) continue;
       const float px = f.x0 + (x + 0.5f) * f.cell, py = f.y0 + (y + 0.5f) * f.cell;
@@ -626,6 +628,15 @@ void PaintEntity(Paint& p, std::uintptr_t entity) {
     PaintPolygon(p, h, Hull(q, 8, h), z0, z1);
     return;
   }
+  // A boom gate is two things: the box with its two posts, and the arm,
+  // which the server swings up for a car that sounds its horn and drops
+  // again a few seconds later. The arm is painted as it stands, so a plan
+  // made while it was up walked him into it once it was down - and a
+  // character cannot sound a horn. The box's own bounding box runs from the
+  // pivot post to the rest post, which is exactly the arm when it is down,
+  // so the box is painted whole: the gate is shut to someone on foot
+  // whatever the arm is doing this moment, and the way round is the way.
+  if (model == kGateBox) PaintPolygon(p, h, Hull(q, 8, h), z0, z1);
   const unsigned spheres   = U16(data + kDataNumSpheres);
   const unsigned boxes     = U16(data + kDataNumBoxes);
   const unsigned triangles = U16(data + kDataNumTriangles);
@@ -649,7 +660,7 @@ void PaintEntity(Paint& p, std::uintptr_t entity) {
   const std::uint32_t vertices  = U32(data + kDataVertices);
   if (!Plausible(tri_array) || !Plausible(vertices)) return;
   for (unsigned i = 0; i < triangles; ++i) {
-    if (p.budget < 0) return;
+    if (p.budget < 0) { p.out->starved = true; return; }
     const std::uintptr_t t = tri_array + i * kTriangleSize;
     const std::uintptr_t va = vertices + U16(t) * 6u;
     const std::uintptr_t vb = vertices + U16(t + 2) * 6u;
@@ -684,14 +695,25 @@ void PaintList(Paint& p, std::uintptr_t head) {
   }
 }
 
-bool PaintSector(Paint* p, int sx, int sy, const std::uintptr_t* bucket, int count) {
+// One sector's worth: either the things that move - the server's objects
+// and, when asked, the vehicles, from the repeat sectors - or the static
+// buildings and dummies indexed for it. The two are painted in separate
+// passes, moving things first, because the cell budget can run out on a
+// street of big meshes, and when it does the last things asked for are the
+// ones left out. The server's objects are the few that matter most - a
+// gate, a barrier, a wall it built - and they used to be asked for last.
+bool PaintSector(Paint* p, int sx, int sy, const std::uintptr_t* bucket, int count,
+                 bool moving) {
   __try {
-    for (int i = 0; i < count; ++i) PaintEntity(*p, bucket[i]);
-    const std::uintptr_t repeat =
-        At(kRepeatSectors) +
-        ((sy & (kRepeat - 1)) * kRepeat + (sx & (kRepeat - 1))) * kRepeatSectorSize;
-    PaintList(*p, repeat + kRepeatObjects);
-    if (p->vehicles) PaintList(*p, repeat + kRepeatVehicles);
+    if (moving) {
+      const std::uintptr_t repeat =
+          At(kRepeatSectors) +
+          ((sy & (kRepeat - 1)) * kRepeat + (sx & (kRepeat - 1))) * kRepeatSectorSize;
+      PaintList(*p, repeat + kRepeatObjects);
+      if (p->vehicles) PaintList(*p, repeat + kRepeatVehicles);
+    } else {
+      for (int i = 0; i < count; ++i) PaintEntity(*p, bucket[i]);
+    }
     return true;
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     return false;
@@ -1024,13 +1046,14 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
   // collision reaches in from next door.
   const int sx0 = SectorX(out->x0) - 1, sx1 = SectorX(p.x1) + 1;
   const int sy0 = SectorY(out->y0) - 1, sy1 = SectorY(p.y1) + 1;
-  for (int sy = sy0; sy <= sy1; ++sy)
-    for (int sx = sx0; sx <= sx1; ++sx) {
-      const int bucket = BucketOf(sx, sy);
-      const std::uintptr_t* items = bucket >= 0 ? g_bucket[bucket].data() : nullptr;
-      const int count = bucket >= 0 ? static_cast<int>(g_bucket[bucket].size()) : 0;
-      PaintSector(&p, sx, sy, items, count);
-    }
+  for (const bool moving : {true, false})
+    for (int sy = sy0; sy <= sy1; ++sy)
+      for (int sx = sx0; sx <= sx1; ++sx) {
+        const int bucket = BucketOf(sx, sy);
+        const std::uintptr_t* items = bucket >= 0 ? g_bucket[bucket].data() : nullptr;
+        const int count = bucket >= 0 ? static_cast<int>(g_bucket[bucket].size()) : 0;
+        PaintSector(&p, sx, sy, items, count, moving);
+      }
   // And whoever is standing about. A player in a doorway is as solid as the
   // doorway, and he is the one obstacle that walks off on his own - which is
   // why the map is redrawn rather than remembered.

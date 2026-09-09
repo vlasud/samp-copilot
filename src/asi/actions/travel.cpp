@@ -53,6 +53,12 @@ constexpr int kPlanBudgetMs = 4;
 // still being walked, from this far before its end. A character that stops
 // to think every few metres is what "takes a few steps and pauses" is.
 constexpr float kPlanAheadMetres = 6.0f;
+// How long a plan may take before he sets off in the meantime. The field
+// answers in a second or so, and the leg walked blind while it did - the
+// best way out of here, straight toward the target - went through whatever
+// the plan was about to route round: a pickup's disc, a gate. A second and
+// a half standing is a person looking where he is going.
+constexpr unsigned long long kBridgeAfterMs = 1500;
 
 enum class Phase { kIdle, kWalking };
 enum class Aim { kDestination, kStaging, kGreedy };
@@ -67,6 +73,7 @@ float       g_arrived = kArrived;
 std::string g_note = "idle";
 float       g_best_straight = 0;
 unsigned long long g_next_plan_ms = 0;
+unsigned long long g_plan_started_ms = 0;
 Phase       g_phase = Phase::kIdle;
 Aim         g_aim = Aim::kDestination;
 Vec3        g_aim_point;
@@ -171,6 +178,7 @@ void StartPlan(const Vec3& here, Aim aim, const Vec3& to) {
   g_aim_point = to;
   g_reaching = aim == Aim::kStaging;
   g_bridged = false;
+  g_plan_started_ms = GetTickCount64();
   g_planner.Start(here, to);
   g_note = aim == Aim::kStaging ? "planning toward the far side" : "planning";
 }
@@ -561,7 +569,7 @@ void TravelTick() {
   // He is standing. Because a plan is being worked out? Then give him
   // somewhere to go in the meantime - once per plan.
   if (g_planner.active()) {
-    if (!g_bridged && !g_indoors) {
+    if (!g_bridged && !g_indoors && now - g_plan_started_ms >= kBridgeAfterMs) {
       g_bridged = true;
       WalkGreedy(here, true);
     }

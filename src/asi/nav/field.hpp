@@ -66,6 +66,7 @@ struct FieldResult {
   std::vector<std::string> end_neighbours;
   int refused_shut = 0, refused_step = 0, refused_corner = 0;
   int ledges = 0;   // cells shut for standing at the lip of a drop
+  int starved = 0;  // tiles whose paint ran out of cell budget - short pictures
   float tallest_step = 0;
   // One character a cell, every other cell, rows from the north down.
   std::vector<std::string> picture;

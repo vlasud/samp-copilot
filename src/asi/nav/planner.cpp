@@ -1610,6 +1610,15 @@ void RememberObstacle(const Vec3& at, const char* what) {
            "round it", what, at.x, at.y);
 }
 
+std::vector<Vec3> RememberedObstacles() {
+  std::lock_guard<std::mutex> lock(g_obstacle_mutex);
+  const unsigned long long now = GetTickCount64();
+  std::vector<Vec3> out;
+  for (const Obstacle& o : g_obstacles)
+    if (now <= o.until_ms) out.push_back(o.at);
+  return out;
+}
+
 void ForgetObstacles() {
   std::lock_guard<std::mutex> lock(g_obstacle_mutex);
   g_obstacles.clear();

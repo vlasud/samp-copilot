@@ -73,6 +73,10 @@ struct Footprint {
   // within `inflate` of the cell's centre in the band, 0 where nothing is.
   std::vector<std::uint8_t> blocked;
   int entities = 0, primitives = 0, painted = 0;
+  // Set when the cell budget ran out before everything was painted: what
+  // came after the cut is missing from the square, and the caller should
+  // know the picture is short rather than trust it.
+  bool starved = false;
 };
 
 // Paints the square of `radius` about (cx, cy). The band is

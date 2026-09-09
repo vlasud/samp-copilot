@@ -164,6 +164,24 @@ constexpr float kKnee  = 0.5f;
 constexpr float kWaist = 0.95f;
 constexpr float kChest = 1.35f;
 constexpr float kHead  = 1.9f;
+// The lines a whisker is made of, every fifteen centimetres from the shin
+// to the chest. Three lines - knee, waist, chest - left a forty-centimetre
+// gap between each, and the arm of a boom gate, five centimetres thick and
+// a metre and a bit off the ground, sat in the gap between the waist and
+// the chest: every whisker clear, and him running into it. Nothing thicker
+// than a hand hides between these. The first four - up to eighty
+// centimetres - are the low lines: blocked there and clear above is a
+// thing to hop; blocked at the waist or above is a wall, whatever the
+// head clears, because a thing that tall is climbed, not jumped, and
+// climbing is what left him hanging on fences.
+constexpr float kLines[] = {0.35f, 0.5f, 0.65f, 0.8f, 0.95f, 1.1f, 1.25f, 1.4f};
+constexpr int   kLineCount = 8;
+constexpr int   kLowLines  = 4;
+// The shoulder lines, a body's width to either side of the centre one, are
+// fewer: they are there for the chair leg beside the way, not the bar
+// across it, and every line is a query.
+constexpr float kSideLines[] = {0.5f, 0.95f, 1.25f};
+constexpr int   kSideLineCount = 3;
 // Steps he takes without thinking, and the ledges and drops he takes with a
 // jump - the drop only when the way is meant to go down there.
 constexpr float kMaxClimb     = 1.0f;
@@ -582,17 +600,21 @@ bool LinesClear(const Vec3& from, float from_feet, const Vec3& to, float to_feet
 // "does his body fit through there": the centre and both shoulders, each
 // swept the length of the whisker.
 bool WideClear(const Vec3& from, float from_feet, const Vec3& to, float to_feet,
-               const float* heights, int count) {
+               const float* heights, int count,
+               const float* side_heights = nullptr, int side_count = 0) {
   const float dx = to.x - from.x, dy = to.y - from.y;
   const float span = std::sqrt(dx * dx + dy * dy);
   if (span < 0.01f) return LinesClear(from, from_feet, to, to_feet, heights, count);
+  if (!LinesClear(from, from_feet, to, to_feet, heights, count)) return false;
   const float sx = -dy / span * kBodyRadius;
   const float sy =  dx / span * kBodyRadius;
-  const float sides[3] = {0.0f, 1.0f, -1.0f};
+  const float* at = side_heights != nullptr ? side_heights : heights;
+  const int n = side_heights != nullptr ? side_count : count;
+  const float sides[2] = {1.0f, -1.0f};
   for (const float side : sides) {
     const Vec3 a{from.x + sx * side, from.y + sy * side, 0};
     const Vec3 b{to.x + sx * side, to.y + sy * side, 0};
-    if (!LinesClear(a, from_feet, b, to_feet, heights, count)) return false;
+    if (!LinesClear(a, from_feet, b, to_feet, at, n)) return false;
   }
   return true;
 }
@@ -680,8 +702,6 @@ void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
   const bool can_look = game::LineOfSightAvailable();
   const float feet = here.z - 1.0f;
   const float max_drop = descending ? kMaxJumpDrop : kMaxDrop;
-  const float low_lines[3] = {kKnee, kWaist, kChest};
-  const float chest_line[1] = {kChest};
   for (int i = 0; i < kWhiskers; ++i) {
     const float angle = wanted + kWhiskerAngle[i];
     const Vec3 end{here.x + std::cos(angle) * kWhiskerLength[i],
@@ -709,15 +729,17 @@ void ProbeWhiskers(const Vec3& here, float wanted, bool descending) {
       low = StandsOnTop(here, angle, kWhiskerLength[i], ground);
       ok = low;   // if it is a rail, it is a wall to go round
     } else if (can_look &&
-               !WideClear(here, feet, end, ground, low_lines, 3)) {
-      // Low enough to jump means low enough to jump - about waist height, a
-      // rail or a bench. It used to mean anything his head cleared, which is
-      // everything up to shoulder height, and a wall that tall is not hopped:
-      // he runs at it, catches the top and hangs there with his arms up until
-      // somebody notices. So the chest decides. Blocked at the knee and the
-      // waist but clear at the chest is a thing to jump; blocked at the chest
-      // is a wall, whatever the air above it is doing.
-      if (WideClear(here, feet, end, ground, chest_line, 1))
+               !WideClear(here, feet, end, ground, kLines, kLineCount,
+                          kSideLines, kSideLineCount)) {
+      // Low enough to jump means low enough to jump: a kerb, a bench, a
+      // fence to the knee. It used to mean anything his chest cleared, and
+      // a fence to the waist is not hopped: he runs at it, catches the top
+      // and hangs there with his arms up until somebody notices. So the
+      // waist decides. Blocked below it and clear from it up is a thing to
+      // jump; blocked at the waist or above is a wall, whatever the air
+      // above it is doing.
+      if (WideClear(here, feet, end, ground, kLines + kLowLines, kLineCount - kLowLines,
+                    kSideLines + 1, kSideLineCount - 1))
         low = true;   // something to jump over
       else
         ok = false;   // a wall
