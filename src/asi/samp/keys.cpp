@@ -81,6 +81,31 @@ void SendCharacter(wchar_t ch) {
 }
 
 void SendKey(int vk, bool down) {
+  if (vk >= 0 && vk < 256) g_down[vk].store(down);
+  g_last_event_ms.store(GetTickCount64());
+
+  // With the window behind another, a synthesised keystroke goes wherever
+  // the focus is - somebody's browser, their editor. That is useless to the
+  // character and rude to them. The game reads its keyboard from its own
+  // window messages, which is the same path the typed characters take, so
+  // the key is posted to the window and reaches nothing else.
+  const HWND window = game::GameWindow();
+  if (window != nullptr && GetForegroundWindow() != window) {
+    const UINT scan = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC);
+    LPARAM info = static_cast<LPARAM>(1) | (static_cast<LPARAM>(scan) << 16);
+    if (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT ||
+        vk == VK_RMENU || vk == VK_RCONTROL || vk == VK_INSERT ||
+        vk == VK_DELETE || vk == VK_HOME || vk == VK_END)
+      info |= 0x01000000;                     // an extended key
+    if (!down) info |= 0xC0000000;            // it was down, and is going up
+    // Alt is a system key and arrives as one, or the game does not see it.
+    const bool alt = vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU;
+    UINT what = down ? WM_KEYDOWN : WM_KEYUP;
+    if (alt) what = down ? WM_SYSKEYDOWN : WM_SYSKEYUP;
+    PostMessageA(window, what, static_cast<WPARAM>(vk), info);
+    return;
+  }
+
   INPUT in{};
   in.type = INPUT_KEYBOARD;
   in.ki.wVk = static_cast<WORD>(vk);
@@ -89,8 +114,6 @@ void SendKey(int vk, bool down) {
   if (vk == VK_UP || vk == VK_DOWN || vk == VK_LEFT || vk == VK_RIGHT)
     in.ki.dwFlags |= KEYEVENTF_EXTENDEDKEY;
   if (!down) in.ki.dwFlags |= KEYEVENTF_KEYUP;
-  if (vk >= 0 && vk < 256) g_down[vk].store(down);
-  g_last_event_ms.store(GetTickCount64());
   SendInput(1, &in, sizeof(in));
 }
 

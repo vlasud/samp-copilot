@@ -408,7 +408,11 @@ void ReadBindings() {
 // be up, since it eats key messages.
 bool KeysMayGo() {
   HWND window = game::GameWindow();
-  if (window == nullptr || GetForegroundWindow() != window) return false;
+  if (window == nullptr) return false;
+  // Behind another window the keys are posted to this one rather than sent
+  // through the system, so they still reach the game and only the game.
+  if (GetForegroundWindow() != window && !asi::WindowMode::RunsInBackground())
+    return false;
   if (asi::Overlay::MenuOpen()) return false;
   return true;
 }

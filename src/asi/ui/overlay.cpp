@@ -31,6 +31,7 @@
 #include "game/api_trace.hpp"
 #include "game/collision.hpp"
 #include "game/watchpoint.hpp"
+#include "hooks/windowmode.hpp"
 #include "game/pad_watch.hpp"
 #include "game/paths.hpp"
 #include "game/world_query.hpp"
@@ -442,6 +443,21 @@ LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     default:
       break;
   }
+  // Losing the focus is news the game does not need.
+  //
+  // On hearing it, GTA pauses: it stops drawing, and with the drawing goes
+  // everything else this module depends on, because all of it runs on the
+  // game's own thread once a frame. Somebody clicking on their browser
+  // should not stop the character mid-street. So the three messages that
+  // carry the news are answered here and go no further; the ones that say
+  // the focus has come back are passed on, so the game and the window agree
+  // again the moment anybody looks at it.
+  if (WindowMode::RunsInBackground()) {
+    if (message == WM_ACTIVATEAPP && wparam == FALSE) return 0;
+    if (message == WM_ACTIVATE && LOWORD(wparam) == WA_INACTIVE) return 0;
+    if (message == WM_KILLFOCUS) return 0;
+  }
+
   // A lone Alt is how Windows opens a window's system menu, and while that
   // menu is up the game is not running: no frames, no pad, no packets. The
   // player's own controller table puts several actions on Alt - walking

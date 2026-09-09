@@ -39,6 +39,8 @@ std::string Trim(const std::string& in) {
   return a == std::string::npos ? std::string{} : in.substr(a, b - a + 1);
 }
 
+std::atomic<bool> g_background{true};
+
 void ReadConfig() {
   const std::string path = ModuleDirectory() + "bot.cfg";
   std::ifstream file(path);
@@ -59,6 +61,13 @@ void ReadConfig() {
       const bool on = value == "on" || value == "1" || value == "true";
       g_gamepad_allowed.store(on);
       LOG_INFO("bot.cfg: the gamepad is {}", on ? "allowed" : "ignored");
+      continue;
+    }
+    if (key == "background") {
+      const bool off = value == "off" || value == "0" || value == "false";
+      g_background.store(!off);
+      LOG_INFO("bot.cfg: the game {} while the window is behind another",
+               off ? "stops" : "carries on");
       continue;
     }
     if (key == "diagnostics") {
@@ -114,6 +123,11 @@ bool WindowMode::Enabled() {
 bool WindowMode::DiagnosticsAllowed() {
   EnsureConfigured();
   return g_diagnostics_allowed.load();
+}
+
+bool WindowMode::RunsInBackground() {
+  EnsureConfigured();
+  return g_background.load();
 }
 
 bool WindowMode::WalkerAllowed() {

@@ -48,6 +48,20 @@ class WindowMode {
   // switch W, A, S and D off. bot.cfg `gamepad=on` lets it through.
   static bool GamepadAllowed();
 
+  // Whether the game carries on while somebody else is using the computer.
+  //
+  // GTA stops when it loses focus: no frames, and a game that draws no
+  // frames runs no script, sends no packets and takes no steps. That is
+  // correct for a person playing, and useless for a character living his
+  // own life on somebody's second monitor - every measurement taken here
+  // while the window was behind a browser read nought metres walked.
+  //
+  // On, the module keeps the news of the loss from the game and sends keys
+  // as messages to the window rather than through the system, so they reach
+  // the game and nothing else. bot.cfg `background=off` restores the plain
+  // behaviour.
+  static bool RunsInBackground();
+
   // Whether the investigation instruments run: hardware watchpoints on the
   // input switches, the Windows API trace, the DirectInput mouse hooks.
   // Off by default - each is a deviation from a plain player's process.
