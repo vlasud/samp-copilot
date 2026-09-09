@@ -38,7 +38,10 @@ std::atomic<unsigned long long> g_last_event_ms{0};
 // script what it was doing.
 std::atomic<bool> g_down[256] = {};
 // How fast a person types, near enough, and when the last letter went.
-constexpr unsigned long long kBetweenLettersMs = 250;
+// An eighth of a second a letter is a brisk but ordinary hand - about eight
+// a second. A quarter of a second was correct and too slow to live with: a
+// line of forty characters took ten seconds to say.
+constexpr unsigned long long kBetweenLettersMs = 125;
 unsigned long long g_last_letter_ms = 0;
 // And how each one went down: as a message to the window, or through the
 // system. A key must be let go of the same way it was pressed. Choosing the

@@ -235,7 +235,7 @@ def main():
     # "walk there, press that"; a little is worth having when the choice is
     # which of nineteen jobs to take. Asked for in the several ways providers
     # spell it, and dropped altogether if the endpoint will not have it.
-    p.add_argument("--reasoning", default="low",
+    p.add_argument("--reasoning", default="off",
                    choices=["off", "low", "medium", "high"])
     p.add_argument("--gap", type=float, default=5.0)
     p.add_argument("--minutes", type=float, default=20.0)
@@ -271,6 +271,11 @@ def main():
     last_typed = None
     no_reasoning_refused = [False]
     args_task_holder = [""]
+    # How many turns running it has said the same thing, and how many it has
+    # asked the body for nothing at all.
+    stuck = [0]
+    idle = [0]
+    said_before = [""]
 
     while turn < args.turns and time.time() - began < args.minutes * 60:
         turn += 1
@@ -285,6 +290,22 @@ def main():
             body = again
             just_revived = turn
             continue
+
+        # Going round in circles, said out loud.
+        #
+        # It would answer "иду в магазин" with an empty list of things to do,
+        # and answer it again, and again - a plan that was never carried out
+        # looks from the inside exactly like one that is going fine. The loop
+        # can see what the brain cannot: that nothing has been asked of the
+        # body and nothing has changed, several turns running.
+        if stuck[0] >= 2:
+            page += ("\n\nВНИМАНИЕ: ты %d хода подряд говоришь примерно одно и "
+                     "то же" % stuck[0])
+            if idle[0] >= 2:
+                page += " и при этом не отдал моду ни одной команды"
+            page += (". То, что ты пробуешь, не работает. Смени подход: "
+                     "спроси у игрока, посмотри вывески вокруг, пойди в другое "
+                     "место или займись другой целью.")
 
         asked = time.time()
         messages = [{"role": "system", "content": system}]
@@ -370,6 +391,14 @@ def main():
             steps = order.get("steps") or []
             summary = (str(steps[0])[:60] if steps else "(мозг не сказал, что делает)")
         print("%3d  %4.1f c  %s" % (turn, thought, summary))
+
+        # Two summaries count as the same when they start alike - "иду в
+        # магазин напротив" and "иду к магазину, чтобы купить телефон" are
+        # one plan restated, not two plans.
+        head = " ".join(summary.lower().split())[:28]
+        stuck[0] = stuck[0] + 1 if head and head == said_before[0] else 0
+        said_before[0] = head
+        idle[0] = idle[0] + 1 if not (order.get("do") or []) else 0
 
         try:
             body.tool("set_plan", {
