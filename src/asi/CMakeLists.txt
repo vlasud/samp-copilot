@@ -6,6 +6,7 @@ add_library(bot MODULE
   bridge.cpp
   actions/driver.cpp
   actions/experiments.cpp
+  actions/contact.cpp
   actions/travel.cpp
   actions/walker.cpp
   game/exe.cpp

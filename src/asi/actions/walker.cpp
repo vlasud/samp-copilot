@@ -1,5 +1,7 @@
 #include "actions/walker.hpp"
 
+#include "actions/contact.hpp"
+
 #include "samp/input_state.hpp"
 #include "samp/objects.hpp"
 #include "samp/keys.hpp"
@@ -904,6 +906,16 @@ bool DecideStick(short* out_x, short* out_y) {
       // answer is another look, not a sidestep. Improvising here is what
       // walked him into the furniture in the first place.
       if (g_strict) {
+        // Following a wall is not being stuck. The contact steerer is
+        // already doing the one thing that works here, and every rule below
+        // - the back-out, the door push, the hand-back - interrupts it in
+        // the middle and starts it again from nothing.
+        if (ContactGet().side != 0) {
+          g_window_ms = now;
+          g_window_pos = here;
+          g_closer_ms = now;
+          return true;
+        }
         // Not before he has had time to turn and lean into it. From a
         // standstill, facing the wrong way, half a metre takes longer than
         // the stuck window - and calling that blocked threw the route away
@@ -1069,6 +1081,10 @@ bool DecideStick(short* out_x, short* out_y) {
     }
   }
 
+  // Full deflection is what the stick gets; the contact test needs to know
+  // that to judge how far he should have gone.
+  const float pace_for_contact = 1.0f;
+
   // Where he is going, and where he is going to be sent.
   const bool stepping = now < g_sidestep_until;
   if (now >= g_pushing_until) g_pushing_at_something = false;
@@ -1165,7 +1181,13 @@ bool DecideStick(short* out_x, short* out_y) {
       if (at <= kJumpAt) jump_low_now = true;
     }
   }
-  const float steered = Normalise(wanted + g_lean);
+  // Indoors he is steered by what he actually walks into, not by what a map
+  // predicted. The whiskers stay for the open street, where a plan really
+  // can be ignorant of a parked car; in here the game answers the question
+  // every frame by how far he got.
+  const float steered = g_strict
+                            ? ContactSteer(here, wanted, pace_for_contact, now)
+                            : Normalise(wanted + g_lean);
 
   // The stick is camera-relative: the game itself subtracts the camera's
   // orientation from the stick angle before it moves him. The camera stays
@@ -1454,6 +1476,7 @@ void WalkTo(std::vector<Vec3> route) {
   g_backouts = 0;
   g_strict = false;
   g_last_leg_is_the_destination = false;
+  ContactReset();
   g_leg = 0;
   g_walking = true;
   g_note = "walking";

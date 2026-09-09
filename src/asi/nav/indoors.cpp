@@ -31,18 +31,23 @@ constexpr int   kMaxSide = 200;         // 50 m across, whatever the radius
 // above the head is a lamp.
 constexpr float kBandLow  = 0.30f;
 constexpr float kBandHigh = 1.75f;
-// How much the paint is grown by. Not the half-width of his shoulders: a
-// doorway is about a metre, and growing the frame by a third of a metre on
-// each side leaves a free strip thinner than one cell, so every door in the
-// building closed itself and the ward mapped as sealed. A quarter of a metre
-// keeps him off the furniture and leaves two cells of daylight in a door.
-constexpr float kBodyRadius = 0.24f;
+// The half-width of his shoulders: what the paint is grown by, so a route
+// never runs closer to a thing than he can pass it. Lowering it to open the
+// doorways was the wrong trade - the doors opened and he began clipping the
+// railing beside them - so the doorways are opened on their own instead.
+constexpr float kBodyRadius = 0.34f;
 // A square with no floor within this of his own is a different storey, or
 // the void past a window.
 constexpr float kSameFloor = 2.0f;
 // How far from a door's position its doorway cells reach, for the record of
 // which doors a route goes through. The leaf itself is not painted at all.
 constexpr float kDoorDisc = 1.3f;
+// And how much of that is forced open. A doorway is about a metre, and grown
+// by the width of his shoulders on each jamb it leaves a strip thinner than a
+// cell - every door in the building sealing itself. So the opening is cleared
+// by hand, tightly: three quarters of a metre round the door and no further,
+// which is the door and not the railing next to it.
+constexpr float kDoorOpen = 0.75f;
 // Where he already stands is proof enough that a person can; the first
 // metre round him is not asked.
 constexpr float kSqueezeOut = 1.0f;
@@ -117,8 +122,10 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
     for (int iy = dy0 - reach; iy <= dy0 + reach; ++iy)
       for (int ix = dx0 - reach; ix <= dx0 + reach; ++ix) {
         if (ix < 0 || iy < 0 || ix >= side || iy >= side) continue;
-        if (Distance2D(centre(ix, iy), door) > kDoorDisc) continue;
+        const float away = Distance2D(centre(ix, iy), door);
+        if (away > kDoorDisc) continue;
         door_cell[index(ix, iy)] = 1;
+        if (away <= kDoorOpen) fp.blocked[index(ix, iy)] = 0;
       }
   }
 
