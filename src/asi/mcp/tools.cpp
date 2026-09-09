@@ -18,6 +18,7 @@
 #include "actions/walker.hpp"
 #include "game/bindings.hpp"
 #include "game/blips.hpp"
+#include "nav/field.hpp"
 #include "game/paths.hpp"
 #include "game/peds.hpp"
 #include "game/world_query.hpp"
@@ -1443,6 +1444,48 @@ void RegisterTools(Server* server) {
                           {"note", samp::FindTextNote()}};
             },
             kSlowTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "plan_field",
+      "Plans a route over a walkability field painted from the world's own "
+      "collision - the same way the room is mapped indoors, taken outside. "
+      "Every cell knows how far the nearest wall is and walking near one "
+      "costs more, so the route keeps to the middle of the pavement by "
+      "itself. Diagnostic: returns the route, the numbers and a picture. "
+      "Game thread; bounded by deadline_ms.",
+      {{"type", "object"},
+       {"properties",
+        {{"x", {{"type", "number"}}},
+         {"y", {{"type", "number"}}},
+         {"deadline_ms", {{"type", "integer"}, {"minimum", 200}, {"maximum", 20000}}},
+         {"picture", {{"type", "boolean"}}}}},
+       {"required", json::array({"x", "y"})}},
+      [](const json& args) -> json {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              const samp::LocalPed self = samp::ReadLocalPed();
+              const game::Vec3 from{self.x, self.y, self.z};
+              float ground = self.z - 1.0f;
+              game::GroundBelow(game::Vec3{args["x"], args["y"], self.z + 20.0f}, &ground);
+              const game::Vec3 to{args["x"], args["y"], ground + 1.0f};
+              const nav::FieldResult r =
+                  nav::PlanField(from, to, args.value("deadline_ms", 8000));
+              json points = json::array();
+              for (const game::Vec3& p : r.points)
+                points.push_back(json{{"x", p.x}, {"y", p.y}, {"z", p.z}});
+              json out{{"ok", r.ok}, {"reaches_target", r.reaches_target},
+                       {"short_by_m", r.short_by_m}, {"length_m", r.length_m},
+                       {"legs", static_cast<int>(r.points.size()) - 1},
+                       {"points", points}, {"note", r.note},
+                       {"cells", r.cells}, {"blocked", r.blocked},
+                       {"tiles", r.tiles}, {"ground_reads", r.ground_reads},
+                       {"expanded", r.expanded}, {"took_ms", r.took_ms}};
+              if (args.value("picture", false)) out["picture"] = r.picture;
+              return out;
+            },
+            25000);
       },
   });
 

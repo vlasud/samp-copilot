@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "log.hpp"
+#include "nav/field.hpp"
 
 namespace gtabot::nav {
 namespace {
@@ -475,8 +476,8 @@ DebugState g_debug;
 // ---- the job -------------------------------------------------------------
 
 struct Planner::Job {
-  enum class Stage { kEnds, kDirect, kJoinStart, kJoinGoal, kAStar, kLattice,
-                     kSmooth, kVerify, kDone };
+  enum class Stage { kEnds, kDirect, kField, kJoinStart, kJoinGoal, kAStar,
+                     kLattice, kSmooth, kVerify, kDone };
 
   Vec3  from, to;   // as asked
   Vec3  a, b;       // lifted over the ground the game found
@@ -485,8 +486,15 @@ struct Planner::Job {
   unsigned long long began_ms = 0;
   int   calls_at_start = 0;
   int   steps = 0;
-  std::string direct_why, graph_why, lattice_why;
+  std::string direct_why, field_why, graph_why, lattice_why;
   std::string source;
+
+  // The walkability field: the world's collision painted onto a grid and
+  // searched, before the pavement graph is consulted at all. It is what
+  // makes a route keep off the walls; the graph and the open-ground search
+  // stay behind it for when the field does not reach.
+  nav::Field field;
+  bool field_started = false;
 
   // The graph, copied once, and the search over it.
   bool        graph_loaded = false;
@@ -573,6 +581,7 @@ struct Planner::Job {
 
   std::string FailureNote() const {
     std::string note = "straight line " + direct_why;
+    if (!field_why.empty()) note += "; field: " + field_why;
     if (!graph_why.empty()) note += "; pavements: " + graph_why;
     if (!lattice_why.empty()) note += "; open ground: " + lattice_why;
     return note;
@@ -643,6 +652,35 @@ struct Planner::Job {
       return;
     }
     direct_why = direct.why;
+    stage = Stage::kField;
+  }
+
+  void FieldStage() {
+    if (!field_started) {
+      field_started = true;
+      field.Start(a, b);
+    }
+    if (!field.Step()) return;
+    const nav::FieldResult& r = field.result();
+    if (r.ok && r.reaches_target && r.points.size() >= 2) {
+      plan.waypoints = r.points;
+      plan.legs.clear();
+      for (std::size_t i = 1; i < r.points.size(); ++i) {
+        Leg leg;
+        leg.from = r.points[i - 1];
+        leg.to = r.points[i];
+        leg.ok = true;
+        leg.verified = true;
+        plan.legs.push_back(leg);
+      }
+      plan.length_m = r.length_m;
+      plan.ok = true;
+      plan.note = r.note;
+      source = "field";
+      Finish();
+      return;
+    }
+    field_why = r.note;
     stage = game::CachedPaths().valid ? Stage::kJoinStart : Stage::kLattice;
     if (stage == Stage::kLattice) graph_why = "the path graph is not available";
   }
@@ -1349,6 +1387,7 @@ struct Planner::Job {
     switch (stage) {
       case Stage::kEnds:      Ends(); break;
       case Stage::kDirect:    Direct(); break;
+      case Stage::kField:     FieldStage(); break;
       case Stage::kJoinStart: JoinStart(); break;
       case Stage::kJoinGoal:  JoinGoal(); break;
       case Stage::kAStar:     AStar(); break;
