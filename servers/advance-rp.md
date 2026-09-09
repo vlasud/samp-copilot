@@ -22,6 +22,7 @@ is written here.
 | Skin | Who |
 |---|---|
 | 70, 274, 275, 276 | medics — the duty doctor at the hospital reception, and the nurses standing about the wards |
+| 76 | the social workers by the Los Santos train station |
 
 `get_npcs skins:[70,274,275,276]` finds the medics without guessing at "the
 nearest ped that is not a player", which picks up any passer-by. The nearest
@@ -102,6 +103,18 @@ From Список команд → Мин. здравоохранения, the m
 not a patient's: `/out` discharges a patient, `/medhelp` treats one for money,
 `/heal` treats in an ambulance. The patient's own is `/healme`, which uses a
 kit from his inventory.
+
+## Work
+
+`/menu` → Список команд → Работы lists the professions: Пожарный, Развозчик,
+Автомеханик, Уличный торговец, and more below them.
+
+Getting hired is not done from the station. `/fire` and `/tasks` both answer
+that the character has to be an employee already, the checkpoint standing on
+the station square does nothing when walked into, and the social workers there
+- skin **76**, not the medics' skins - do not open a dialog for Alt at all.
+Each profession appears to have its own place of hiring: the fire station for
+a fireman, and so on. Go there rather than trying to be hired where he stands.
 
 ## Checkpoints
 

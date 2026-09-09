@@ -23,6 +23,7 @@
 #include "nav/indoors.hpp"
 #include "nav/planner.hpp"
 #include "nav/trail.hpp"
+#include "samp/bubbles.hpp"
 #include "samp/chat.hpp"
 #include "samp/checkpoints.hpp"
 #include "samp/dialog.hpp"
@@ -1216,7 +1217,8 @@ void RegisterTools(Server* server) {
                     {"steps", plan.steps},
                     {"doing", plan.doing},
                     {"age_ms", plan.age_ms},
-                    {"thought_ms", plan.thought_ms}};
+                    {"thought_ms", plan.thought_ms},
+                    {"looked_ago_ms", plan.looked_ago_ms}};
       },
   });
 
@@ -1353,6 +1355,45 @@ void RegisterTools(Server* server) {
               return out;
             },
             kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "find_text",
+      "Diagnostic. Says where in the client's memory a piece of text lives. "
+      "For finding what nothing reads yet: put something on screen - a chat "
+      "bubble over somebody's head, a label, a message - and search for a few "
+      "words of it. The answer gives the address, which module it belongs to "
+      "and the bytes on either side, and the same offset from the same base "
+      "twice running stops being a guess.",
+      {{"type", "object"},
+       {"properties",
+        {{"text",
+          {{"type", "string"},
+           {"description", "At least three characters that are on screen now."}}},
+         {"limit",
+          {{"type", "integer"}, {"minimum", 1}, {"maximum", 40},
+           {"description", "At most this many places. Defaults to ten."}}}}},
+       {"required", json::array({"text"})}},
+      [](const json& args) {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              const std::string text = args.value("text", std::string{});
+              const std::size_t limit = args.value("limit", 10);
+              json out = json::array();
+              for (const samp::Found& one : samp::FindText(text, limit)) {
+                char at[24];
+                std::snprintf(at, sizeof(at), "0x%08X",
+                              static_cast<unsigned>(one.at));
+                out.push_back(json{{"at", at},
+                                   {"where", one.where},
+                                   {"encoding", one.encoding},
+                                   {"around", one.around}});
+              }
+              return json{{"found", std::move(out)},
+                          {"note", samp::FindTextNote()}};
+            },
+            kSlowTimeoutMs);
       },
   });
 
