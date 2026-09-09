@@ -117,6 +117,11 @@ def report(c):
         where = travel.get("destination") or [0, 0, 0]
         going += " %.0f m left to %.0f,%.0f" % (
             walk.get("remaining_m", 0), where[0], where[1])
+        # Said out loud because it was not obvious: a journey under way is
+        # not an obligation. He ran to the town hall through the very people
+        # he had been sent to beg from, because the route was still running
+        # and finishing it looked like the job.
+        going += " - you can end it any turn with stop"
     out.append("doing: %s%s%s | walking: %s"
                % (act.get("note", "idle"),
                   (" step %s of %s" % (act.get("at"), act.get("steps")))
