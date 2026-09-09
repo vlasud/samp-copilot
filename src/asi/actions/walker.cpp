@@ -1851,7 +1851,12 @@ bool DecideStick(short* out_x, short* out_y) {
   const bool arriving = g_leg + 1 >= g_route.size() && distance < 6.0f;
   if (jump_low_now && !arriving && !g_strict) {
     WantJump(now, "something low ahead - jumping it");
-  } else if (could_sprint && nothing_about && !arriving && g_hop_on &&
+  // Not while he is following a route on the picture. The hop is
+  // decoration - a runner's stride, so he does not look like a man on
+  // rails - and it gets him nowhere the running would not. It also catches
+  // ledges: forty-two of them over six errands left him hanging by his
+  // hands twenty-two times. Decoration is not worth that.
+  } else if (could_sprint && nothing_about && !arriving && g_hop_on && !g_precise &&
              settled && distance > kHopMinToNext &&
              now - g_last_jump_ms >= g_hop_gap_ms) {
     WantJump(now, nullptr);
