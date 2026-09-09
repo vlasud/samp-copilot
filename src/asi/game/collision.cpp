@@ -369,7 +369,7 @@ void TestEntity(Query& q, std::uintptr_t entity) {
 
 struct Paint {
   Footprint* out = nullptr;
-  const std::vector<int>* skip = nullptr;   // models left unpainted
+  const std::vector<Leaf>* skip = nullptr;   // leaves left unpainted, by position
   float z_lo = 0, z_hi = 0;     // the band, in the world
   float inflate = 0;
   float x1 = 0, y1 = 0;         // the far corner of the square
@@ -500,9 +500,6 @@ void PaintEntity(Paint& p, std::uintptr_t entity) {
   if ((flags & 1) == 0) return;
   const std::int16_t model = S16(entity + kEntityModel);
   if (model < 0) return;
-  if (p.skip != nullptr)
-    for (const int skipped : *p.skip)
-      if (skipped == model) return;
   const std::uint32_t table = g_model_table.load(std::memory_order_relaxed);
   const std::uint32_t info = U32(table + static_cast<std::uint32_t>(model) * 4);
   if (!Plausible(info)) return;
@@ -523,6 +520,17 @@ void PaintEntity(Paint& p, std::uintptr_t entity) {
     forward = V{-std::sin(h), std::cos(h), 0.0f};
     up = V{0.0f, 0.0f, 1.0f};
   }
+  // This very leaf, by where it stands.
+  if (p.skip != nullptr)
+    for (const Leaf& leaf : *p.skip) {
+      const float dx = leaf.x - pos.x, dy = leaf.y - pos.y, dz = leaf.z - pos.z;
+      // A metre and a half. The leaf's own origin is not always where the
+      // server says the door is - a model's origin sits where the modeller
+      // put it, and a server moves a door about its hinge - while the glass
+      // panels of the same model that make up a wall stand metres away.
+      if (dx * dx + dy * dy + dz * dz < 2.25f) return;
+    }
+
   const auto world = [&](V l) {
     return V{pos.x + right.x * l.x + forward.x * l.y + up.x * l.z,
              pos.y + right.y * l.x + forward.y * l.y + up.y * l.z,
@@ -914,7 +922,7 @@ bool LineClear(const Vec3& a, const Vec3& b, bool vehicles) {
 
 bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
                     float z_lo, float z_hi, float inflate,
-                    const std::vector<int>& skip_models, Footprint* out) {
+                    const std::vector<Leaf>& skip_here, Footprint* out) {
   if (!Ready() || out == nullptr || cell <= 0.05f || radius <= 0) return false;
   EnsureWindow(cx, cy);
   const int side = static_cast<int>(std::ceil(radius * 2.0f / cell));
@@ -928,7 +936,7 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
 
   Paint p;
   p.out = out;
-  p.skip = &skip_models;
+  p.skip = &skip_here;
   p.z_lo = floor_z + z_lo;
   p.z_hi = floor_z + z_hi;
   p.inflate = inflate;

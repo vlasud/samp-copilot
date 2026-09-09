@@ -78,14 +78,19 @@ struct Footprint {
 // Paints the square of `radius` about (cx, cy). The band is
 // [floor_z + z_lo, floor_z + z_hi]. Buildings, dummies and objects; not
 // vehicles. Game thread. False when the world does not read.
-// `skip_models`: things not to paint at all - the door leaves, which are
-// solid to the painter and open to a person who walks into them. Skipping
-// the leaf leaves the frame, the wall and whatever stands beside the door
-// exactly as they are; clearing a disc round the door wiped out the railing
-// beside one, and the route went through the railing.
+// One thing, by where it stands.
+struct Leaf { float x = 0, y = 0, z = 0; };
+
+// `skip_here`: the things not to paint - the door leaves, which are solid to
+// the painter and open to a person who walks into them.
+//
+// By position, one leaf at a time, never by model. A hospital's glass ward
+// wall is built out of the same model as its doors, and skipping the model
+// erased the whole wall: the map showed a way through and the character
+// stood against the glass looking at the sea.
 bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
                     float z_lo, float z_hi, float inflate,
-                    const std::vector<int>& skip_models, Footprint* out);
+                    const std::vector<Leaf>& skip_here, Footprint* out);
 
 // For the input line: queries, entities and primitives looked at.
 std::string Line();

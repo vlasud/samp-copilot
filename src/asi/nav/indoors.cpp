@@ -31,7 +31,12 @@ constexpr int   kMaxSide = 200;         // 50 m across, whatever the radius
 // above the head is a lamp.
 constexpr float kBandLow  = 0.30f;
 constexpr float kBandHigh = 1.75f;
-constexpr float kBodyRadius = 0.34f;
+// How much the paint is grown by. Not the half-width of his shoulders: a
+// doorway is about a metre, and growing the frame by a third of a metre on
+// each side leaves a free strip thinner than one cell, so every door in the
+// building closed itself and the ward mapped as sealed. A quarter of a metre
+// keeps him off the furniture and leaves two cells of daylight in a door.
+constexpr float kBodyRadius = 0.24f;
 // A square with no floor within this of his own is a different storey, or
 // the void past a window.
 constexpr float kSameFloor = 2.0f;
@@ -76,17 +81,15 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
   // the frame, the wall and the railing beside the door stay exactly as
   // painted, which clearing a disc round the door did not manage.
   std::vector<Vec3> doors;
-  std::vector<int> door_models;
+  std::vector<game::col::Leaf> door_leaves;
   for (const samp::NearObject& door : samp::DoorsNear(from, span + 4.0f, 48)) {
     doors.push_back(door.at);
-    bool known = false;
-    for (const int m : door_models) if (m == door.model) known = true;
-    if (!known) door_models.push_back(door.model);
+    door_leaves.push_back(game::col::Leaf{door.at.x, door.at.y, door.at.z});
   }
 
   game::col::Footprint fp;
   if (!game::col::PaintFootprint(from.x, from.y, floor_z, span, kCell, kBandLow,
-                                 kBandHigh, kBodyRadius, door_models, &fp) ||
+                                 kBandHigh, kBodyRadius, door_leaves, &fp) ||
       fp.side <= 0) {
     room.note = "the world could not be painted";
     return room;

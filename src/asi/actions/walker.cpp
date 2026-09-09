@@ -318,6 +318,12 @@ constexpr float kThroughDoor = 3.0f;
 // he is already pointed at it when the leaning stops.
 std::vector<Vec3> g_doorways;
 constexpr float kDoorwayNear = 3.0f;
+// And how near a door has to be for a stuck strict walk to push it rather
+// than back away. Wider than the whisker rule: he stalls a couple of metres
+// short of a door, against its frame or the railing beside it, and backing
+// out from there and walking up again was twelve seconds a cycle.
+constexpr float kDoorPushReach = 5.0f;
+constexpr int   kDoorPushes = 4;
 // And how far off the line to it he may be aiming for it still to be the
 // thing he is walking into: a door beside him is not a door ahead of him.
 constexpr float kDoorwayArc = 1.2f;
@@ -474,8 +480,8 @@ bool DoorwayAhead(const Vec3& here, float wanted) {
 }
 
 // The nearest of the route's doors within reach, if any.
-bool NearestDoorway(const Vec3& here, Vec3* door) {
-  float best = kDoorwayNear;
+bool NearestDoorway(const Vec3& here, Vec3* door, float within = kDoorwayNear) {
+  float best = within;
   bool found = false;
   for (const Vec3& one : g_doorways) {
     const float dx = one.x - here.x, dy = one.y - here.y;
@@ -915,10 +921,22 @@ bool DecideStick(short* out_x, short* out_y) {
         // retreated again, five times over, with the corridor beyond it
         // plotted and waiting.
         Vec3 door;
-        if (g_pushes < kPushesPerPlace && NearestDoorway(here, &door)) {
+        if (g_pushes < kDoorPushes && NearestDoorway(here, &door, kDoorPushReach)) {
           ++g_pushes;
           g_pushing_until = now + kPushForMs;
-          g_push_at = door;
+          // Through the door, not at it: the route's own point beyond the
+          // door is the direction, so the push goes through the frame and
+          // not into the hinge side of the leaf.
+          Vec3 through = door;
+          for (std::size_t i = g_leg; i < g_route.size(); ++i) {
+            const float dx = g_route[i].x - door.x, dy = g_route[i].y - door.y;
+            if (std::sqrt(dx * dx + dy * dy) > 1.0f &&
+                Distance2D(g_route[i], here) > Distance2D(door, here)) {
+              through = g_route[i];
+              break;
+            }
+          }
+          g_push_at = through;
           g_pushing_at_something = true;
           g_closer_ms = now;
           g_window_ms = now;
