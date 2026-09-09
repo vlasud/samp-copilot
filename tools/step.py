@@ -122,10 +122,16 @@ def report(c):
         # he had been sent to beg from, because the route was still running
         # and finishing it looked like the job.
         going += " - you can end it any turn with stop"
-    out.append("doing: %s%s%s | walking: %s"
+    # A chain that has stopped says why, in the words the notes use -
+    # stopped_by: done, dialog, spoken_to, hurt, blocked, cancelled - so the
+    # brain reads on the page exactly what it was taught to look for.
+    ended = ""
+    if not act.get("running") and act.get("stopped_by"):
+        ended = " stopped_by: %s" % act["stopped_by"]
+    out.append("doing: %s%s%s%s | walking: %s"
                % (act.get("note", "idle"),
                   (" step %s of %s" % (act.get("at"), act.get("steps")))
-                  if act.get("running") else "",
+                  if act.get("running") else "", ended,
                   # Still saying the last thing. Worth a word on the page as
                   # well as a wait in the loop: a sentence asked for is not a
                   # sentence said.
