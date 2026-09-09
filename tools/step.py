@@ -230,13 +230,30 @@ def report(c):
         out.append("vehicles near: " + "; ".join(t for _, t in cars[:8]))
 
     out.append("chat (newest last):")
+    # A line meant for this character, and a line from an administrator, are
+    # the two that cannot wait - and they were arriving indistinguishable
+    # from the shop adverts that fill the rest of the log. The mod marks
+    # both; the page had been hiding the marks.
     said = s.get("chat") or []
+    for_him = [r for r in said if r.get("to_me")]
+    admins = [r for r in said if r.get("kind") == "admin"]
+    if admins:
+        out.append("AN ADMINISTRATOR IS SPEAKING - answer at once, and never "
+                   "claim to be a person: " +
+                   " | ".join(plain(r.get("text", ""), 140) for r in admins[-3:]))
+    if for_him:
+        out.append("SOMEBODY IS TALKING TO YOU - answer in Russian, in "
+                   "character: " +
+                   " | ".join("%s: %s" % (r.get("speaker", "?"),
+                                          plain(r.get("text", ""), 140))
+                              for r in for_him[-3:]))
     if not said:
         out.append("  (nothing said lately)")
     for row in said[-14:]:
         who = row.get("speaker")
-        out.append("  <%s%s> %s"
-                   % (row.get("kind", "?"), (" " + who) if who else "",
+        out.append("  %s<%s%s> %s"
+                   % (">>> " if row.get("to_me") else "",
+                      row.get("kind", "?"), (" " + who) if who else "",
                       plain(row.get("text", ""), 160)))
     return "\n".join(out)
 
