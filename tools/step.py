@@ -168,10 +168,16 @@ def report(c):
             # can see and cannot walk to: asked to go and talk to Revor it
             # sent the character to his own position, because that was the
             # only pair of coordinates on the page.
-            lambda r: "%s[%s] at %.0f,%.0f (%.0fm)%s%s%s%s"
+            # And whether they can hear him. Ordinary chat carries about
+            # fifteen metres on this server, and he was greeting people forty
+            # metres off who never saw a word of it. Doing the arithmetic for
+            # the brain is cheaper than teaching it to.
+            lambda r: "%s[%s] at %.0f,%.0f (%.0fm%s)%s%s%s%s"
             % (r.get("name", "?"), r.get("id", "?"),
                (r.get("at") or {}).get("x", 0), (r.get("at") or {}).get("y", 0),
                r["away_m"],
+               ", CAN HEAR YOU" if r["away_m"] <= 14.0 else
+               ", too far to hear - walk closer first",
                " hp%.0f" % r["health"] if r.get("health") is not None else "",
                " in a car" if r.get("in_vehicle") else "",
                " **%s**" % r["standing"] if r.get("standing") else "",
