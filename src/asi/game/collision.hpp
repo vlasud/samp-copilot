@@ -122,6 +122,23 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
                     const std::vector<Body>& also, Footprint* out,
                     const Floors* floors = nullptr, bool vehicles = false);
 
+// Something that moves under its own power near a point: a car, a bike, a
+// boat. Position and velocity, in metres and metres a second, read from the
+// same sector lists the paint reads. Painting a car where it stands is no
+// use for crossing a road - by the time he is there it is somewhere else -
+// so the walk asks where they are going instead.
+struct Mover {
+  float x = 0, y = 0, z = 0;
+  float vx = 0, vy = 0, vz = 0;
+  float speed = 0;      // metres a second, flat
+  float radius = 0;     // half the length of the thing, roughly
+};
+
+// Everything moving faster than `at_least` within `radius` of (x, y), up to
+// `max` of them. Game thread.
+std::vector<Mover> MoversNear(float x, float y, float radius, float at_least,
+                              std::size_t max);
+
 // For the input line: queries, entities and primitives looked at.
 std::string Line();
 

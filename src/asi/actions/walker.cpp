@@ -310,6 +310,8 @@ bool  g_whisker_low[kWhiskers]   = {false, false, false, false, false, false, fa
 // chosen on the local picture, and a blocked route goes back to the journey
 // at once. See SetPrecise.
 bool  g_precise = false;
+unsigned long long g_waiting_traffic_ms = 0;
+unsigned long long g_said_traffic_ms = 0;
 Vec3  g_blocked_at;
 std::string g_held_by;
 int   g_wedged_hops = 0;
@@ -351,6 +353,16 @@ constexpr int   kSteerSteps = 12;
 constexpr float kRoomWanted = 0.35f;
 constexpr float kRoomWorth = 0.8f;
 constexpr float kTurnCost = 1.2f;
+// Looking before he crosses. Anything moving faster than a jog within this
+// far is worth a glance; if its own path brings it within a body's length
+// of where he is about to be, inside this many seconds, he waits for it.
+// He was run over four times in an evening of testing, and being carried to
+// the hospital ends a journey as thoroughly as any wall.
+constexpr float kTrafficLook = 30.0f;
+constexpr float kTrafficMoving = 3.5f;        // metres a second
+constexpr float kTrafficWithin = 2.0f;        // seconds
+constexpr float kTrafficClearance = 1.6f;     // plus the thing's own half-width
+constexpr unsigned long long kWaitForTrafficMs = 4000;
 // Somebody standing on the route is given this long to move.
 constexpr unsigned long long kWaitForPersonMs = 3000;
 // Blocked ahead and not actually moving for this long: the plan is wrong,
@@ -964,6 +976,38 @@ void DecideLean(unsigned long long now) {
   g_dead_end_probes = 0;
   g_lean = kLeanFor[nearest];
   g_wall = false;
+}
+
+// Whether something moving will be where he is about to be. His own step is
+// taken as a metre and a half a second along the way he has chosen, which
+// is a run; the thing keeps its own course and speed. Both are circles.
+bool TrafficComing(const Vec3& here, float going, float* wait_for) {
+  const std::vector<game::col::Mover> movers =
+      game::col::MoversNear(here.x, here.y, kTrafficLook, kTrafficMoving, 24);
+  const float step = 1.5f;
+  bool wait = false;
+  for (const game::col::Mover& m : movers) {
+    // Above or below him - a bridge, a road under a flyover - is not his
+    // business.
+    if (std::fabs(m.z - here.z) > 4.0f) continue;
+    const float reach = kTrafficClearance + m.radius;
+    float worst = 1e9f;
+    for (float t = 0.0f; t <= kTrafficWithin; t += 0.25f) {
+      const float hx = here.x + std::cos(going) * step * t;
+      const float hy = here.y + std::sin(going) * step * t;
+      const float mx = m.x + m.vx * t, my = m.y + m.vy * t;
+      const float d = std::sqrt((hx - mx) * (hx - mx) + (hy - my) * (hy - my));
+      if (d < worst) worst = d;
+    }
+    // Only where standing still is better than walking on: if it will hit
+    // him where he stands anyway, walking out of the way is the answer.
+    if (worst > reach) continue;
+    const float dx = m.x - here.x, dy = m.y - here.y;
+    if (std::sqrt(dx * dx + dy * dy) < reach) continue;   // already on top of him
+    wait = true;
+    if (wait_for != nullptr) *wait_for = worst;
+  }
+  return wait;
 }
 
 // The nearest point of the current leg to him. The first leg runs from
@@ -1734,6 +1778,30 @@ bool DecideStick(short* out_x, short* out_y) {
     }
   }
   if (pursuing) wanted = Normalise(wanted + g_precise_delta);
+
+  // Look before crossing. Only while following a route - a walk that is
+  // feeling its way has enough to think about - and only for a few seconds
+  // at a time, so a jam on the road is not a journey ended.
+  const bool last_few_metres =
+      g_leg + 1 >= g_route.size() && distance <= kTouchingDistance;
+  if (g_precise && !last_few_metres && game::CallsTrusted()) {
+    float miss = 0;
+    const bool wait = TrafficComing(here, wanted, &miss);
+    if (wait && now - g_waiting_traffic_ms < kWaitForTrafficMs) {
+      if (g_waiting_traffic_ms == 0) g_waiting_traffic_ms = now;
+      g_closer_ms = now;
+      g_window_ms = now;
+      g_window_pos = here;
+      if (now - g_said_traffic_ms > 3000) {
+        g_said_traffic_ms = now;
+        LOG_INFO("walk: something is coming - waiting for it to pass ({:.1f} m "
+                 "off the way)", miss);
+      }
+      return false;
+    }
+    if (!wait) g_waiting_traffic_ms = 0;
+    else if (g_waiting_traffic_ms == 0) g_waiting_traffic_ms = now;
+  }
 
   // Indoors he is steered by what he actually walks into, not by what a map
   // predicted. The whiskers stay for the open street, where a plan really

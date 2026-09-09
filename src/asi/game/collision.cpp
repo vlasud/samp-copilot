@@ -1111,6 +1111,78 @@ void Explain(float x, float y, float z) {
   for (int i = 0; i < q.noted; ++i) LOG_WARN("collision:   {}", q.notes[i]);
 }
 
+namespace {
+
+// CPhysical::m_vecMoveSpeed, in units of a fiftieth of a second, which is
+// what the game's timestep is: multiplied by fifty to read as metres a
+// second.
+constexpr std::uint32_t kMoveSpeed = 0x44;
+constexpr float kSpeedToMetres = 50.0f;
+
+bool ReadMovers(std::uintptr_t head, float x, float y, float radius,
+                float at_least, std::size_t max, std::vector<Mover>* out) {
+  __try {
+    std::uint32_t node = U32(head);
+    for (int n = 0; n < kMaxListNodes && Plausible(node) && out->size() < max; ++n) {
+      const std::uint32_t entity = U32(node);
+      node = U32(node + 4);
+      if (!Plausible(entity)) continue;
+      const std::uint32_t matrix = U32(entity + kEntityMatrix);
+      V pos = Plausible(matrix) ? Vec(matrix + kPos) : Vec(entity + kEntityPosition);
+      const float dx = pos.x - x, dy = pos.y - y;
+      if (dx * dx + dy * dy > radius * radius) continue;
+      const V speed = Vec(entity + kMoveSpeed);
+      Mover m;
+      m.x = pos.x;
+      m.y = pos.y;
+      m.z = pos.z;
+      m.vx = speed.x * kSpeedToMetres;
+      m.vy = speed.y * kSpeedToMetres;
+      m.vz = speed.z * kSpeedToMetres;
+      m.speed = std::sqrt(m.vx * m.vx + m.vy * m.vy);
+      if (m.speed < at_least) continue;
+      // Its own size, from the collision model when it can be had: a lorry
+      // is not a moped. Two and a half metres when it cannot.
+      m.radius = 2.5f;
+      const std::int16_t model = S16(entity + kEntityModel);
+      const std::uint32_t table = g_model_table.load(std::memory_order_relaxed);
+      if (model >= 0) {
+        const std::uint32_t info = U32(table + static_cast<std::uint32_t>(model) * 4);
+        if (Plausible(info)) {
+          const std::uint32_t colmodel = U32(info + kModelColModel);
+          if (Plausible(colmodel)) {
+            const V lo = Vec(colmodel + kColBoxMin), hi = Vec(colmodel + kColBoxMax);
+            const float across = std::max(hi.x - lo.x, hi.y - lo.y);
+            if (across > 0.5f && across < 30.0f) m.radius = across * 0.5f;
+          }
+        }
+      }
+      out->push_back(m);
+    }
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
+}  // namespace
+
+std::vector<Mover> MoversNear(float x, float y, float radius, float at_least,
+                              std::size_t max) {
+  std::vector<Mover> found;
+  if (!Ready()) return found;
+  const int sx0 = SectorX(x - radius), sx1 = SectorX(x + radius);
+  const int sy0 = SectorY(y - radius), sy1 = SectorY(y + radius);
+  for (int sy = sy0; sy <= sy1; ++sy)
+    for (int sx = sx0; sx <= sx1; ++sx) {
+      const std::uintptr_t repeat =
+          At(kRepeatSectors) +
+          ((sy & (kRepeat - 1)) * kRepeat + (sx & (kRepeat - 1))) * kRepeatSectorSize;
+      ReadMovers(repeat + kRepeatVehicles, x, y, radius, at_least, max, &found);
+    }
+  return found;
+}
+
 std::string Line() {
   char text[80];
   std::snprintf(text, sizeof(text), " col=%llu/%llu/%llu",
