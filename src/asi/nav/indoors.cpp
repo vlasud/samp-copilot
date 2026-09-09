@@ -6,120 +6,48 @@
 #include <deque>
 #include <vector>
 
+#include "game/collision.hpp"
 #include "log.hpp"
 #include "samp/objects.hpp"
 
 namespace gtabot::nav {
 namespace {
 
-// A square of the grid. Half a metre against a body a third of a metre wide
-// resolves a doorway either way round; three quarters did not, and whether a
-// door survived depended on where the character happened to be standing when
-// the grid was drawn.
-constexpr float kCell = 0.5f;
-constexpr int   kMaxSide = 96;          // squares across, whatever the radius
-// Above the floor. The knee line is what sees a bed, a bench, a low table -
-// everything a server furnishes a room with and everything he was walking
-// into - and it has to sit above the slab the floor is built from, which the
-// ladder of probes put at well under half a metre. The old lines were
-// measured from a metre above the floor and never saw anything below chest
-// height at all.
-constexpr float kKnee  = 0.45f;
-constexpr float kChest = 1.2f;
-// How far the floor of a square may sit from the floor he is standing on
-// before it is a different storey rather than the same room.
-constexpr float kSameFloor = 2.0f;
-constexpr int   kMaxTests = 140000;
-// Half the width of a person. A square he cannot stand in the middle of is
-// not a square he can walk through, however clear the line between it and
-// its neighbour looks - which is why a route could be drawn through a gap
-// between two beds that his shoulders do not fit into, and why he then spent
-// twenty seconds finding that out with his face.
-constexpr float kBodyRadius = 0.34f;
-// How far from where he stands the body test is waived: a squeeze out of
-// whatever he spawned in.
-constexpr float kSqueezeOut = 1.1f;
-// How near a door has to be to the step being taken for the thing stopping
-// him to be that door. A door leaf is about a metre wide.
-constexpr float kDoorReach = 1.4f;
-constexpr float kDoorHeight = 3.0f;
-
-int g_tests = 0;
-
-// Whether a person standing here would be touching anything: four short
-// lines out to the width of his shoulders, at knee and at chest. Asked only
-// of squares the flood actually reaches, so it costs a few thousand reads
-// for a room rather than a hundred thousand for the whole grid.
-// `base_z` is the floor, the same base the passability lines use.
-bool BodyFits(const Vec3& at, float base_z) {
-  if (g_tests >= kMaxTests) return false;
-  const float heights[2] = {kKnee, kChest};
-  const float out[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-  for (const float* side : out) {
-    for (const float height : heights) {
-      g_tests += 1;
-      const Vec3 from{at.x, at.y, base_z + height};
-      const Vec3 to{at.x + side[0] * kBodyRadius,
-                    at.y + side[1] * kBodyRadius, base_z + height};
-      if (!game::LineClear(from, to, /*include_vehicles=*/false)) return false;
-    }
-  }
-  return true;
-}
-
-// Somewhere in this square he fits, if anywhere does.
+// The room is drawn from the things in it, not felt for with lines.
 //
-// Asking only about the centre throws away a doorway whose free space
-// happens to straddle two squares - the grid is drawn wherever he was
-// standing when the room was mapped, and a door does not move to suit it.
-// A ward whose only way out was such a door mapped as a room with no exit,
-// which is worse than the coarse test it replaced. So the centre is tried
-// first and then a few points inside the square, and whichever fits becomes
-// the point the route goes through.
-bool FindStanding(const Vec3& centre, float base_z, Vec3* where) {
-  const float nudge = kCell * 0.35f;
-  const float tries[5][2] = {{0, 0}, {nudge, 0}, {-nudge, 0}, {0, nudge}, {0, -nudge}};
-  for (const float* at : tries) {
-    const Vec3 point{centre.x + at[0], centre.y + at[1], centre.z};
-    if (!BodyFits(point, base_z)) continue;
-    *where = point;
-    return true;
-  }
-  return false;
-}
-
-bool Passable(const Vec3& a, const Vec3& b, float z) {
-  if (g_tests >= kMaxTests) return false;
-  g_tests += 2;
-  const Vec3 knee_a{a.x, a.y, z + kKnee};
-  const Vec3 knee_b{b.x, b.y, z + kKnee};
-  if (!game::LineClear(knee_a, knee_b, /*include_vehicles=*/false)) return false;
-  const Vec3 chest_a{a.x, a.y, z + kChest};
-  const Vec3 chest_b{b.x, b.y, z + kChest};
-  return game::LineClear(chest_a, chest_b, /*include_vehicles=*/false);
-}
+// Every streamed thing - the walls a server builds a ward out of, the beds,
+// the railings, the planters - is painted onto a grid from its own collision
+// model: the whole of each thing, in the band of heights a walking person
+// occupies, grown by the half-width of his shoulders. What a line at knee
+// height stepped over - a bed frame at the shin, a railing post, the rim of
+// a planter - is on this map, because the map is made of the things and not
+// of a few lines cast among them.
+//
+// A quarter of a metre a cell: fine enough to find a doorway, coarse enough
+// that a room is a few thousand cells.
+constexpr float kCell = 0.25f;
+constexpr int   kMaxSide = 200;         // 50 m across, whatever the radius
+// The band. Below the ankle is what a person steps over without noticing;
+// above the head is a lamp.
+constexpr float kBandLow  = 0.30f;
+constexpr float kBandHigh = 1.75f;
+constexpr float kBodyRadius = 0.34f;
+// A square with no floor within this of his own is a different storey, or
+// the void past a window.
+constexpr float kSameFloor = 2.0f;
+// A door leaf is painted like any other thing and is the one thing that
+// gets out of the way. Its disc is cleared.
+constexpr float kDoorDisc = 1.3f;
+// Where he already stands is proof enough that a person can; the first
+// metre round him is not asked.
+constexpr float kSqueezeOut = 1.0f;
+// How wide a berth a pickup gets. A pickup fires within about a metre.
+constexpr float kPickupDisc = 1.4f;
+constexpr int   kMaxFloorReads = 40000;
 
 float Distance2D(const Vec3& a, const Vec3& b) {
   const float dx = b.x - a.x, dy = b.y - a.y;
   return std::sqrt(dx * dx + dy * dy);
-}
-
-// Whether what stands between these two squares is a door rather than a wall.
-// A door that is shut stops a line of sight exactly the way a wall does, and
-// the difference between the two is the whole difference between a room with
-// a way out and a room without one - so it is asked of the server's own
-// object list rather than of the geometry.
-bool DoorBetween(const std::vector<Vec3>& doors, const Vec3& a, const Vec3& b,
-                 float floor_z, Vec3* which) {
-  const Vec3 middle{(a.x + b.x) * 0.5f, (a.y + b.y) * 0.5f, floor_z};
-  for (const Vec3& door : doors) {
-    if (std::fabs(door.z - floor_z) > kDoorHeight) continue;
-    if (Distance2D(door, middle) <= kDoorReach) {
-      if (which) *which = door;
-      return true;
-    }
-  }
-  return false;
 }
 
 }  // namespace
@@ -127,125 +55,147 @@ bool DoorBetween(const std::vector<Vec3>& doors, const Vec3& a, const Vec3& b,
 Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
   Room room;
   room.cell_m = kCell;
-  g_tests = 0;
   if (!game::CallsTrusted()) {
     room.note = "the world does not read yet";
     return room;
   }
 
-  int side = static_cast<int>(radius * 2.0f / kCell) + 1;
-  if (side > kMaxSide) side = kMaxSide;
-  if (side < 8) side = 8;
-  const int middle = side / 2;
-  // The grid is pinned to the world, not to him.
-  //
-  // Drawing it around wherever he stands means a different lattice every time
-  // the room is mapped, so the same doorway is inside a square on one pass and
-  // straddling two on the next, and the path he is following changes under his
-  // feet every few seconds. That is most of what "he keeps changing his mind"
-  // looked like. Snapped to half-metre lines of the world, a second look from
-  // ten metres away produces the same squares and the same path.
-  const auto snap = [](float value) {
-    return std::floor(value / kCell) * kCell;
-  };
-  const float base_x = snap(from.x - middle * kCell);
-  const float base_y = snap(from.y - middle * kCell);
+  // The floor he is on. The rooms a server builds float a kilometre above
+  // the city, so it is the objects that make the floor, not the terrain.
+  float floor_z = from.z - 1.0f;
+  float ground = 0;
+  if (game::GroundBelow(Vec3{from.x, from.y, from.z + 1.2f}, &ground) &&
+      std::fabs(ground - (from.z - 1.0f)) < kSameFloor)
+    floor_z = ground;
 
-  const auto centre = [&](int ix, int iy) {
-    return Vec3{base_x + ix * kCell, base_y + iy * kCell, from.z};
-  };
+  float span = radius;
+  if (span * 2.0f / kCell > kMaxSide) span = kMaxSide * kCell / 2.0f;
+  game::col::Footprint fp;
+  if (!game::col::PaintFootprint(from.x, from.y, floor_z, span, kCell, kBandLow,
+                                 kBandHigh, kBodyRadius, &fp) ||
+      fp.side <= 0) {
+    room.note = "the world could not be painted";
+    return room;
+  }
+  const int side = fp.side;
   const auto index = [&](int ix, int iy) { return iy * side + ix; };
+  const auto centre = [&](int ix, int iy) {
+    return Vec3{fp.x0 + (ix + 0.5f) * kCell, fp.y0 + (iy + 0.5f) * kCell, from.z};
+  };
+  const auto cell_of = [&](const Vec3& at, int* ix, int* iy) {
+    *ix = static_cast<int>(std::floor((at.x - fp.x0) / kCell));
+    *iy = static_cast<int>(std::floor((at.y - fp.y0) / kCell));
+    return *ix >= 0 && *iy >= 0 && *ix < side && *iy < side;
+  };
 
-  // The doors within reach, once, before any of the feeling starts.
+  // The doors, cut out of the paint. A shut door is solid to the painter
+  // and open to a person who walks into it.
   std::vector<Vec3> doors;
-  for (const samp::NearObject& door :
-       samp::DoorsNear(from, radius + 4.0f, 48))
+  for (const samp::NearObject& door : samp::DoorsNear(from, span + 4.0f, 48))
     doors.push_back(door.at);
+  std::vector<char> door_cell(static_cast<std::size_t>(side) * side, 0);
+  for (const Vec3& door : doors) {
+    if (std::fabs(door.z - floor_z) > 3.0f) continue;
+    int dx0, dy0;
+    if (!cell_of(door, &dx0, &dy0)) continue;
+    const int reach = static_cast<int>(std::ceil(kDoorDisc / kCell));
+    for (int iy = dy0 - reach; iy <= dy0 + reach; ++iy)
+      for (int ix = dx0 - reach; ix <= dx0 + reach; ++ix) {
+        if (ix < 0 || iy < 0 || ix >= side || iy >= side) continue;
+        if (Distance2D(centre(ix, iy), door) > kDoorDisc) continue;
+        fp.blocked[index(ix, iy)] = 0;
+        door_cell[index(ix, iy)] = 1;
+      }
+  }
 
-  // The floor of each square, once. A square with no floor within a storey
-  // of his own is not part of this room.
-  std::vector<float> floor(static_cast<std::size_t>(side) * side, 0);
-  std::vector<char> has_floor(static_cast<std::size_t>(side) * side, 0);
-  for (int iy = 0; iy < side; ++iy)
-    for (int ix = 0; ix < side; ++ix) {
-      const Vec3 at = centre(ix, iy);
-      float ground = 0;
-      ++g_tests;
-      if (!game::GroundBelow(Vec3{at.x, at.y, from.z + 1.2f}, &ground)) continue;
-      if (std::fabs(ground - (from.z - 1.0f)) > kSameFloor) continue;
-      floor[index(ix, iy)] = ground;
-      has_floor[index(ix, iy)] = 1;
-    }
+  // Pickups are not floor. A pickup is a thing a server puts on the floor
+  // to be walked into on purpose - and a route that crosses one by accident
+  // opens whatever it opens: a dialog nobody asked for, a shop, a teleport
+  // to another floor. He stood eighty seconds in front of the hospital's
+  // information box because the way to the reception ran over its pickup.
+  // So they are painted solid, except the one he was sent to.
+  int pickups_painted = 0;
+  for (const samp::Pickup& pickup : samp::PickupsNear(from, span + 2.0f, 64)) {
+    if (std::fabs(pickup.at.z - floor_z) > 3.0f) continue;
+    if (Distance2D(pickup.at, towards) <= kPickupDisc + 0.5f) continue;   // the destination
+    if (Distance2D(pickup.at, from) <= kSqueezeOut) continue;            // already on it
+    int px, py;
+    if (!cell_of(pickup.at, &px, &py)) continue;
+    const int reach = static_cast<int>(std::ceil(kPickupDisc / kCell));
+    for (int iy = py - reach; iy <= py + reach; ++iy)
+      for (int ix = px - reach; ix <= px + reach; ++ix) {
+        if (ix < 0 || iy < 0 || ix >= side || iy >= side) continue;
+        if (Distance2D(centre(ix, iy), pickup.at) > kPickupDisc) continue;
+        fp.blocked[index(ix, iy)] = 1;
+      }
+    ++pickups_painted;
+  }
 
-  // Flooded from under his feet, one square at a time, through whatever a
-  // knee and a chest can both pass.
-  // 0 not asked, 1 he fits, 2 he does not - and where in the square he does.
-  std::vector<char> fits(static_cast<std::size_t>(side) * side, 0);
-  std::vector<Vec3> stand(static_cast<std::size_t>(side) * side);
+  // Where he stands, and the squeeze out of whatever he is standing in.
+  int sx, sy;
+  if (!cell_of(from, &sx, &sy)) {
+    room.note = "he is outside his own map";
+    return room;
+  }
+  const int start = index(sx, sy);
+  {
+    const int reach = static_cast<int>(std::ceil(kSqueezeOut / kCell));
+    for (int iy = sy - reach; iy <= sy + reach; ++iy)
+      for (int ix = sx - reach; ix <= sx + reach; ++ix) {
+        if (ix < 0 || iy < 0 || ix >= side || iy >= side) continue;
+        if (Distance2D(centre(ix, iy), from) <= kSqueezeOut)
+          fp.blocked[index(ix, iy)] = 0;
+      }
+  }
+
+  // Flooded from under his feet through the free cells. Eight ways, but a
+  // diagonal only between two free orthogonal neighbours: a body does not
+  // pass through the corner where two walls meet. The floor is asked about
+  // only for cells the flood reaches - it is the one read per cell that is
+  // still needed, because paint says where the walls are and not where the
+  // floor ends.
   std::vector<int> came_from(static_cast<std::size_t>(side) * side, -1);
   std::vector<char> reached(static_cast<std::size_t>(side) * side, 0);
+  std::vector<char> floor_known(static_cast<std::size_t>(side) * side, 0);  // 0 ?, 1 yes, 2 no
+  std::vector<float> floor(static_cast<std::size_t>(side) * side, floor_z);
+  int floor_reads = 0;
+  const auto has_floor = [&](int ix, int iy) {
+    const int at = index(ix, iy);
+    if (floor_known[at] == 0) {
+      if (floor_reads >= kMaxFloorReads) return false;
+      ++floor_reads;
+      const Vec3 c = centre(ix, iy);
+      float g = 0;
+      const bool ok = game::GroundBelow(Vec3{c.x, c.y, floor_z + 1.5f}, &g) &&
+                      std::fabs(g - floor_z) <= kSameFloor;
+      floor_known[at] = ok ? 1 : 2;
+      if (ok) floor[at] = g;
+    }
+    return floor_known[at] == 1;
+  };
+
   std::deque<int> queue;
-  const int start = index(middle, middle);
-  stand[start] = centre(middle, middle);
-  fits[start] = 1;
   reached[start] = 1;
+  floor_known[start] = 1;
   queue.push_back(start);
   int reached_count = 1;
-
-  const int step_x[4] = {1, -1, 0, 0};
-  const int step_y[4] = {0, 0, 1, -1};
-  while (!queue.empty() && g_tests < kMaxTests) {
+  const int step_x[8] = {1, -1, 0, 0, 1, 1, -1, -1};
+  const int step_y[8] = {0, 0, 1, -1, 1, -1, 1, -1};
+  while (!queue.empty()) {
     const int here = queue.front();
     queue.pop_front();
     const int hx = here % side, hy = here / side;
-    for (int d = 0; d < 4; ++d) {
+    for (int d = 0; d < 8; ++d) {
       const int nx = hx + step_x[d], ny = hy + step_y[d];
       if (nx < 0 || ny < 0 || nx >= side || ny >= side) continue;
       const int next = index(nx, ny);
-      if (reached[next] || !has_floor[next]) continue;
-      // Room for his shoulders in the square itself, asked once and kept.
-      //
-      // Except within reach of where he stands. He is standing there, which
-      // is proof enough that a person can, and a character who spawned with
-      // his shoulder against a bed and his back to a plant has to be allowed
-      // to squeeze out of it before the rule that he may not stand in such a
-      // place starts to apply - or the room he is in is one square and the
-      // way out of it does not exist.
-      if (fits[next] == 0) {
-        Vec3 where;
-        if (Distance2D(centre(nx, ny), centre(middle, middle)) <= kSqueezeOut) {
-          fits[next] = 1;
-          stand[next] = centre(nx, ny);
-        } else if (FindStanding(centre(nx, ny), floor[next], &where)) {
-          fits[next] = 1;
-          stand[next] = where;
-        } else {
-          // Too narrow for his shoulders - or a shut door. A door leaf
-          // inside the square is exactly what makes the body test fail, and
-          // it is the one obstacle that gets out of the way when he walks
-          // into it. Refusing the square here, before the door test ever
-          // ran, is how a ward with a door twelve metres down the wall mapped
-          // as a room with no way out and sent him into the wall instead.
-          Vec3 leaf;
-          if (DoorBetween(doors, centre(nx, ny), centre(nx, ny), floor[next],
-                          &leaf)) {
-            fits[next] = 1;
-            stand[next] = centre(nx, ny);
-          } else {
-            fits[next] = 2;
-          }
-        }
-      }
-      if (fits[next] == 2) continue;
-      Vec3 door;
-      bool through_a_door = false;
-      if (!Passable(centre(hx, hy), centre(nx, ny), floor[here])) {
-        if (!DoorBetween(doors, centre(hx, hy), centre(nx, ny), floor[here],
-                         &door))
+      if (reached[next] || fp.blocked[next]) continue;
+      if (d >= 4) {
+        // No corner-cutting.
+        if (fp.blocked[index(hx + step_x[d], hy)] || fp.blocked[index(hx, hy + step_y[d])])
           continue;
-        through_a_door = true;
       }
-      if (through_a_door) room.doors.push_back(door);
+      if (!has_floor(nx, ny)) continue;
       reached[next] = 1;
       came_from[next] = here;
       queue.push_back(next);
@@ -255,111 +205,79 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
   room.ok = true;
   room.cells_reached = reached_count;
 
-  // A room of one square is a bug, not a room, and the bug is in whichever
-  // test refused the four squares round him. Say which, and why.
-  if (reached_count == 1) {
-    std::string why;
-    for (int d = 0; d < 4; ++d) {
-      const int nx = middle + step_x[d], ny = middle + step_y[d];
-      const int next = index(nx, ny);
-      const Vec3 at = centre(nx, ny);
-      char line[200];
-      if (!has_floor[next]) {
-        std::snprintf(line, sizeof(line), " [%+d,%+d: no floor]", step_x[d], step_y[d]);
-      } else {
-        const float base = floor[next];
-        const float heights[2] = {kKnee, kChest};
-        const char* names[2] = {"knee", "chest"};
-        const float out[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-        std::string failed;
-        for (int h = 0; h < 2; ++h)
-          for (int o = 0; o < 4; ++o) {
-            const Vec3 a{at.x, at.y, base + heights[h]};
-            const Vec3 b{at.x + out[o][0] * kBodyRadius,
-                         at.y + out[o][1] * kBodyRadius, base + heights[h]};
-            if (!game::LineClear(a, b, false))
-              failed += std::string(" ") + names[h] + (o == 0 ? "+x" : o == 1 ? "-x" : o == 2 ? "+y" : "-y");
-          }
-        std::snprintf(line, sizeof(line), " [%+d,%+d at (%.2f,%.2f) floor %.2f: fits=%d passable=%d blocked:%s]",
-                      step_x[d], step_y[d], at.x, at.y, base, fits[next],
-                      Passable(centre(middle, middle), at, floor[start]) ? 1 : 0,
-                      failed.empty() ? " nothing" : failed.c_str());
-      }
-      why += line;
-    }
-    room.note = "one square:" + why;
-    LOG_WARN("room: {}", room.note);
-  }
-
-  // The square of the room nearest to wherever he was going. If the target
-  // itself is in the room this is it; if it is not, this is the way out.
+  // The cell of the room nearest to wherever he was going.
   int best = start;
-  float best_away = Distance2D(centre(middle, middle), towards);
+  float best_away = Distance2D(centre(sx, sy), towards);
   for (int iy = 0; iy < side; ++iy)
     for (int ix = 0; ix < side; ++ix) {
       if (!reached[index(ix, iy)]) continue;
-      const float away = Distance2D(stand[index(ix, iy)], towards);
+      const float away = Distance2D(centre(ix, iy), towards);
       if (away < best_away) {
         best_away = away;
         best = index(ix, iy);
       }
     }
-
-  room.way_out = Vec3{stand[best].x, stand[best].y, floor[best] + 1.0f};
+  const int bx = best % side, by = best / side;
+  room.way_out = Vec3{centre(bx, by).x, centre(bx, by).y, floor[best] + 1.0f};
   room.way_out_away_m = best_away;
   room.way_out_found = best != start;
-  room.reaches_target = best_away < kCell * 1.5f;
+  room.reaches_target = best_away < kCell * 3.0f;
 
-  // The way there, back along the flood.
+  // The way there, back along the flood - and which doors it went through.
   std::vector<Vec3> back;
   for (int at = best; at != -1; at = came_from[at]) {
-    back.push_back(Vec3{stand[at].x, stand[at].y, floor[at] + 1.0f});
+    const int ax = at % side, ay = at / side;
+    back.push_back(Vec3{centre(ax, ay).x, centre(ax, ay).y, floor[at] + 1.0f});
+    if (door_cell[at]) {
+      for (const Vec3& door : doors)
+        if (Distance2D(door, centre(ax, ay)) <= kDoorDisc) {
+          bool known = false;
+          for (const Vec3& d : room.doors)
+            if (Distance2D(d, door) < 0.1f) known = true;
+          if (!known) room.doors.push_back(door);
+        }
+    }
     if (at == start) break;
   }
   std::reverse(back.begin(), back.end());
-  room.points = std::move(back);
+  // Every fourth cell is plenty for the walker, which looks ahead anyway;
+  // the ends are kept exactly.
+  std::vector<Vec3> thinned;
+  for (std::size_t i = 0; i < back.size(); ++i)
+    if (i == 0 || i + 1 == back.size() || i % 4 == 0) thinned.push_back(back[i]);
+  room.points = std::move(thinned);
 
-  // The picture: what he is standing on, what he can reach, what stopped him.
+  // The picture: what he can reach, what is painted solid, the doors.
   for (int iy = side - 1; iy >= 0; --iy) {
     std::string row;
     for (int ix = 0; ix < side; ++ix) {
       const int at = index(ix, iy);
-      if (at == start)            row += '@';
-      else if (at == best)        row += '*';
-      else if (reached[at])       row += '.';
-      else if (fits[at] == 2)     row += 'o';   // floor, but too narrow for him
-      else if (has_floor[at])     row += '#';
-      else                        row += ' ';
+      if (at == start)                 row += '@';
+      else if (at == best)             row += '*';
+      else if (reached[at])            row += '.';
+      else if (door_cell[at])          row += 'D';
+      else if (fp.blocked[at])         row += '#';
+      else if (floor_known[at] == 2)   row += ' ';
+      else                             row += ',';
     }
     room.picture.push_back(std::move(row));
   }
 
-  // The same door is found from both of its sides; say it once.
-  std::sort(room.doors.begin(), room.doors.end(),
-            [](const Vec3& a, const Vec3& b) {
-              if (a.x != b.x) return a.x < b.x;
-              if (a.y != b.y) return a.y < b.y;
-              return a.z < b.z;
-            });
-  room.doors.erase(std::unique(room.doors.begin(), room.doors.end(),
-                               [](const Vec3& a, const Vec3& b) {
-                                 return Distance2D(a, b) < 0.1f &&
-                                        std::fabs(a.z - b.z) < 0.1f;
-                               }),
-                   room.doors.end());
-
-  room.note = std::to_string(reached_count) + " squares of " +
-              std::to_string(side * side) + " reachable, " +
-              std::to_string(g_tests) + " questions of the world; the room " +
-              (room.reaches_target ? "reaches where he was going"
-                                   : "ends " + std::to_string(
-                                         static_cast<int>(best_away)) +
-                                         " m short of it") +
-              (room.doors.empty()
-                   ? ""
-                   : "; " + std::to_string(room.doors.size()) +
-                         " of the ways between squares are doors, which is "
-                         "what he has to walk into rather than round");
+  char note[300];
+  std::snprintf(note, sizeof(note),
+                "%d cells of %d reachable; %d things, %d primitives painted %d cells "
+                "solid; %d floor reads; the room %s",
+                reached_count, side * side, fp.entities, fp.primitives, fp.painted,
+                floor_reads,
+                room.reaches_target ? "reaches where he was going"
+                                    : "ends short of it");
+  room.note = note;
+  if (!room.reaches_target)
+    room.note += " by " + std::to_string(static_cast<int>(best_away)) + " m";
+  if (!room.doors.empty())
+    room.note += "; through " + std::to_string(room.doors.size()) + " door(s)";
+  if (pickups_painted > 0)
+    room.note += "; round " + std::to_string(pickups_painted) + " pickup(s)";
   return room;
 }
 

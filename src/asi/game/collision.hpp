@@ -24,7 +24,9 @@
 // ground", as it was with the game's own function. Game thread only: the
 // lists change under the streamer.
 //
+#include <cstdint>
 #include <string>
+#include <vector>
 
 namespace gtabot::game {
 struct Vec3;
@@ -52,6 +54,32 @@ bool LineClear(const Vec3& a, const Vec3& b, bool vehicles);
 // The water surface at (x, y), from the game's own data/water.dat. False
 // where there is no water.
 bool WaterAt(float x, float y, float* level);
+
+// The solid world inside a square, drawn onto a grid.
+//
+// Not a line here and a line there: every collision primitive of every
+// streamed thing whose height overlaps a band above the floor, projected
+// onto the floor and painted into cells, each grown by `inflate` so that a
+// cell is marked wherever a body of that half-width would touch something.
+// A bed frame at the shin, a railing post, a planter's rim - things a probe
+// at knee height steps over and a character does not - are on this map
+// because the whole of each thing is on it, not the few lines a probe
+// happened to cast.
+struct Footprint {
+  float x0 = 0, y0 = 0;     // the cell (0, 0) corner, in the world
+  float cell = 0.25f;
+  int   side = 0;           // cells across
+  // One byte a cell, row-major from (x0, y0): 1 where something solid is
+  // within `inflate` of the cell's centre in the band, 0 where nothing is.
+  std::vector<std::uint8_t> blocked;
+  int entities = 0, primitives = 0, painted = 0;
+};
+
+// Paints the square of `radius` about (cx, cy). The band is
+// [floor_z + z_lo, floor_z + z_hi]. Buildings, dummies and objects; not
+// vehicles. Game thread. False when the world does not read.
+bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
+                    float z_lo, float z_hi, float inflate, Footprint* out);
 
 // For the input line: queries, entities and primitives looked at.
 std::string Line();

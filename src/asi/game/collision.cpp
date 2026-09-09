@@ -365,6 +365,268 @@ void TestEntity(Query& q, std::uintptr_t entity) {
   }
 }
 
+// ---- painting the world onto a grid ----
+
+struct Paint {
+  Footprint* out = nullptr;
+  float z_lo = 0, z_hi = 0;     // the band, in the world
+  float inflate = 0;
+  float x1 = 0, y1 = 0;         // the far corner of the square
+  long  budget = 0;             // cell tests left
+};
+
+struct P2 { float x, y; };
+
+// The cells within reach of a polygon: inside it, or nearer to one of its
+// edges than the inflation. Works for a triangle, a rotated box's hull, and
+// a wall seen edge-on - a two-point "polygon" - which is the one that
+// matters most.
+void PaintPolygon(Paint& p, const P2* poly, int n, float lo_z, float hi_z) {
+  if (n < 2) return;
+  if (hi_z < p.z_lo || lo_z > p.z_hi) return;
+  Footprint& f = *p.out;
+  float min_x = poly[0].x, max_x = poly[0].x, min_y = poly[0].y, max_y = poly[0].y;
+  for (int i = 1; i < n; ++i) {
+    min_x = poly[i].x < min_x ? poly[i].x : min_x;
+    max_x = poly[i].x > max_x ? poly[i].x : max_x;
+    min_y = poly[i].y < min_y ? poly[i].y : min_y;
+    max_y = poly[i].y > max_y ? poly[i].y : max_y;
+  }
+  if (max_x < f.x0 - p.inflate || min_x > p.x1 + p.inflate ||
+      max_y < f.y0 - p.inflate || min_y > p.y1 + p.inflate)
+    return;
+  int cx0 = static_cast<int>(std::floor((min_x - p.inflate - f.x0) / f.cell));
+  int cx1 = static_cast<int>(std::floor((max_x + p.inflate - f.x0) / f.cell));
+  int cy0 = static_cast<int>(std::floor((min_y - p.inflate - f.y0) / f.cell));
+  int cy1 = static_cast<int>(std::floor((max_y + p.inflate - f.y0) / f.cell));
+  cx0 = cx0 < 0 ? 0 : cx0;
+  cy0 = cy0 < 0 ? 0 : cy0;
+  cx1 = cx1 >= f.side ? f.side - 1 : cx1;
+  cy1 = cy1 >= f.side ? f.side - 1 : cy1;
+  const float r2 = p.inflate * p.inflate;
+  for (int cy = cy0; cy <= cy1; ++cy) {
+    for (int cx = cx0; cx <= cx1; ++cx) {
+      if (--p.budget < 0) return;
+      std::uint8_t& cell = f.blocked[static_cast<std::size_t>(cy) * f.side + cx];
+      if (cell) continue;
+      const float px = f.x0 + (cx + 0.5f) * f.cell;
+      const float py = f.y0 + (cy + 0.5f) * f.cell;
+      bool inside = false;
+      if (n >= 3) {
+        for (int i = 0, j = n - 1; i < n; j = i++) {
+          const bool cross = (poly[i].y > py) != (poly[j].y > py);
+          if (!cross) continue;
+          const float x = poly[j].x + (py - poly[j].y) * (poly[i].x - poly[j].x) /
+                                          (poly[i].y - poly[j].y);
+          if (px < x) inside = !inside;
+        }
+      }
+      if (inside) {
+        cell = 1;
+        ++f.painted;
+        continue;
+      }
+      for (int i = 0, j = n - 1; i < n; j = i++) {
+        const float ex = poly[i].x - poly[j].x, ey = poly[i].y - poly[j].y;
+        const float len2 = ex * ex + ey * ey;
+        float t = len2 > 1e-8f ? ((px - poly[j].x) * ex + (py - poly[j].y) * ey) / len2 : 0.0f;
+        t = t < 0 ? 0 : (t > 1 ? 1 : t);
+        const float dx = px - (poly[j].x + ex * t), dy = py - (poly[j].y + ey * t);
+        if (dx * dx + dy * dy <= r2) {
+          cell = 1;
+          ++f.painted;
+          break;
+        }
+      }
+    }
+  }
+}
+
+void PaintCircle(Paint& p, float cx, float cy, float r, float lo_z, float hi_z) {
+  if (hi_z < p.z_lo || lo_z > p.z_hi) return;
+  Footprint& f = *p.out;
+  const float reach = r + p.inflate;
+  int cx0 = static_cast<int>(std::floor((cx - reach - f.x0) / f.cell));
+  int cx1 = static_cast<int>(std::floor((cx + reach - f.x0) / f.cell));
+  int cy0 = static_cast<int>(std::floor((cy - reach - f.y0) / f.cell));
+  int cy1 = static_cast<int>(std::floor((cy + reach - f.y0) / f.cell));
+  cx0 = cx0 < 0 ? 0 : cx0;
+  cy0 = cy0 < 0 ? 0 : cy0;
+  cx1 = cx1 >= f.side ? f.side - 1 : cx1;
+  cy1 = cy1 >= f.side ? f.side - 1 : cy1;
+  for (int y = cy0; y <= cy1; ++y)
+    for (int x = cx0; x <= cx1; ++x) {
+      if (--p.budget < 0) return;
+      std::uint8_t& cell = f.blocked[static_cast<std::size_t>(y) * f.side + x];
+      if (cell) continue;
+      const float dx = f.x0 + (x + 0.5f) * f.cell - cx;
+      const float dy = f.y0 + (y + 0.5f) * f.cell - cy;
+      if (dx * dx + dy * dy <= reach * reach) {
+        cell = 1;
+        ++f.painted;
+      }
+    }
+}
+
+// The convex hull of a few points - the eight corners of a box - by the
+// monotone chain. Returns how many points of `out` are the hull.
+int Hull(P2* pts, int n, P2* out) {
+  for (int i = 1; i < n; ++i)
+    for (int j = i; j > 0 && (pts[j].x < pts[j - 1].x ||
+                              (pts[j].x == pts[j - 1].x && pts[j].y < pts[j - 1].y)); --j) {
+      const P2 t = pts[j];
+      pts[j] = pts[j - 1];
+      pts[j - 1] = t;
+    }
+  int k = 0;
+  const auto cross = [](P2 o, P2 a, P2 b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  };
+  for (int i = 0; i < n; ++i) {
+    while (k >= 2 && cross(out[k - 2], out[k - 1], pts[i]) <= 0) --k;
+    out[k++] = pts[i];
+  }
+  for (int i = n - 2, t = k + 1; i >= 0; --i) {
+    while (k >= t && cross(out[k - 2], out[k - 1], pts[i]) <= 0) --k;
+    out[k++] = pts[i];
+  }
+  return k - 1;
+}
+
+void PaintEntity(Paint& p, std::uintptr_t entity) {
+  if (!Plausible(static_cast<std::uint32_t>(entity))) return;
+  const std::uint32_t flags = U32(entity + kEntityFlags);
+  if ((flags & 1) == 0) return;
+  const std::int16_t model = S16(entity + kEntityModel);
+  if (model < 0) return;
+  const std::uint32_t table = g_model_table.load(std::memory_order_relaxed);
+  const std::uint32_t info = U32(table + static_cast<std::uint32_t>(model) * 4);
+  if (!Plausible(info)) return;
+  const std::uint32_t colmodel = U32(info + kModelColModel);
+  if (!Plausible(colmodel)) return;
+
+  V right, forward, up, pos;
+  const std::uint32_t matrix = U32(entity + kEntityMatrix);
+  if (Plausible(matrix)) {
+    right = Vec(matrix + kRight);
+    forward = Vec(matrix + kForward);
+    up = Vec(matrix + kUp);
+    pos = Vec(matrix + kPos);
+  } else {
+    pos = Vec(entity + kEntityPosition);
+    const float h = F32(entity + kEntityHeading);
+    right = V{std::cos(h), std::sin(h), 0.0f};
+    forward = V{-std::sin(h), std::cos(h), 0.0f};
+    up = V{0.0f, 0.0f, 1.0f};
+  }
+  const auto world = [&](V l) {
+    return V{pos.x + right.x * l.x + forward.x * l.y + up.x * l.z,
+             pos.y + right.y * l.x + forward.y * l.y + up.y * l.z,
+             pos.z + right.z * l.x + forward.z * l.y + up.z * l.z};
+  };
+  const auto corners = [&](V blo, V bhi, P2* q, float* z0, float* z1) {
+    *z0 = 1e9f;
+    *z1 = -1e9f;
+    int i = 0;
+    for (int a = 0; a < 2; ++a)
+      for (int b = 0; b < 2; ++b)
+        for (int d = 0; d < 2; ++d) {
+          const V c = world(V{a ? bhi.x : blo.x, b ? bhi.y : blo.y, d ? bhi.z : blo.z});
+          q[i++] = P2{c.x, c.y};
+          *z0 = c.z < *z0 ? c.z : *z0;
+          *z1 = c.z > *z1 ? c.z : *z1;
+        }
+  };
+
+  // The bounding box first: nowhere near the square or the band, and none
+  // of the primitives are read.
+  const V lo = Vec(colmodel + kColBoxMin);
+  const V hi = Vec(colmodel + kColBoxMax);
+  P2 q[8];
+  P2 h[10];
+  float z0 = 0, z1 = 0;
+  corners(lo, hi, q, &z0, &z1);
+  if (z1 < p.z_lo || z0 > p.z_hi) return;
+  {
+    float min_x = q[0].x, max_x = q[0].x, min_y = q[0].y, max_y = q[0].y;
+    for (int k = 1; k < 8; ++k) {
+      min_x = q[k].x < min_x ? q[k].x : min_x;
+      max_x = q[k].x > max_x ? q[k].x : max_x;
+      min_y = q[k].y < min_y ? q[k].y : min_y;
+      max_y = q[k].y > max_y ? q[k].y : max_y;
+    }
+    const Footprint& f = *p.out;
+    if (max_x < f.x0 - p.inflate || min_x > p.x1 + p.inflate ||
+        max_y < f.y0 - p.inflate || min_y > p.y1 + p.inflate)
+      return;
+  }
+  ++p.out->entities;
+
+  const std::uint32_t data = U32(colmodel + kColData);
+  if (!Plausible(data)) {
+    // No primitives: the bounding box is all there is, and it is solid.
+    PaintPolygon(p, h, Hull(q, 8, h), z0, z1);
+    return;
+  }
+  const unsigned spheres   = U16(data + kDataNumSpheres);
+  const unsigned boxes     = U16(data + kDataNumBoxes);
+  const unsigned triangles = U16(data + kDataNumTriangles);
+  if (spheres > kMaxPrimitives || boxes > kMaxPrimitives || triangles > kMaxPrimitives) return;
+  p.out->primitives += static_cast<int>(spheres + boxes + triangles);
+
+  const std::uint32_t sphere_array = U32(data + kDataSpheres);
+  for (unsigned i = 0; i < spheres && Plausible(sphere_array); ++i) {
+    const std::uintptr_t s = sphere_array + i * kSphereSize;
+    const V c = world(Vec(s));
+    const float r = F32(s + 0xC);
+    PaintCircle(p, c.x, c.y, r, c.z - r, c.z + r);
+  }
+  const std::uint32_t box_array = U32(data + kDataBoxes);
+  for (unsigned i = 0; i < boxes && Plausible(box_array); ++i) {
+    const std::uintptr_t bx = box_array + i * kBoxSize;
+    corners(Vec(bx), Vec(bx + 0xC), q, &z0, &z1);
+    PaintPolygon(p, h, Hull(q, 8, h), z0, z1);
+  }
+  const std::uint32_t tri_array = U32(data + kDataTriangles);
+  const std::uint32_t vertices  = U32(data + kDataVertices);
+  if (!Plausible(tri_array) || !Plausible(vertices)) return;
+  for (unsigned i = 0; i < triangles; ++i) {
+    if (p.budget < 0) return;
+    const std::uintptr_t t = tri_array + i * kTriangleSize;
+    const std::uintptr_t va = vertices + U16(t) * 6u;
+    const std::uintptr_t vb = vertices + U16(t + 2) * 6u;
+    const std::uintptr_t vc = vertices + U16(t + 4) * 6u;
+    const V v0 = world(V{S16(va) * kVertexScale, S16(va + 2) * kVertexScale, S16(va + 4) * kVertexScale});
+    const V v1 = world(V{S16(vb) * kVertexScale, S16(vb + 2) * kVertexScale, S16(vb + 4) * kVertexScale});
+    const V v2 = world(V{S16(vc) * kVertexScale, S16(vc + 2) * kVertexScale, S16(vc + 4) * kVertexScale});
+    const P2 tri[3] = {{v0.x, v0.y}, {v1.x, v1.y}, {v2.x, v2.y}};
+    const float t0 = v0.z < v1.z ? (v0.z < v2.z ? v0.z : v2.z) : (v1.z < v2.z ? v1.z : v2.z);
+    const float t1 = v0.z > v1.z ? (v0.z > v2.z ? v0.z : v2.z) : (v1.z > v2.z ? v1.z : v2.z);
+    PaintPolygon(p, tri, 3, t0, t1);
+  }
+}
+
+void PaintList(Paint& p, std::uintptr_t head) {
+  std::uint32_t node = U32(head);
+  for (int n = 0; n < kMaxListNodes && Plausible(node); ++n) {
+    PaintEntity(p, U32(node));
+    node = U32(node + 4);
+  }
+}
+
+bool PaintSector(Paint* p, int sx, int sy, const std::uintptr_t* bucket, int count) {
+  __try {
+    for (int i = 0; i < count; ++i) PaintEntity(*p, bucket[i]);
+    const std::uintptr_t repeat =
+        At(kRepeatSectors) +
+        ((sy & (kRepeat - 1)) * kRepeat + (sx & (kRepeat - 1))) * kRepeatSectorSize;
+    PaintList(*p, repeat + kRepeatObjects);
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
+}
+
 // A pointer list: pItem at 0, pNext at 4, for the single- and the
 // double-linked kind alike.
 void TestList(Query& q, std::uintptr_t head) {
@@ -644,6 +906,43 @@ bool LineClear(const Vec3& a, const Vec3& b, bool vehicles) {
   g_entities.fetch_add(q.entities, std::memory_order_relaxed);
   g_primitives.fetch_add(q.primitives, std::memory_order_relaxed);
   return !q.hit;
+}
+
+bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
+                    float z_lo, float z_hi, float inflate, Footprint* out) {
+  if (!Ready() || out == nullptr || cell <= 0.05f || radius <= 0) return false;
+  EnsureWindow(cx, cy);
+  const int side = static_cast<int>(std::ceil(radius * 2.0f / cell));
+  if (side <= 0 || side > 400) return false;
+  out->cell = cell;
+  out->side = side;
+  out->x0 = std::floor((cx - radius) / cell) * cell;
+  out->y0 = std::floor((cy - radius) / cell) * cell;
+  out->blocked.assign(static_cast<std::size_t>(side) * side, 0);
+  out->entities = out->primitives = out->painted = 0;
+
+  Paint p;
+  p.out = out;
+  p.z_lo = floor_z + z_lo;
+  p.z_hi = floor_z + z_hi;
+  p.inflate = inflate;
+  p.x1 = out->x0 + side * cell;
+  p.y1 = out->y0 + side * cell;
+  p.budget = 4000000;
+
+  // Every sector the square touches, and one all round for things whose
+  // collision reaches in from next door.
+  const int sx0 = SectorX(out->x0) - 1, sx1 = SectorX(p.x1) + 1;
+  const int sy0 = SectorY(out->y0) - 1, sy1 = SectorY(p.y1) + 1;
+  for (int sy = sy0; sy <= sy1; ++sy)
+    for (int sx = sx0; sx <= sx1; ++sx) {
+      const int bucket = BucketOf(sx, sy);
+      const std::uintptr_t* items = bucket >= 0 ? g_bucket[bucket].data() : nullptr;
+      const int count = bucket >= 0 ? static_cast<int>(g_bucket[bucket].size()) : 0;
+      PaintSector(&p, sx, sy, items, count);
+    }
+  g_queries.fetch_add(1, std::memory_order_relaxed);
+  return true;
 }
 
 bool WaterAt(float x, float y, float* level) {
