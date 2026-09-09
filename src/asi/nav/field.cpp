@@ -28,6 +28,8 @@ constexpr float kCell = 0.25f;
 // route, not a detour.
 constexpr float kMargin = 40.0f;
 constexpr float kRoundStart = 60.0f;
+// And the least: enough to step round a parked car either side.
+constexpr float kLeastRound = 12.0f;
 // The most field there is: a hundred and eighty metres a side at this
 // cell. A journey is staged and replanned as the world streams in anyway,
 // so a plan need only reach the next stage.
@@ -49,7 +51,16 @@ constexpr float kPersonRadius = 0.45f;
 // The ground is read every fourth cell - a metre - and the cells between
 // take the reading beside them. A kerb is not lost at that spacing, and the
 // reads are a sixteenth of what every cell would cost.
+// The ground is read every fourth cell - a metre - out of doors, where
+// nothing he must fit through is narrower than a pavement. In a small
+// place it is read every other cell - half a metre - because a doorway is
+// a metre wide and a reading every metre falls on either side of it: three
+// quarters of a hospital came back unknown that way, its rooms cut off
+// from their own corridor, and the routes drawn across it were nonsense.
 constexpr int   kGroundStride = 4;
+constexpr int   kCloseStride  = 2;
+// A box this small is a room, a yard, a shop - somewhere to read closely.
+constexpr int   kCloseSide = 260;          // sixty-five metres
 // How much the floor may rise or fall between two readings a metre apart
 // and still be the same floor. A staircase at forty-five degrees is one
 // metre in one; half a metre more allows for a steep one and for the
@@ -151,6 +162,7 @@ struct Field::Work {
   // so a hilltop reached from the steep side can still be reached from the
   // gentle one without the reading going round for ever.
   bool ground_seeded = false;
+  int  stride = kGroundStride;   // cells between ground readings
   std::vector<int> queue;
   std::size_t queue_at = 0;
   std::vector<std::uint8_t> tries;
@@ -213,10 +225,17 @@ bool Field::Step() {
       // the target sat in was a staircase forty metres past it, on the very
       // edge of a box drawn round the line, and the field ended short of the
       // target by the length of that detour.
-      const float roomx0 = std::min(w.from.x, w.to.x) - kRoundStart;
-      const float roomx1 = std::max(w.from.x, w.to.x) + kRoundStart;
-      const float roomy0 = std::min(w.from.y, w.to.y) - kRoundStart;
-      const float roomy1 = std::max(w.from.y, w.to.y) + kRoundStart;
+      // Room to go round things, but no more than the errand can use: sixty
+      // metres of margin either side of an eight-metre walk across a ward
+      // makes a box a hundred and thirty metres across to cross a room, and
+      // a box that big has to be read coarsely.
+      const float straight_line = Away(w.from, w.to);
+      const float margin =
+          std::min(kRoundStart, std::max(kLeastRound, straight_line));
+      const float roomx0 = std::min(w.from.x, w.to.x) - margin;
+      const float roomx1 = std::max(w.from.x, w.to.x) + margin;
+      const float roomy0 = std::min(w.from.y, w.to.y) - margin;
+      const float roomy1 = std::max(w.from.y, w.to.y) + margin;
       float minx = roomx0, maxx = roomx1, miny = roomy0, maxy = roomy1;
       // When that is more field than there is, the room behind the start is
       // what is kept and the rest reaches toward the target - not the other
@@ -238,6 +257,7 @@ bool Field::Step() {
       const int W = std::min(kMaxSide, static_cast<int>(std::ceil((maxx - g.x0) / kCell)));
       const int H = std::min(kMaxSide, static_cast<int>(std::ceil((maxy - g.y0) / kCell)));
       g.Resize(W, H);
+      w.stride = (W <= kCloseSide && H <= kCloseSide) ? kCloseStride : kGroundStride;
       w.ref_z = w.from.z - kPedOrigin;
       result_.ref_z = w.ref_z;
       result_.box_x0 = g.x0;
@@ -310,8 +330,8 @@ bool Field::Step() {
         int sx = 0, sy = 0;
         if (!g.cell_of(w.from, &sx, &sy))
           return finish("the start is outside the field");
-        sx -= sx % kGroundStride;
-        sy -= sy % kGroundStride;
+        sx -= sx % w.stride;
+        sy -= sy % w.stride;
         const int seed = g.index(sx, sy);
         const Vec3 c = g.centre(seed);
         float found = 0;
@@ -336,8 +356,8 @@ bool Field::Step() {
         w.queue.push_back(seed);
       }
       int reads = 0;
-      const int dx[4] = {kGroundStride, -kGroundStride, 0, 0};
-      const int dy[4] = {0, 0, kGroundStride, -kGroundStride};
+      const int dx[4] = {w.stride, -w.stride, 0, 0};
+      const int dy[4] = {0, 0, w.stride, -w.stride};
       while (w.queue_at < w.queue.size() && reads < kReadsPerStep) {
         const int at = w.queue[w.queue_at++];
         const int ix = at % g.W, iy = at / g.W;
@@ -371,8 +391,8 @@ bool Field::Step() {
         // of those the reading it belongs to. Marking every cell here
         // instead left fifteen cells in sixteen saying "no ground", and a
         // field of eighty-five per cent unknown is a field of walls.
-        for (int iy = 0; iy < g.H; iy += kGroundStride)
-          for (int ix = 0; ix < g.W; ix += kGroundStride) {
+        for (int iy = 0; iy < g.H; iy += w.stride)
+          for (int ix = 0; ix < g.W; ix += w.stride) {
             const int at = g.index(ix, iy);
             if (g.known[at] != 1) g.known[at] = 2;
           }
@@ -399,8 +419,8 @@ bool Field::Step() {
         int cx, cy;
         const int reach = static_cast<int>(kTileRadius / kCell);
         if (g.cell_of(Vec3{c.x, c.y, 0}, &cx, &cy)) {
-          for (int iy = cy - reach; iy < cy + reach; iy += kGroundStride)
-            for (int ix = cx - reach; ix < cx + reach; ix += kGroundStride) {
+          for (int iy = cy - reach; iy < cy + reach; iy += w.stride)
+            for (int ix = cx - reach; ix < cx + reach; ix += w.stride) {
               if (!g.inside(ix, iy)) continue;
               const int at = g.index(ix, iy);
               if (g.known[at] != 1) continue;
@@ -451,7 +471,7 @@ bool Field::Step() {
 
     case Phase::kClearance: {
       // The cells between the readings take the reading beside them.
-      SmoothBetweenReadings(&g, kGroundStride);
+      SmoothBetweenReadings(&g, w.stride);
       // The lip of every drop is a wall as far as the clearance is concerned.
       result_.ledges = MarkLedges(&g, SearchRules{}.max_step);
       Chamfer(&g);
@@ -644,10 +664,10 @@ bool Field::Step() {
 
       char note[260];
       std::snprintf(note, sizeof(note),
-                    "collision field %dx%d at %.1f m: %d tiles, %d ground reads, "
+                    "collision field %dx%d at %.1f m, floor every %.1f m: %d tiles, %d ground reads, "
                     "%d%% solid, %d%% unknown, %d ledge cells, %d starved, %d faulted, "
                     "%d cells of floor, route %.0f m in %d legs%s",
-                    g.W, g.H, kCell, result_.tiles, result_.ground_reads,
+                    g.W, g.H, kCell, w.stride * kCell, result_.tiles, result_.ground_reads,
                     static_cast<int>(100.0f * result_.blocked / std::max(1, g.W * g.H)),
                     static_cast<int>(100.0f * result_.unknown / std::max(1, g.W * g.H)),
                     result_.ledges, result_.starved, result_.faulted, result_.settled,

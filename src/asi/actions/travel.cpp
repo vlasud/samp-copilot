@@ -46,6 +46,12 @@ constexpr int kMaxFailures = 8;
 // a yard - before the journey calls it hopeless. Each is worth up to a
 // hundred and eighty metres of walking, so this is a long way.
 constexpr int kMaxExploringStages = 30;
+// Whether the field plans indoors. Measured both ways on a laboratory floor
+// and a hospital ward: the room mapper walks four errands in five at a
+// tenth under to twice the straight line; the field, even reading the floor
+// every half metre, walks two in five and wanders a hundred and seventeen
+// metres to reach a mark fourteen away. The field's business is the street.
+constexpr bool kFieldIndoors = false;
 // Between decisions, so a failed plan is not asked for again the same frame.
 constexpr unsigned long long kReplanGapMs = 400;
 // How much of a frame the planner may take. Four milliseconds beside a
@@ -260,14 +266,20 @@ void Decide(const Vec3& here) {
       return;
     }
 
-    // The field is not asked in here. It reads the ground every metre, and
-    // a doorway is a metre wide: indoors three quarters of it comes back
-    // unknown, whole rooms come out cut off from the corridor outside
-    // them, and the routes it draws are nonsense - twenty-five metres to
-    // reach a bed eight metres away, then not a step walked. Tried and
-    // measured, against a room mapper that walks four errands out of five.
-    // Making it work in here means reading the floor every half metre when
-    // the place is small, which is a change to the field and not to this.
+    // Then the planner, whose field is drawn from the very collision the
+    // room mapper reads. It was no use in here while it read the floor
+    // every metre - a doorway is a metre wide, so three quarters of an
+    // interior came back unknown and rooms came out cut off from their own
+    // corridors - but it reads a small place every half metre now, and a
+    // small place is what a box drawn round an errand across a ward is.
+    // When it finds nothing the room is still felt out, from the failure
+    // path below.
+    if (kFieldIndoors && straight <= kStreamedRadius) {
+      g_indoors = true;
+      if (g_height_unknown) ResolveHeight(here);
+      StartPlan(here, Aim::kDestination, g_destination);
+      return;
+    }
 
     // The map is expensive and only redrawn every so often. A decision that
     // arrives inside that gap has not failed at anything - it has arrived
