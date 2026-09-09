@@ -28,6 +28,8 @@ constexpr std::uint32_t kMatrixPosition = 0x30;
 // CPed::m_nPedType, which is 0 for the player and something else for
 // everybody the game or the server made.
 constexpr std::uint32_t kPedType = 0x484;
+// CEntity::m_nModelIndex - for a ped, the skin.
+constexpr std::uint32_t kEntityModel = 0x22;
 
 std::string g_note = "not looked at yet";
 
@@ -102,6 +104,9 @@ std::vector<Ped> PedsNear(const Vec3& at, float radius, std::size_t max,
     who.away_m = away;
     std::uint32_t type = 0;
     if (asi::mem::Read<std::uint32_t>(ped + kPedType, &type)) who.is_player = type == 0;
+    std::int16_t model = -1;
+    if (asi::mem::Read<std::int16_t>(ped + kEntityModel, &model) && model >= 0)
+      who.skin = model;
     found.push_back(who);
   }
 

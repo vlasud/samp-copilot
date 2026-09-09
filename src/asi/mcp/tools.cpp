@@ -1048,7 +1048,9 @@ void RegisterTools(Server* server) {
       "players and are in none of SA-MP's pools; they are peds the server "
       "made. A server checks that somebody is in front of its clerk before "
       "it will talk to him, so 'stand_at' is the point to walk to and "
-      "'look_at' the point to face while doing it.",
+      "'look_at' the point to face while doing it. Each one's 'skin' is "
+      "reported and never interpreted: which skin is a medic or a clerk is "
+      "written in the server's own notes.",
       {{"type", "object"},
        {"properties",
         {{"radius",
@@ -1064,7 +1066,12 @@ void RegisterTools(Server* server) {
          {"players_too",
           {{"type", "boolean"},
            {"description", "Include the peds that are players. Off by "
-                           "default: those are in get_world already."}}}}}},
+                           "default: those are in get_world already."}}},
+         {"skins",
+          {{"type", "array"}, {"items", {{"type", "integer"}}},
+           {"description", "Only these skins. Which skin means what is a "
+                           "fact about a server - its medics, its police - "
+                           "and lives in the server's own notes, not here."}}}}}},
       [](const json& args) {
         return Rpc::RunOnGameThread(
             [args]() -> json {
@@ -1075,6 +1082,10 @@ void RegisterTools(Server* server) {
               const std::size_t limit = args.value("limit", 10);
               const float off = args.value("stand_off", 1.0f);
               const bool players_too = args.value("players_too", false);
+              std::vector<int> wanted_skins;
+              if (args.contains("skins") && args["skins"].is_array())
+                for (const json& skin : args["skins"])
+                  if (skin.is_number_integer()) wanted_skins.push_back(skin.get<int>());
               json out = json::array();
               for (const game::Ped& who :
                    game::PedsNear(game::Vec3{self.x, self.y, self.z}, radius,
@@ -1082,9 +1093,14 @@ void RegisterTools(Server* server) {
                 if (!players_too && who.is_player) continue;
                 if (out.size() >= limit) break;
                 const game::Vec3 stand = game::InFrontOf(who, off);
+                if (!wanted_skins.empty() &&
+                    std::find(wanted_skins.begin(), wanted_skins.end(),
+                              who.skin) == wanted_skins.end())
+                  continue;
                 out.push_back(json{
                     {"away_m", who.away_m},
                     {"is_player", who.is_player},
+                    {"skin", who.skin},
                     {"heading_deg", who.heading * 57.2957795f},
                     {"at", json{{"x", who.position.x},
                                 {"y", who.position.y},

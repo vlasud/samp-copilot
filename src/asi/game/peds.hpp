@@ -23,6 +23,11 @@ namespace gtabot::game {
 
 struct Ped {
   std::uintptr_t at_address = 0;
+  // The model he is wearing - the skin. Which skin means what is a fact
+  // about a server, not about the game, so it is reported and never
+  // interpreted here: the server's own notes say which skins are its
+  // medics, its police, its clerks.
+  int   skin = -1;
   Vec3  position;
   float heading = 0;      // radians, atan2 style, the direction he faces
   float away_m = 0;

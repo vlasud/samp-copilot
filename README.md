@@ -102,6 +102,18 @@ readable - and names the next call to make in `next`. `wait` also answers
 message-box dialogs on the way in, since a message box has no way past but
 its button and nothing else happens until it is pressed.
 
+### Where knowledge lives
+
+The module gathers facts and works the controls. It does not know anything
+about any particular server, and must not: which skin is a medic, which key a
+prompt means, what order a hospital wants things done in - all of that is one
+server's habits, and a different server has different ones.
+
+So the module reports and never interprets. `get_npcs` gives a ped's skin;
+what a skin means is written in `servers/<name>.md`, next to the rest of that
+server's rules, for whoever is deciding what to do. Strategy is the agent's;
+the module is the hands and the eyes.
+
 ### Tests
 
 ```
