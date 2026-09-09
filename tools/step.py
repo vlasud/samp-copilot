@@ -18,6 +18,7 @@ The command is JSON:
     wait  seconds before looking, at most three
 """
 import json
+import math
 import re
 import sys
 import time
@@ -41,6 +42,14 @@ def near(rows, how_many, line):
     return [line(r) for r in rows[:how_many]]
 
 
+# What the world looked like the last time anybody asked. The brain's hardest
+# question is not "where am I" but "did what I just did do anything at all" -
+# it pressed a key at a bed and read back the same health at the same place,
+# and could not tell a key that missed from a key that worked and a treatment
+# that takes a while. So the change since the last look is spelt out.
+_before = {}
+
+
 def report(c):
     s = c.tool("look", {"radius": 30, "chat": 6})
     me = s.get("self") or {}
@@ -48,6 +57,24 @@ def report(c):
     out = []
 
     pos = me.get("pos") or [0, 0, 0]
+
+    was = _before.get("state")
+    if was:
+        moved = math.hypot(pos[0] - was["pos"][0], pos[1] - was["pos"][1])
+        hp = me.get("health", 0) - was["health"]
+        bits = ["moved %.1f m" % moved]
+        if abs(hp) >= 0.5:
+            bits.append("health %+.0f" % hp)
+        else:
+            bits.append("health unchanged")
+        fresh = len([r for r in (s.get("chat") or [])
+                     if r.get("text") not in was["chat"]])
+        if fresh:
+            bits.append("%d new line(s) in chat" % fresh)
+        out.append("since your last look: " + ", ".join(bits))
+    _before["state"] = {"pos": list(pos), "health": me.get("health", 0),
+                        "chat": [r.get("text") for r in (s.get("chat") or [])]}
+
     out.append(
         "me: %s id=%s hp=%.0f/%.0f at %.1f,%.1f,%.1f facing %.0f deg %s"
         % (me.get("name"), me.get("id"), me.get("health", 0),
@@ -155,8 +182,10 @@ def report(c):
         drawn = c.tool("get_textdraws", {"limit": 40}).get("textdraws") or []
     except Exception:
         drawn = []
-    mine = [plain(d.get("text", ""), 70) for d in drawn if d.get("for_me")]
-    mine = [t for t in mine if len(t) > 1][:8]
+    # Not only the ones addressed to this player: on this server almost
+    # nothing is, and the money and the hunger bar are drawn for everybody.
+    mine = [plain(d.get("text", ""), 70) for d in drawn]
+    mine = [t for t in mine if len(t) > 2][:8]
     if mine:
         out.append("on screen: " + " | ".join(mine))
 

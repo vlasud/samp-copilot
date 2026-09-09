@@ -167,7 +167,10 @@ def only_json(text):
 KNOWN = ("travel_to", "move_to", "act", "act_stop", "press_key",
          "answer_dialog", "send_chat", "use_vehicle", "drive_to", "look",
          "get_chat", "get_npcs", "get_labels", "get_pickups", "get_checkpoint",
-         "set_standing", "follow_dialog", "find_text", "stop")
+         "set_standing", "follow_dialog", "find_text", "stop",
+         "get_textdraws", "get_dialog", "get_trail", "get_people",
+         "get_objects", "get_object_texts", "check_point", "walk_status",
+         "travel_status", "drive_status", "act_status", "probe_heights")
 
 
 def as_call(one):
