@@ -73,12 +73,17 @@ def report(c):
         out.append("checkpoint: %.1f m away at %.0f,%.0f"
                    % (cp.get("away_m", 0), at.get("x", 0), at.get("y", 0)))
 
-    walk = (s.get("travel") or {}).get("walk") or {}
+    travel = s.get("travel") or {}
+    walk = travel.get("walk") or {}
+    going = walk.get("note", "-")
+    if walk.get("walking"):
+        where = travel.get("destination") or [0, 0, 0]
+        going += " %.0f m left to %.0f,%.0f" % (
+            walk.get("remaining_m", 0), where[0], where[1])
     out.append("doing: %s%s | walking: %s"
                % (act.get("note", "idle"),
                   (" step %s of %s" % (act.get("at"), act.get("steps")))
-                  if act.get("running") else "",
-                  walk.get("note", "-")))
+                  if act.get("running") else "", going))
 
     npcs = s.get("npcs") or []
     if npcs:
@@ -104,11 +109,17 @@ def report(c):
             % (r["away_m"], (r.get("at") or {}).get("x", 0),
                (r.get("at") or {}).get("y", 0)))))
 
+    # A label the server hung on a player or a car has no place of its own,
+    # so it has no distance either. Those were being dropped by the sort,
+    # and a shop's name is worth as much as a signpost's.
     labels = s.get("labels") or []
-    shown = near(labels, 4,
-                 lambda r: "%.0fm %s" % (r["away_m"], plain(r.get("text", ""), 60)))
-    if shown:
-        out.append("signs: " + " | ".join(shown))
+    standing = near(labels, 4,
+                    lambda r: "%.0fm %s" % (r["away_m"], plain(r.get("text", ""), 60)))
+    if standing:
+        out.append("signs: " + " | ".join(standing))
+    carried = [plain(r.get("text", ""), 40) for r in labels if r.get("away_m", -1) < 0]
+    if carried:
+        out.append("signs on people and cars: " + " | ".join(carried[:5]))
 
     out.append("chat:")
     for row in (s.get("chat") or [])[-6:]:
