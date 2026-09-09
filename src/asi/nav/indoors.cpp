@@ -35,8 +35,8 @@ constexpr float kBodyRadius = 0.34f;
 // A square with no floor within this of his own is a different storey, or
 // the void past a window.
 constexpr float kSameFloor = 2.0f;
-// A door leaf is painted like any other thing and is the one thing that
-// gets out of the way. Its disc is cleared.
+// How far from a door's position its doorway cells reach, for the record of
+// which doors a route goes through. The leaf itself is not painted at all.
 constexpr float kDoorDisc = 1.3f;
 // Where he already stands is proof enough that a person can; the first
 // metre round him is not asked.
@@ -70,9 +70,23 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
 
   float span = radius;
   if (span * 2.0f / kCell > kMaxSide) span = kMaxSide * kCell / 2.0f;
+
+  // The doors first, so their leaves can be left out of the paint. A shut
+  // leaf is solid to the painter and open to a person who walks into it;
+  // the frame, the wall and the railing beside the door stay exactly as
+  // painted, which clearing a disc round the door did not manage.
+  std::vector<Vec3> doors;
+  std::vector<int> door_models;
+  for (const samp::NearObject& door : samp::DoorsNear(from, span + 4.0f, 48)) {
+    doors.push_back(door.at);
+    bool known = false;
+    for (const int m : door_models) if (m == door.model) known = true;
+    if (!known) door_models.push_back(door.model);
+  }
+
   game::col::Footprint fp;
   if (!game::col::PaintFootprint(from.x, from.y, floor_z, span, kCell, kBandLow,
-                                 kBandHigh, kBodyRadius, &fp) ||
+                                 kBandHigh, kBodyRadius, door_models, &fp) ||
       fp.side <= 0) {
     room.note = "the world could not be painted";
     return room;
@@ -88,11 +102,9 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
     return *ix >= 0 && *iy >= 0 && *ix < side && *iy < side;
   };
 
-  // The doors, cut out of the paint. A shut door is solid to the painter
-  // and open to a person who walks into it.
-  std::vector<Vec3> doors;
-  for (const samp::NearObject& door : samp::DoorsNear(from, span + 4.0f, 48))
-    doors.push_back(door.at);
+  // Which cells are a doorway, for saying which doors the route went
+  // through and for the walker, which pushes a door rather than steering
+  // round it. Nothing is cleared: the leaf was never painted.
   std::vector<char> door_cell(static_cast<std::size_t>(side) * side, 0);
   for (const Vec3& door : doors) {
     if (std::fabs(door.z - floor_z) > 3.0f) continue;
@@ -103,7 +115,6 @@ Room MapRoom(const Vec3& from, const Vec3& towards, float radius) {
       for (int ix = dx0 - reach; ix <= dx0 + reach; ++ix) {
         if (ix < 0 || iy < 0 || ix >= side || iy >= side) continue;
         if (Distance2D(centre(ix, iy), door) > kDoorDisc) continue;
-        fp.blocked[index(ix, iy)] = 0;
         door_cell[index(ix, iy)] = 1;
       }
   }
