@@ -87,6 +87,8 @@ constexpr float kProgressWanted = 4.0f;
 constexpr float kExploreLeast = 12.0f;
 // How near somewhere already explored a new exploring route may end.
 constexpr float kExploredKeepOut = 25.0f;
+// And how near the end of a stage already walked a new stage may end.
+constexpr float kStageKeepOut = 15.0f;
 // How far below his feet a floor still counts as the one he is on.
 constexpr float kHangingReach = 4.0f;
 // How much a cell that carries on the way the last one went is worth over
@@ -233,9 +235,14 @@ bool Field::Step() {
       // metres of margin either side of an eight-metre walk across a ward
       // makes a box a hundred and thirty metres across to cross a room, and
       // a box that big has to be read coarsely.
-      const float straight_line = Away(w.from, w.to);
-      const float margin =
-          std::min(kRoundStart, std::max(kLeastRound, straight_line));
+      // Sixty metres of margin, always. Making it no bigger than the errand
+      // needed - twelve metres round a twelve-metre walk - was meant to let
+      // a small place be read finely, and it cost far more than it gave:
+      // the way round a building does not fit in a box drawn that tight, so
+      // the field called him shut in and set him exploring. A seventy-four
+      // metre errand cost five hundred metres of walking that way. Interiors
+      // are the room mapper's business now, so nothing needs the tight box.
+      const float margin = kRoundStart;
       const float roomx0 = std::min(w.from.x, w.to.x) - margin;
       const float roomx1 = std::max(w.from.x, w.to.x) + margin;
       const float roomy0 = std::min(w.from.y, w.to.y) - margin;
@@ -536,6 +543,30 @@ bool Field::Step() {
       if (!w.searcher.reached_goal()) {
         const float from_start = Away(w.from, w.to);
         const float gained = from_start - w.searcher.nearest_away();
+        // A stage that ends where the last one started is the same
+        // ping-pong the exploring routes had, only wearing the target's
+        // colours: the cell nearest the target within reach can be the one
+        // he has just walked away from. So the ends of the stages already
+        // walked are kept off, and the best of what is left is taken.
+        if (gained >= kProgressWanted) {
+          const std::vector<Vec3> been = ExploredPlaces();
+          if (!been.empty()) {
+            int best = -1;
+            float best_away = 1e9f;
+            for (int at = 0; at < g.W * g.H; ++at) {
+              if (w.searcher.cost(at) <= 0) continue;
+              const Vec3 c = g.centre(at);
+              if (Away(c, w.from) < kExploreLeast) continue;
+              bool there_before = false;
+              for (const Vec3& was : been)
+                if (Away(c, was) <= kStageKeepOut) { there_before = true; break; }
+              if (there_before) continue;
+              const float away = Away(c, w.to);
+              if (away < best_away) { best_away = away; best = at; }
+            }
+            if (best >= 0 && best_away < from_start - kProgressWanted) w.end = best;
+          }
+        }
         if (gained < kProgressWanted) {
           // The far end, but not the one he came from. Every cell the
           // search reached is scored by what it cost to walk to - the

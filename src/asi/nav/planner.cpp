@@ -708,7 +708,11 @@ struct Planner::Job {
       }
       plan.length_m = r.length_m;
       plan.exploring = r.exploring;
-      if (r.exploring) RememberExplored(a, r.points.back());
+      // Every stage end is remembered, not only the exploring ones: a
+      // staged route that ends nearest the target can still end where the
+      // last stage began, and then he walks the two of them for ever.
+      if (!r.reaches_target && r.points.size() >= 2)
+        RememberExplored(a, r.points.back());
       plan.ok = true;
       plan.note = r.note;
       source = "field";
