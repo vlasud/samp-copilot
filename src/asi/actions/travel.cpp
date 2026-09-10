@@ -39,7 +39,11 @@ constexpr std::size_t kStagingNodes = 600;
 // Within this the destination itself is planned to; further out the game
 // has not streamed the ground there, and a staging point is what is planned
 // to instead.
-constexpr float kStreamedRadius = 240.0f;
+// How far the field can be asked to reach the target itself, rather than a
+// mark part of the way there. This used to be what the game streamed round
+// the player; it is now what the field is willing to be wide enough for,
+// and the map's collision is held in memory so the two are the same thing.
+constexpr float kStreamedRadius = 520.0f;
 // Decisions in a row that end no nearer than they started.
 constexpr int kMaxFailures = 8;
 // However many decisions got nowhere, a journey is not given up before it
@@ -71,6 +75,11 @@ constexpr float kPlanAheadMetres = 6.0f;
 // How often to look again while he is walking, whether or not the leg he is
 // on is running out.
 constexpr unsigned long long kRescanEveryMs = 5000;
+// A stage is reached within this, counts as gained on by this, and is given
+// up if neither happens for this long.
+constexpr float kMarkReached = 8.0f;
+constexpr float kMarkGain = 2.0f;
+constexpr unsigned long long kMarkPatienceMs = 10000;
 // How long a plan may take before he sets off in the meantime. The field
 // answers in a second or so, and the leg walked blind while it did - the
 // best way out of here, straight toward the target - went through whatever
@@ -265,6 +274,46 @@ bool LooksIndoors(const Vec3& here) {
                           Vec3{here.x, here.y, here.z + kRoofTo}, false);
 }
 
+// The place the stage he is walking now ends at, and how near he has come
+// to it. Kept so that looking at the route again does not move the mark he
+// is walking to; see StillWorthReaching.
+Vec3 g_stage_mark{0, 0, 0};
+bool g_have_mark = false;
+float g_mark_best = 0;
+unsigned long long g_mark_gained_ms = 0;
+
+void KeepTheMark(const Vec3& here, const Vec3& mark) {
+  g_stage_mark = mark;
+  g_have_mark = true;
+  g_mark_best = Distance2D(here, mark);
+  g_mark_gained_ms = GetTickCount64();
+}
+
+void ForgetTheMark() { g_have_mark = false; }
+
+// Whether the stage already under way is still the one to walk. It is,
+// while he is still coming nearer to it; when he has not gained a couple of
+// metres on it in ten seconds - he is round the wrong side of a wall, or
+// the mark is somewhere he cannot get to - it is given up and a fresh one
+// asked for.
+bool StillWorthReaching(const Vec3& here) {
+  if (!g_have_mark) return false;
+  const float away = Distance2D(here, g_stage_mark);
+  if (away <= kMarkReached) { ForgetTheMark(); return false; }
+  const unsigned long long now = GetTickCount64();
+  if (away < g_mark_best - kMarkGain) {
+    g_mark_best = away;
+    g_mark_gained_ms = now;
+  } else if (now - g_mark_gained_ms > kMarkPatienceMs) {
+    LOG_INFO("travel: the stage at ({:.0f}, {:.0f}) is no nearer than it was "
+             "{} s ago - asking the city for another", g_stage_mark.x,
+             g_stage_mark.y, kMarkPatienceMs / 1000);
+    ForgetTheMark();
+    return false;
+  }
+  return true;
+}
+
 void Decide(const Vec3& here) {
   const float straight = Distance2D(here, g_destination);
   if (LooksIndoors(here)) {
@@ -339,6 +388,16 @@ void Decide(const Vec3& here) {
   if (straight <= kStreamedRadius) {
     if (g_height_unknown) ResolveHeight(here);
     StartPlan(here, Aim::kDestination, g_destination);
+  } else if (StillWorthReaching(here)) {
+    // The stage he is already walking to. Looking again every few seconds
+    // is what keeps the route honest, but the place the stage ends must not
+    // move with it: two nodes a few metres apart can each be the nearest
+    // one to where he stands, and the way out of them runs opposite ways.
+    // He walked up the bank of the storm drain, the corridor was worked out
+    // again at the top, it came back the other way, and he walked down
+    // again. So the mark stays put until he reaches it or stops getting
+    // nearer to it, and only the way to it is drawn afresh.
+    StartPlan(here, Aim::kStaging, g_stage_mark);
   } else if (nav::CorridorPoint(here, g_destination, kCorridorAhead, &staging)) {
     // The way the city's own pavements go, two hundred metres of it. The
     // field sees two hundred and forty and each stage otherwise ends at the
@@ -347,10 +406,12 @@ void Decide(const Vec3& here) {
     // reach a mark a hundred and thirty metres off.
     LOG_INFO("travel: along the city's own way - the next {:.0f} m of it come "
              "out at ({:.0f}, {:.0f})", kCorridorAhead, staging.x, staging.y);
+    KeepTheMark(here, staging);
     StartPlan(here, Aim::kStaging, staging);
   } else if (StagingPoint(here, g_destination, &staging)) {
     LOG_INFO("travel: no way through the city's graph - staging at "
              "({:.0f}, {:.0f})", staging.x, staging.y);
+    KeepTheMark(here, staging);
     StartPlan(here, Aim::kStaging, staging);
   } else {
     // Neither the pavements nor a node to stand on: the docks, an airfield,
@@ -366,6 +427,7 @@ void Decide(const Vec3& here) {
       staging = Vec3{here.x + dx / span * reach, here.y + dy / span * reach, here.z};
       LOG_INFO("travel: no pavement to steer by - aiming the field {:.0f} m "
                "along the bearing", reach);
+      KeepTheMark(here, staging);
       StartPlan(here, Aim::kStaging, staging);
     } else {
       WalkGreedy(here, false);
@@ -578,6 +640,7 @@ void TravelTo(const Vec3& destination, bool height_unknown,
   g_best_straight = 0;
   g_next_plan_ms  = 0;
   g_rescan_ms     = 0;
+  g_have_mark     = false;
   g_greedy_legs   = 0;
   g_bridged = false;
   g_phase = Phase::kIdle;

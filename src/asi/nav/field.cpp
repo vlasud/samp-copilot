@@ -38,7 +38,14 @@ constexpr float kLeastRound = 12.0f;
 // made from a smaller box is wrong more often: six hundred and forty-one
 // metres of straight line once cost fifteen hundred of walking. Fewer,
 // longer stages are fewer chances to choose badly.
-constexpr int   kMaxSide = 960;
+// Six hundred metres across. It was two hundred and forty, because that is
+// about as far as the game streams collision round the player and beyond it
+// every ray cast came back "no floor here" - so a journey had to be walked
+// in stages, aimed at a mark in the middle distance, and the mark is what
+// he was seen running to instead of to where he had been sent. The map's
+// collision is held in memory now, all of it, so the field can be as wide
+// as the errand.
+constexpr int   kMaxSide = 2400;
 // Painted in squares of this half-width, each against its own floor,
 // because the painter takes one floor height and a street is not one height.
 constexpr float kTileRadius = 20.0f;
@@ -64,6 +71,11 @@ constexpr float kPersonRadius = 0.45f;
 // from their own corridor, and the routes drawn across it were nonsense.
 constexpr int   kGroundStride = 4;
 constexpr int   kCloseStride  = 2;
+// A field the width of a district is read every two metres rather than
+// every one: four times the ground for the same reading, and the near half
+// of it is drawn again, finely, before he gets there.
+constexpr int   kWideStride   = 8;
+constexpr int   kWideSide     = 960;
 // A box this small is a room, a yard, a shop - somewhere to read closely.
 constexpr int   kCloseSide = 260;          // sixty-five metres
 // A route shorter than this, that does not reach the target, is the squeeze
@@ -272,7 +284,9 @@ bool Field::Step() {
       const int W = std::min(kMaxSide, static_cast<int>(std::ceil((maxx - g.x0) / kCell)));
       const int H = std::min(kMaxSide, static_cast<int>(std::ceil((maxy - g.y0) / kCell)));
       g.Resize(W, H);
-      w.stride = (W <= kCloseSide && H <= kCloseSide) ? kCloseStride : kGroundStride;
+      w.stride = (W <= kCloseSide && H <= kCloseSide)  ? kCloseStride
+                 : (W <= kWideSide && H <= kWideSide)   ? kGroundStride
+                                                        : kWideStride;
       w.ref_z = w.from.z - kPedOrigin;
       result_.ref_z = w.ref_z;
       result_.box_x0 = g.x0;
