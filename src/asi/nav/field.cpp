@@ -8,6 +8,7 @@
 
 #include "game/collision.hpp"
 #include "game/peds.hpp"
+#include "game/streaming.hpp"
 #include "samp/checkpoints.hpp"
 #include "samp/objects.hpp"
 #include "log.hpp"
@@ -275,6 +276,19 @@ bool Field::Step() {
       result_.box_y0 = g.y0;
       result_.box_x1 = g.x0 + W * kCell;
       result_.box_y1 = g.y0 + H * kCell;
+
+      // The map's own collision for the whole box, held in memory. The game
+      // streams collision only for the few hundred metres round the player:
+      // further out a building is still in the world's lists but has no
+      // collision model, so a ray cast at it passes through and the field
+      // writes down "no floor here". That is why a two-hundred-metre plan
+      // is mostly unknown ground, and why a stage can be aimed straight
+      // into a dead-end peninsula that a kilometre of walking has to undo.
+      // Collision is the cheap part of the map - boxes and triangles, no
+      // textures - so it is asked for and pinned. Costs a frame or two the
+      // first time over new ground, and nothing after.
+      game::streaming::PinCollisionOver(result_.box_x0, result_.box_y0,
+                                        result_.box_x1, result_.box_y1);
 
       // Tiles across the box, overlapping a little so no seam is bare.
       const float pitch = kTileRadius * 2.0f - kCell * 2.0f;

@@ -21,8 +21,10 @@ from mcp_http import Client
 # Short enough that the field reaches the mark in one plan - only then is
 # its route the shortest way there is, and only then does walked/optimal
 # mean anything. Sixty to a hundred metres.
-OFFSETS = [(70.0, -50.0), (-80.0, 40.0), (50.0, 70.0), (-60.0, -60.0),
-           (90.0, 0.0), (0.0, -90.0), (-70.0, 70.0), (60.0, 60.0)]
+# Long enough to need staging - which is where the wandering was - and
+# short enough to walk in five minutes.
+OFFSETS = [(320.0, -240.0), (-380.0, 160.0), (240.0, 340.0), (-300.0, -300.0),
+           (420.0, 0.0), (0.0, -400.0)]
 
 
 def main():
@@ -105,7 +107,7 @@ def main():
 
         c.tool("travel_to", {"x": tx, "y": ty})
         walked, last, began = 0.0, start, time.time()
-        while time.time() - began < 300:
+        while time.time() - began < max(240.0, straight * 1.2):
             time.sleep(0.5)
             st = look()
             if "self" not in st:

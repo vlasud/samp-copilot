@@ -341,8 +341,12 @@ void Decide(const Vec3& here) {
     // reachable point nearest the target - a guess made with the far side
     // of the block invisible, and the guess that walked a kilometre to
     // reach a mark a hundred and thirty metres off.
+    LOG_INFO("travel: along the city's own way - the next {:.0f} m of it come "
+             "out at ({:.0f}, {:.0f})", kCorridorAhead, staging.x, staging.y);
     StartPlan(here, Aim::kStaging, staging);
   } else if (StagingPoint(here, g_destination, &staging)) {
+    LOG_INFO("travel: no way through the city's graph - staging at "
+             "({:.0f}, {:.0f})", staging.x, staging.y);
     StartPlan(here, Aim::kStaging, staging);
   } else {
     // Neither the pavements nor a node to stand on: the docks, an airfield,

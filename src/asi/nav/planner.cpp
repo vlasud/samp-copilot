@@ -1633,7 +1633,8 @@ void RememberObstacle(const Vec3& at, const char* what) {
 game::Graph g_corridor_graph;
 unsigned long long g_corridor_graph_ms = 0;
 constexpr unsigned long long kGraphKeepMs = 30000;
-constexpr float kCorridorJoin = 60.0f;      // how far to look for a node to start on
+constexpr float kCorridorJoin = 60.0f;      // how far to look for a pavement to start on
+constexpr float kCorridorReach = 250.0f;    // and for a road, which may be further off
 constexpr int   kCorridorNodes = 6;
 constexpr int   kCorridorExpansions = 20000;
 // A corridor point nearer than this is not worth aiming at.
@@ -1680,10 +1681,19 @@ bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
   }
   const game::Graph& graph = g_corridor_graph;
   if (!graph.valid) return false;
-  const std::vector<game::PathNode> starts =
+  // Pavements where the city has them, roads where it does not. The
+  // pedestrian graph stops at the edge of every dock, airfield and stretch
+  // of country: the corridor was never once built in an evening of walking
+  // because of it, and those are exactly the places where a journey walks
+  // into a dead-end peninsula and has to come eight hundred metres back.
+  // The road network covers the whole map, and a road is a thing you can
+  // walk beside.
+  std::vector<game::PathNode> starts =
       graph.PedNodesNear(from, kCorridorJoin, kCorridorNodes);
-  const std::vector<game::PathNode> goals =
+  if (starts.empty()) starts = graph.VehicleNodesNear(from, kCorridorReach, kCorridorNodes);
+  std::vector<game::PathNode> goals =
       graph.PedNodesNear(to, kCorridorJoin, kCorridorNodes);
+  if (goals.empty()) goals = graph.VehicleNodesNear(to, kCorridorReach, kCorridorNodes);
   if (starts.empty() || goals.empty()) return false;
   const game::PathNode& start = starts.front();
   const game::PathNode& goal = goals.front();
@@ -1716,7 +1726,9 @@ bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
       auto it = known.find(key);
       if (it == known.end()) {
         const game::PathNode* next = graph.Node(links[i].area, links[i].index);
-        if (next == nullptr || !next->ped) continue;
+        // Either kind: a corridor is a direction, not a route to walk, and
+        // refusing the roads is what left the docks without one.
+        if (next == nullptr) continue;
         it = known.emplace(key, *next).first;
       }
       const float step = Distance2D(node.pos, it->second.pos);

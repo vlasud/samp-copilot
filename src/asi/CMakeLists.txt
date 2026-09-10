@@ -26,6 +26,7 @@ add_library(bot MODULE
   game/paths.cpp
   nav/field.cpp
   nav/local.cpp
+  game/streaming.cpp
   nav/local_paint.cpp
   nav/grid.cpp
   nav/indoors.cpp
