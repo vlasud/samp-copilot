@@ -59,6 +59,17 @@ struct SearchRules {
   // game's own peds manage on a ramp. Seven-tenths cut the stairs off a
   // beach promenade and walled him onto it.
   float max_step = 1.00f;
+  // And the slope he can walk up, in metres of rise per metre of ground.
+  // The step above is an absolute one - a kerb, a stair - and at a quarter
+  // of a metre to the cell it allowed a rise of four metres for every metre
+  // of ground, which is a cliff. The field said the bank of the Los Santos
+  // storm drain was walkable on that rule, he set off up it, and slid back
+  // down; then again, and again. One to one is forty-five degrees, which is
+  // what this game's people manage. It reads right on stairs too: the floor
+  // is sampled every metre and smoothed between, so a staircase comes out
+  // as the slope it is from a distance - about a third - rather than as its
+  // separate steps.
+  float max_grade = 1.00f;
   int   clear_wanted = 8;     // cells from a wall before walking is free: two metres at a quarter
   float near_wall_cost = 0.18f;   // per cell short of that, so the total is as it was
   int   max_expand = 0;      // nought: the grid itself is the limit

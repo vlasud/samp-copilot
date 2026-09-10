@@ -205,13 +205,13 @@ bool Searcher::Step(int budget) {
         ++refused_corner_;
         continue;
       }
+      const float run = g.cell * (d >= 4 ? 1.41421f : 1.0f);
       const float rise = std::fabs(g.ground[next] - g.ground[cur.at]);
-      if (rise > rules_.max_step) {
+      if (rise > rules_.max_step || rise > rules_.max_grade * run) {
         ++refused_step_;
         tallest_step_ = std::max(tallest_step_, rise);
         continue;
       }
-      const float run = g.cell * (d >= 4 ? 1.41421f : 1.0f);
       const float clear_cells = g.clear[next] / 3.0f;
       const float penalty = clear_cells < rules_.clear_wanted
                                 ? (rules_.clear_wanted - clear_cells) * rules_.near_wall_cost

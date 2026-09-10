@@ -400,6 +400,18 @@ float FloorAt(const Paint& p, float px, float py) {
   return f->z[at];
 }
 
+// How far from level a triangle may lean and still be judged as ground
+// under a cell rather than as a wall across it. A half - sixty degrees -
+// called the bank of the Los Santos storm drain a wall: it rises three and
+// three-quarter metres over two, which is sixty-two, so the field painted
+// the middle of the bank solid, the search would not even try a step there,
+// and he walked up and down the drain until the journey gave up. Three
+// tenths is seventy-two degrees. Nothing built in this game leans that far
+// and means to stop you: a wall is vertical, and whether a bank this steep
+// can actually be climbed is the search's business, which refuses a rise
+// of more than a metre between one cell and the next.
+constexpr float kFloorLikeEnough = 0.30f;
+
 // A surface's height at a point, from three of its corners. Only asked of
 // surfaces that are not near vertical.
 float HeightOn(const V& a, const V& b, const V& c, float px, float py) {
@@ -673,7 +685,7 @@ void PaintEntity(Paint& p, std::uintptr_t entity) {
       const float vx = v2.x - v0.x, vy = v2.y - v0.y, vz = v2.z - v0.z;
       const float nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
       const float len = std::sqrt(nx * nx + ny * ny + nz * nz);
-      if (len > 1e-6f && std::fabs(nz) / len >= 0.5f) surface = corner;
+      if (len > 1e-6f && std::fabs(nz) / len >= kFloorLikeEnough) surface = corner;
     }
     PaintPolygon(p, tri, 3, t0, t1, surface);
   }

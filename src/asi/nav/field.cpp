@@ -683,7 +683,13 @@ bool Field::Step() {
         return finish(why);
       }
       const std::vector<int> cells = w.searcher.CellsTo(w.end);
-      const std::vector<int> pulled = Pull(g, cells, kMaxLeg, SearchRules{}.max_step);
+      // Straightening a leg has to hold to the same slope the search kept
+      // to, or the pull puts back the climb the search refused. A step
+      // between cells along the line is a cell wide, a diagonal one half as
+      // much again.
+      const float pull_step =
+          std::min(SearchRules{}.max_step, SearchRules{}.max_grade * kCell * 1.42f);
+      const std::vector<int> pulled = Pull(g, cells, kMaxLeg, pull_step);
       if (!result_.reaches_target) {
         const int ex = end % g.W, ey = end / g.W;
         char line[120];
