@@ -1628,6 +1628,17 @@ void RememberObstacle(const Vec3& at, const char* what) {
            "round it", what, at.x, at.y);
 }
 
+// The pavement graph, kept for a while: a snapshot copies every loaded
+// area's nodes and is far too dear to take for each decision.
+game::Graph g_corridor_graph;
+unsigned long long g_corridor_graph_ms = 0;
+constexpr unsigned long long kGraphKeepMs = 30000;
+constexpr float kCorridorJoin = 60.0f;      // how far to look for a node to start on
+constexpr int   kCorridorNodes = 6;
+constexpr int   kCorridorExpansions = 20000;
+// A corridor point nearer than this is not worth aiming at.
+constexpr float kMinCorridorStep = 25.0f;
+
 std::vector<Vec3> g_explored;
 Vec3 g_exploring_way{0, 0, 0};
 
@@ -1658,6 +1669,88 @@ void ForgetExplored() {
   std::lock_guard<std::mutex> lock(g_obstacle_mutex);
   g_explored.clear();
   g_exploring_way = Vec3{0, 0, 0};
+}
+
+bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
+  if (out == nullptr) return false;
+  const unsigned long long now = GetTickCount64();
+  if (!g_corridor_graph.valid || now - g_corridor_graph_ms > kGraphKeepMs) {
+    g_corridor_graph = game::SnapshotGraph();
+    g_corridor_graph_ms = now;
+  }
+  const game::Graph& graph = g_corridor_graph;
+  if (!graph.valid) return false;
+  const std::vector<game::PathNode> starts =
+      graph.PedNodesNear(from, kCorridorJoin, kCorridorNodes);
+  const std::vector<game::PathNode> goals =
+      graph.PedNodesNear(to, kCorridorJoin, kCorridorNodes);
+  if (starts.empty() || goals.empty()) return false;
+  const game::PathNode& start = starts.front();
+  const game::PathNode& goal = goals.front();
+  const std::uint32_t start_key = NodeKey(start.area, start.index);
+  const std::uint32_t goal_key = NodeKey(goal.area, goal.index);
+  if (start_key == goal_key) return false;
+
+  std::unordered_map<std::uint32_t, game::PathNode> known;
+  std::unordered_map<std::uint32_t, float> best;
+  std::unordered_map<std::uint32_t, std::uint32_t> came;
+  std::priority_queue<Open, std::vector<Open>, std::greater<Open>> open;
+  known[start_key] = start;
+  known[goal_key] = goal;
+  best[start_key] = 0;
+  open.push({Distance2D(start.pos, goal.pos), start_key});
+  int expanded = 0;
+  bool found = false;
+  while (!open.empty() && expanded < kCorridorExpansions) {
+    const Open current = open.top();
+    open.pop();
+    if (current.key == goal_key) { found = true; break; }
+    ++expanded;
+    const game::PathNode node = known[current.key];
+    const float cost_here = best[current.key];
+    game::PathLink links[16];
+    const int count = graph.Links(node, links, 16);
+    for (int i = 0; i < count; ++i) {
+      const std::uint32_t key = NodeKey(links[i].area, links[i].index);
+      if (key == current.key) continue;
+      auto it = known.find(key);
+      if (it == known.end()) {
+        const game::PathNode* next = graph.Node(links[i].area, links[i].index);
+        if (next == nullptr || !next->ped) continue;
+        it = known.emplace(key, *next).first;
+      }
+      const float step = Distance2D(node.pos, it->second.pos);
+      const float cost = cost_here + step;
+      auto had = best.find(key);
+      if (had != best.end() && had->second <= cost) continue;
+      best[key] = cost;
+      came[key] = current.key;
+      open.push({cost + Distance2D(it->second.pos, goal.pos), key});
+    }
+  }
+  if (!found) return false;
+
+  // Back from the goal to the start, then forward along it until `along`
+  // metres of it have been covered.
+  std::vector<Vec3> way;
+  for (std::uint32_t key = goal_key;; ) {
+    way.push_back(known[key].pos);
+    auto step = came.find(key);
+    if (step == came.end()) break;
+    key = step->second;
+  }
+  std::reverse(way.begin(), way.end());
+  if (way.size() < 2) return false;
+  float gone = Distance2D(from, way.front());
+  for (std::size_t i = 1; i < way.size(); ++i) {
+    gone += Distance2D(way[i - 1], way[i]);
+    if (gone >= along) {
+      *out = Vec3{way[i].x, way[i].y, way[i].z + kPedOrigin};
+      return true;
+    }
+  }
+  *out = Vec3{way.back().x, way.back().y, way.back().z + kPedOrigin};
+  return Distance2D(*out, from) > kMinCorridorStep;
 }
 
 std::vector<Vec3> RememberedObstacles() {

@@ -55,7 +55,13 @@ constexpr float kSqueezeOut = 1.0f;
 // How much room a person standing in the way takes up.
 constexpr float kPersonRadius = 0.45f;
 // How wide a berth a pickup gets. A pickup fires within about a metre.
-constexpr float kPickupDisc = 1.4f;
+// A pickup's own reach is a metre and a half, but a server watches a range
+// of its own round the point: the information box at a hospital reception
+// opened with the character two and a half metres from the icon, took the
+// keyboard, and stood the journey still until somebody answered it. Three
+// metres keeps him off them and still leaves a corridor walkable, which
+// four and a half - what the street uses - would not.
+constexpr float kPickupDisc = 3.0f;
 constexpr int   kMaxFloorReads = 40000;
 
 float Distance2D(const Vec3& a, const Vec3& b) {

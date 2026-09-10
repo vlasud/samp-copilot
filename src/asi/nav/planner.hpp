@@ -147,6 +147,21 @@ bool BestDirection(const Vec3& here, const Vec3& target, Vec3* out,
 // different route and not the same one again.
 void RememberObstacle(const Vec3& at, const char* what);
 void ForgetObstacles();
+// A point about `along` metres ahead on the way the city's own pavement
+// graph would take from `from` to `to`.
+//
+// The field sees two hundred and forty metres and a journey is walked in
+// stages; each stage ends at the reachable point nearest the target, which
+// is a guess made with the far side of a block invisible. Aimed at a point
+// on the pavement network instead, the same stage follows the streets: the
+// graph is no good for walking - it runs through fences and over walls -
+// but it knows which way round a block the road goes, which is exactly what
+// the greedy choice does not.
+//
+// False when the graph is not loaded, the ends are not on it, or no way
+// joins them. Game thread.
+bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out);
+
 // The ones still remembered, for the field to paint.
 std::vector<Vec3> RememberedObstacles();
 

@@ -116,6 +116,11 @@ unsigned long long g_next_cut_ms = 0;
 unsigned long long g_room_next_ms = 0;
 constexpr unsigned long long kRoomEveryMs = 2500;
 constexpr float kRoomRadius = 22.0f;
+// A roof this far over his head means a room rather than a sky.
+constexpr float kRoofFrom = 1.0f;
+constexpr float kRoofTo   = 14.0f;
+// How far along the pavement network to aim each stage.
+constexpr float kCorridorAhead = 200.0f;
 // How near the end of the trail counts as standing on it.
 constexpr float kTrailEndNear = 2.0f;
 // A route ending nearer than this to where he stands is no route at all.
@@ -241,8 +246,19 @@ bool WalkTheRoom(const Vec3& here);
 unsigned long long now_ms() { return GetTickCount64(); }
 
 bool LooksIndoors(const Vec3& here) {
+  // The interiors the game keeps in the sky.
   if (here.z > 400.0f) return true;
-  return game::PedNodesNear(here, kNoNodesWithin, 1).empty();
+  // Down here, "no pedestrian node anywhere near" was the whole test, and
+  // it is wrong wherever the city simply has no pavements: the docks in San
+  // Fierro, an airfield, a stretch of country road. Standing on an open
+  // quay he decided he was inside a building, felt the room out, and asked
+  // for a way out of a room that had no walls - fifty-eight refusals in six
+  // errands, and not one plan drawn. A room has a roof, so that is what is
+  // asked: something solid a few metres over his head, and no pavement in
+  // sight to argue otherwise.
+  if (!game::PedNodesNear(here, kNoNodesWithin, 1).empty()) return false;
+  return !game::LineClear(Vec3{here.x, here.y, here.z + kRoofFrom},
+                          Vec3{here.x, here.y, here.z + kRoofTo}, false);
 }
 
 void Decide(const Vec3& here) {
@@ -319,10 +335,33 @@ void Decide(const Vec3& here) {
   if (straight <= kStreamedRadius) {
     if (g_height_unknown) ResolveHeight(here);
     StartPlan(here, Aim::kDestination, g_destination);
+  } else if (nav::CorridorPoint(here, g_destination, kCorridorAhead, &staging)) {
+    // The way the city's own pavements go, two hundred metres of it. The
+    // field sees two hundred and forty and each stage otherwise ends at the
+    // reachable point nearest the target - a guess made with the far side
+    // of the block invisible, and the guess that walked a kilometre to
+    // reach a mark a hundred and thirty metres off.
+    StartPlan(here, Aim::kStaging, staging);
   } else if (StagingPoint(here, g_destination, &staging)) {
     StartPlan(here, Aim::kStaging, staging);
   } else {
-    WalkGreedy(here, false);
+    // Neither the pavements nor a node to stand on: the docks, an airfield,
+    // a stretch of country road. That used to mean no plan at all - just
+    // feeling the way with the whiskers - and it is the whole of the
+    // difference between walking a kilometre and walking four. The field
+    // does not need a pavement to draw on: aim it at a point out along the
+    // bearing, as far as it can see, and let it find the real ground.
+    const float dx = g_destination.x - here.x, dy = g_destination.y - here.y;
+    const float span = std::sqrt(dx * dx + dy * dy);
+    if (span > kMinStagingStep) {
+      const float reach = std::min(kStreamedRadius * 0.8f, span);
+      staging = Vec3{here.x + dx / span * reach, here.y + dy / span * reach, here.z};
+      LOG_INFO("travel: no pavement to steer by - aiming the field {:.0f} m "
+               "along the bearing", reach);
+      StartPlan(here, Aim::kStaging, staging);
+    } else {
+      WalkGreedy(here, false);
+    }
   }
 }
 
