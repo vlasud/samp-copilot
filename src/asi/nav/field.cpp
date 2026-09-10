@@ -66,6 +66,9 @@ constexpr int   kGroundStride = 4;
 constexpr int   kCloseStride  = 2;
 // A box this small is a room, a yard, a shop - somewhere to read closely.
 constexpr int   kCloseSide = 260;          // sixty-five metres
+// A route shorter than this, that does not reach the target, is the squeeze
+// round his feet rather than a way anywhere.
+constexpr float kPointlessRoute = 2.5f;
 // How much the floor may rise or fall between two readings a metre apart
 // and still be the same floor. A staircase at forty-five degrees is one
 // metre in one; half a metre more allows for a steep one and for the
@@ -287,8 +290,13 @@ bool Field::Step() {
       // Collision is the cheap part of the map - boxes and triangles, no
       // textures - so it is asked for and pinned. Costs a frame or two the
       // first time over new ground, and nothing after.
-      game::streaming::PinCollisionOver(result_.box_x0, result_.box_y0,
-                                        result_.box_x1, result_.box_y1);
+      // The whole map, asked for again every plan: the game takes its own
+      // areas back as the player walks away from them. Two hundred and fifty
+      // areas, about a hundred megabytes of boxes and triangles, and the
+      // asking costs a few tens of milliseconds once they are all in - the
+      // game allows itself a gigabyte of models on this client, so there is
+      // room and to spare.
+      game::streaming::PinWholeMap();
 
       // Tiles across the box, overlapping a little so no seam is bare.
       const float pitch = kTileRadius * 2.0f - kCell * 2.0f;
@@ -655,6 +663,24 @@ bool Field::Step() {
       if (end == w.start) {
         result_.ok = false;
         return finish("no way out of the start cell");
+      }
+      // A route a metre long to a target four hundred metres away is not a
+      // route: it is the squeezed-open disc round his feet and nothing else.
+      // The search died in forty-eight cells twice in one journey that way,
+      // and each time the walk set off, walked its metre, arrived, and
+      // planned the same metre again. Say no, and the journey falls back on
+      // the pavement graph - which on both those occasions had a way.
+      if (!result_.reaches_target && Away(g.centre(end), w.from) < kPointlessRoute) {
+        result_.ok = false;
+        char why[200];
+        std::snprintf(why, sizeof(why),
+                      "no way out of where he stands - %.1f m in every "
+                      "direction is shut (%d cells looked at, %d refused for a "
+                      "wall, %d for a step, tallest %.2f m)",
+                      Away(g.centre(end), w.from), w.searcher.expanded(),
+                      result_.refused_shut, result_.refused_step,
+                      result_.tallest_step);
+        return finish(why);
       }
       const std::vector<int> cells = w.searcher.CellsTo(w.end);
       const std::vector<int> pulled = Pull(g, cells, kMaxLeg, SearchRules{}.max_step);

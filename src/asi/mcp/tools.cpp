@@ -22,6 +22,7 @@
 #include "nav/field.hpp"
 #include "game/paths.hpp"
 #include "game/peds.hpp"
+#include "game/streaming.hpp"
 #include "game/world_query.hpp"
 #include "nav/indoors.hpp"
 #include "nav/planner.hpp"
@@ -1556,6 +1557,49 @@ void RegisterTools(Server* server) {
               return out;
             },
             25000);
+      },
+  });
+
+  server->AddTool({
+      "pin_world",
+      "Asks the game to load the collision of the whole map and keep it "
+      "there. The game streams collision only for the few hundred metres "
+      "round the player: further out a building is in the world's lists but "
+      "has no collision, a ray cast at it passes through, and the planner "
+      "writes down 'no floor here'. Pinned, the planner can look as far as "
+      "it likes. Costs one long load and a few tens of megabytes. Without "
+      "arguments it pins everything; with a box it pins that box only.",
+      {{"type", "object"},
+       {"properties",
+        {{"x0", {{"type", "number"}}}, {"y0", {{"type", "number"}}},
+         {"x1", {{"type", "number"}}}, {"y1", {{"type", "number"}}}}}},
+      [](const json& args) -> json {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              if (!game::streaming::Ready())
+                return json{{"ok", false},
+                            {"why", "this build of the game does not keep its "
+                                    "streamer where we look for it"}};
+              const unsigned long long began = GetTickCount64();
+              const int before = game::streaming::Pinned();
+              int asked = 0;
+              if (args.contains("x0") && args.contains("y0") &&
+                  args.contains("x1") && args.contains("y1"))
+                asked = game::streaming::PinCollisionOver(args["x0"], args["y0"],
+                                                          args["x1"], args["y1"]);
+              else
+                asked = game::streaming::PinWholeMap();
+              const int nodes = game::streaming::PinPathNodes();
+              return json{{"ok", true},
+                          {"asked", asked},
+                          {"node_areas_asked", nodes},
+                          {"pinned_before", before},
+                          {"pinned", game::streaming::Pinned()},
+                          {"took_ms", static_cast<int>(GetTickCount64() - began)},
+                          {"held_mb", game::streaming::MemoryUsed() / (1024 * 1024)},
+                          {"allowed_mb", game::streaming::MemoryBudget() / (1024 * 1024)}};
+            },
+            120000);
       },
   });
 

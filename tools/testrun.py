@@ -39,7 +39,7 @@ LOG = os.path.join(GAME_DIR, "bot.asi.log")
 # window and no press.
 HOST = os.environ.get("GTABOT_HOST", "185.169.134.239")
 PORT = os.environ.get("GTABOT_PORT", "7777")
-NICK = os.environ.get("GTABOT_NICK", "Lo_Vlasuddd")
+NICK = os.environ.get("GTABOT_NICK", "Chlen_Soveta")
 
 
 def say(text):

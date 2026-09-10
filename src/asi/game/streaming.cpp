@@ -25,7 +25,11 @@ constexpr std::uint32_t kColPoolPtr   = 0x965560;
 constexpr std::uint32_t kRequestModel = 0x4087E0;
 constexpr std::uint32_t kLoadRequested = 0x40EA10;
 constexpr std::uint32_t kMemoryAvailable = 0x8A5A80;
+constexpr std::uint32_t kMemoryUsed = 0x8E4CB4;
 constexpr int kColModelBase = 25000;
+// The path graph: sixty-four areas of nodes, streamed the same way.
+constexpr int kNodeModelBase = 25511;
+constexpr int kNodeAreas = 64;
 
 // CPool: the storage, the byte per slot, the count. The byte's top bit means
 // the slot is empty, as everywhere else in this game.
@@ -51,6 +55,7 @@ using RequestModelFn = void(__cdecl*)(std::int32_t, std::int32_t);
 using LoadRequestedFn = void(__cdecl*)(bool);
 
 std::set<int> g_pinned;
+std::set<int> g_pinned_nodes;
 bool g_said_budget = false;
 
 using game::At;
@@ -62,15 +67,17 @@ std::uintptr_t Pool() {
   return pool;
 }
 
-bool AskFor(int slot) {
+bool AskForModel(int id) {
   __try {
     reinterpret_cast<RequestModelFn>(At(kRequestModel))(
-        kColModelBase + slot, kPriority | kKeepInMemory);
+        id, kPriority | kKeepInMemory);
     return true;
   } __except (EXCEPTION_EXECUTE_HANDLER) {
     return false;
   }
 }
+
+bool AskFor(int slot) { return AskForModel(kColModelBase + slot); }
 
 bool LoadWhatWasAsked() {
   __try {
@@ -99,13 +106,21 @@ std::size_t MemoryBudget() {
 bool SetMemoryBudget(std::size_t bytes) {
   if (bytes > kMostBudget) bytes = kMostBudget;
   const std::size_t was = MemoryBudget();
-  if (was >= bytes) return true;
+  if (was >= bytes) {
+    LOG_INFO("streaming: the game already allows itself {} MB of models at a "
+             "time, which is room enough - leaving it alone",
+             was / (1024 * 1024));
+    return true;
+  }
   // The game's own writable data: no page trick needed, only care.
   const std::uintptr_t where = At(kMemoryAvailable);
   if (!asi::mem::IsReadable(where, sizeof(std::uint32_t))) return false;
   __try {
     *reinterpret_cast<std::uint32_t*>(where) = static_cast<std::uint32_t>(bytes);
   } __except (EXCEPTION_EXECUTE_HANDLER) {
+    LOG_WARN("streaming: the game would not let its own model budget be "
+             "written at {:#x} - leaving it at {} MB, so pinned collision may "
+             "push the streamer over", where, was / (1024 * 1024));
     return false;
   }
   LOG_INFO("streaming: the game allowed itself {} MB of models at a time; "
@@ -115,6 +130,37 @@ bool SetMemoryBudget(std::size_t bytes) {
 }
 
 int Pinned() { return static_cast<int>(g_pinned.size()); }
+
+std::size_t MemoryUsed() {
+  std::uint32_t bytes = 0;
+  if (!asi::mem::Read<std::uint32_t>(At(kMemoryUsed), &bytes)) return 0;
+  return bytes;
+}
+
+int PinPathNodes() {
+  if (!Ready()) return 0;
+  int asked = 0, wanted = 0;
+  for (int area = 0; area < kNodeAreas; ++area) {
+    const int id = kNodeModelBase + area;
+    if (!AskForModel(id)) break;
+    if (g_pinned_nodes.insert(id).second) ++asked;
+    ++wanted;
+  }
+  if (wanted > 0) {
+    LoadWhatWasAsked();
+  }
+  if (asked > 0) {
+    LOG_INFO("streaming: asked the game for {} more of the map's {} areas of "
+             "path nodes and pinned them, so a way can be worked out to "
+             "somewhere the player has never been", asked, kNodeAreas);
+  }
+  return asked;
+}
+
+int PinWholeMap() {
+  // Every area there is: the whole map's rectangle, with room to spare.
+  return PinCollisionOver(-4000.0f, -4000.0f, 4000.0f, 4000.0f);
+}
 
 int PinCollisionOver(float x0, float y0, float x1, float y1) {
   if (!Ready()) return 0;
@@ -136,9 +182,8 @@ int PinCollisionOver(float x0, float y0, float x1, float y1) {
   if (x1 < x0) { const float swap = x0; x0 = x1; x1 = swap; }
   if (y1 < y0) { const float swap = y0; y0 = y1; y1 = swap; }
 
-  int asked = 0;
+  int asked = 0, wanted = 0;
   for (std::uint32_t slot = 1; slot < capacity; ++slot) {
-    if (g_pinned.count(static_cast<int>(slot)) != 0) continue;
     std::uint8_t state = 0;
     if (!asi::mem::Read<std::uint8_t>(slots + slot, &state)) continue;
     if ((state & kSlotEmpty) != 0) continue;
@@ -155,14 +200,19 @@ int PinCollisionOver(float x0, float y0, float x1, float y1) {
     if (right < left || top < bottom) continue;
     if (x1 < left || x0 > right || y1 < bottom || y0 > top) continue;
     if (!AskFor(static_cast<int>(slot))) break;
-    g_pinned.insert(static_cast<int>(slot));
-    ++asked;
+    // Newly wanted, or wanted again: the game removes node and collision
+    // areas the player has walked away from on its own schedule, whatever
+    // flag the request carried, so every one is asked for every time.
+    if (g_pinned.insert(static_cast<int>(slot)).second) ++asked;
+    ++wanted;
   }
-  if (asked > 0) {
+  if (wanted > 0) {
     LoadWhatWasAsked();
     LOG_INFO("streaming: asked the game for the collision of {} more of the "
-             "map's areas over ({:.0f},{:.0f})-({:.0f},{:.0f}); {} pinned now",
-             asked, x0, y0, x1, y1, Pinned());
+             "map's areas over ({:.0f},{:.0f})-({:.0f},{:.0f}); {} wanted in "
+             "all, {} MB of models held of the {} MB allowed",
+             asked, x0, y0, x1, y1, Pinned(), MemoryUsed() / (1024 * 1024),
+             MemoryBudget() / (1024 * 1024));
   }
   return asked;
 }

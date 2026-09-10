@@ -36,6 +36,24 @@ int PinCollisionOver(float x0, float y0, float x1, float y1);
 std::size_t MemoryBudget();
 bool SetMemoryBudget(std::size_t bytes);
 
+// Asks for - and pins - every collision area of the map there is, so that
+// nothing the planner looks at is ever missing. This is the whole of San
+// Andreas: a few hundred areas, boxes and triangles only, and no textures,
+// which is why it fits at all. Costs one long load the first time and
+// nothing after. Returns how many areas were newly asked for.
+int PinWholeMap();
+
+// Asks for - and pins - the path graph of the whole map: the sixty-four
+// areas of nodes the game streams round the player exactly as it streams
+// collision. Only five or six are ever loaded at once, which is why a
+// corridor to a target half a mile off could not be built at all - the
+// target's own area had no nodes in it to aim at. Sixty-four small files.
+// Returns how many were newly asked for. Game thread only.
+int PinPathNodes();
+
+// How much collision is held, in bytes, as the streamer counts it.
+std::size_t MemoryUsed();
+
 // How many areas are pinned so far, for the log.
 int Pinned();
 

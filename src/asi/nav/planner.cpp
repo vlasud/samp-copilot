@@ -11,6 +11,7 @@
 #include <unordered_set>
 
 #include "log.hpp"
+#include "game/streaming.hpp"
 #include "nav/field.hpp"
 
 namespace gtabot::nav {
@@ -1639,6 +1640,11 @@ constexpr int   kCorridorNodes = 6;
 constexpr int   kCorridorExpansions = 20000;
 // A corridor point nearer than this is not worth aiming at.
 constexpr float kMinCorridorStep = 25.0f;
+// The map's own areas of path nodes, and how many have to be in hand before
+// the copy is the whole city and worth keeping for good. Some are all sea.
+constexpr int kMapPathAreas = 64;
+constexpr int kWholeMapAreas = 56;
+int g_corridor_areas = 0;
 
 std::vector<Vec3> g_explored;
 Vec3 g_exploring_way{0, 0, 0};
@@ -1675,9 +1681,32 @@ void ForgetExplored() {
 bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
   if (out == nullptr) return false;
   const unsigned long long now = GetTickCount64();
-  if (!g_corridor_graph.valid || now - g_corridor_graph_ms > kGraphKeepMs) {
+  // The game keeps five or six of the map's sixty-four areas of path nodes
+  // loaded - the ones round the player - and takes the rest away again
+  // within seconds of being asked for them. That is why a way to a target
+  // half a mile off could not be worked out at all: the far end had no
+  // nodes in it to aim at, the corridor was never built, and the journey
+  // fell back on guessing - which is how he came to spend fourteen minutes
+  // walking from one end of a storm drain to the other. So all sixty-four
+  // are asked for, the snapshot is taken while they are all there, and it
+  // is kept: the game may have its own areas back, our copy is our own.
+  const bool have_the_map = g_corridor_areas >= kWholeMapAreas;
+  if (!g_corridor_graph.valid ||
+      (!have_the_map && now - g_corridor_graph_ms > kGraphKeepMs)) {
+    game::streaming::PinPathNodes();
     g_corridor_graph = game::SnapshotGraph();
     g_corridor_graph_ms = now;
+    g_corridor_areas = 0;
+    std::size_t nodes = 0;
+    for (int i = 0; i < kMapPathAreas; ++i) {
+      if (!g_corridor_graph.areas[i].loaded) continue;
+      ++g_corridor_areas;
+      nodes += g_corridor_graph.areas[i].nodes.size();
+    }
+    LOG_INFO("nav: the city's own way graph copied - {} of the map's {} areas, "
+             "{} nodes{}", g_corridor_areas, kMapPathAreas, nodes,
+             g_corridor_areas >= kWholeMapAreas
+                 ? " - the whole map, kept for good" : " - not all of it yet");
   }
   const game::Graph& graph = g_corridor_graph;
   if (!graph.valid) return false;
