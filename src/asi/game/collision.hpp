@@ -122,6 +122,12 @@ bool PaintFootprint(float cx, float cy, float floor_z, float radius, float cell,
                     const std::vector<Body>& also, Footprint* out,
                     const Floors* floors = nullptr, bool vehicles = false);
 
+// What the last ground query had to look at. No entities at all means the
+// game has not built that part of the world; entities without primitives
+// means the buildings are there but their collision is not.
+int LastLookEntities();
+int LastLookPrimitives();
+
 // Something that moves under its own power near a point: a car, a bike, a
 // boat. Position and velocity, in metres and metres a second, read from the
 // same sector lists the paint reads. Painting a car where it stands is no

@@ -91,6 +91,11 @@ std::atomic<bool> g_ready{false};
 std::atomic<unsigned long long> g_queries{0}, g_entities{0}, g_primitives{0};
 
 std::vector<std::uintptr_t> g_bucket[kWindow * kWindow];
+// What the last ground query actually had to look at, so a failure can be
+// told apart: no entities at all means the game has not built that part of
+// the world; entities but no primitives means they are there without their
+// collision. The two want opposite remedies.
+std::atomic<int> g_last_entities{0}, g_last_primitives{0};
 int  g_window_x0 = 0, g_window_y0 = 0;
 bool g_window_built = false;
 unsigned long long g_window_ms = 0;
@@ -988,10 +993,15 @@ bool GroundBelow(float x, float y, float z, float* ground_z, bool include_object
   Sweep(&q, x, y, x, y);
   g_entities.fetch_add(q.entities, std::memory_order_relaxed);
   g_primitives.fetch_add(q.primitives, std::memory_order_relaxed);
+  g_last_entities.store(q.entities);
+  g_last_primitives.store(q.primitives);
   if (!q.hit) return false;
   *ground_z = z - 1000.0f * q.best_t;
   return true;
 }
+
+int LastLookEntities() { return g_last_entities.load(); }
+int LastLookPrimitives() { return g_last_primitives.load(); }
 
 bool LineClear(const Vec3& a, const Vec3& b, bool vehicles) {
   if (!Ready()) return false;

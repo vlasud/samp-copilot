@@ -29,4 +29,5 @@ add_subdirectory(src/asi)
 
 # The parts that can be checked off the game: text, and what is made of it.
 enable_testing()
+add_subdirectory(tools/fieldcase)
 add_subdirectory(tests)

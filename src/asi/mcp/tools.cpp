@@ -1561,6 +1561,53 @@ void RegisterTools(Server* server) {
   });
 
   server->AddTool({
+      "ground_at",
+      "Whether the ground can be read at a point, and at what height. The "
+      "one question the planner asks before it will plan anything, and the "
+      "one that had no way of being asked from outside. Takes a list of "
+      "points and probes each from `from_above` metres over the player's own "
+      "height, so the answer is the same one the journey gets.",
+      {{"type", "object"},
+       {"properties",
+        {{"points", {{"type", "array"},
+                     {"description", "[{x, y}, ...]"}}},
+         {"from_above", {{"type", "number"}}}}},
+       {"required", json::array({"points"})}},
+      [](const json& args) -> json {
+        return Rpc::RunOnGameThread(
+            [args]() -> json {
+              const samp::LocalPed self = samp::ReadLocalPed();
+              const float above = args.value("from_above", 80.0f);
+              json rows = json::array();
+              for (const json& one : args["points"]) {
+                const float x = one.value("x", 0.0f), y = one.value("y", 0.0f);
+                const float dx = x - self.x, dy = y - self.y;
+                float ground = 0;
+                const bool got = game::GroundBelow(
+                    game::Vec3{x, y, self.z + above}, &ground);
+                float from_sky = 0;
+                const bool sky =
+                    game::GroundBelow(game::Vec3{x, y, 1000.0f}, &from_sky);
+                const int entities = game::col::LastLookEntities();
+                const int primitives = game::col::LastLookPrimitives();
+                rows.push_back(json{{"x", x}, {"y", y},
+                                    {"entities_looked_at", entities},
+                                    {"primitives_looked_at", primitives},
+                                    {"away_m", std::sqrt(dx * dx + dy * dy)},
+                                    {"read", got},
+                                    {"ground", got ? ground : 0.0f},
+                                    {"read_from_the_sky", sky},
+                                    {"ground_from_the_sky", sky ? from_sky : 0.0f}});
+              }
+              return json{{"from", {{"x", self.x}, {"y", self.y}, {"z", self.z}}},
+                          {"probed_from_above_m", above},
+                          {"points", rows}};
+            },
+            30000);
+      },
+  });
+
+  server->AddTool({
       "pin_world",
       "Asks the game to load the collision of the whole map and keep it "
       "there. The game streams collision only for the few hundred metres "
@@ -1590,9 +1637,17 @@ void RegisterTools(Server* server) {
               else
                 asked = game::streaming::PinWholeMap();
               const int nodes = game::streaming::PinPathNodes();
+              int sections = 0;
+              if (args.contains("x0"))
+                sections = game::streaming::PinMapOver(args["x0"], args["y0"],
+                                                       args["x1"], args["y1"]);
+              else
+                sections = game::streaming::PinMapOver(-4000, -4000, 4000, 4000);
               return json{{"ok", true},
                           {"asked", asked},
                           {"node_areas_asked", nodes},
+                          {"map_sections_asked", sections},
+                          {"map_sections_pinned", game::streaming::MapSectionsPinned()},
                           {"pinned_before", before},
                           {"pinned", game::streaming::Pinned()},
                           {"took_ms", static_cast<int>(GetTickCount64() - began)},

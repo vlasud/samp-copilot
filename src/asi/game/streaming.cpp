@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <set>
+#include <vector>
 
 #include "game/exe.hpp"
 #include "log.hpp"
@@ -22,6 +23,12 @@ namespace {
 // A collision file has a model id of its own, above the ordinary models:
 // twenty-five thousand plus its slot.
 constexpr std::uint32_t kColPoolPtr   = 0x965560;
+// CIplStore::ms_pPool 0x8E3FB0, a CPool<IplDef>. IplDef is fifty-two bytes
+// and opens with the same rectangle a ColDef does. Its resource ids start at
+// twenty-five thousand two hundred and fifty-five.
+constexpr std::uint32_t kIplPoolPtr   = 0x8E3FB0;
+constexpr std::uint32_t kIplDefStride = 0x34;
+constexpr int kIplModelBase = 25255;
 constexpr std::uint32_t kRequestModel = 0x4087E0;
 constexpr std::uint32_t kLoadRequested = 0x40EA10;
 constexpr std::uint32_t kMemoryAvailable = 0x8A5A80;
@@ -41,6 +48,15 @@ constexpr std::uint8_t  kSlotEmpty = 0x80;
 // in memory, which in this game's naming means minX, maxY, maxX, minY.
 constexpr std::uint32_t kColDefStride = 0x2C;
 constexpr std::uint32_t kAreaLeft = 0x00, kAreaTop = 0x04, kAreaRight = 0x08, kAreaBottom = 0x0C;
+// The reference count, and the flag that says the collision is in memory.
+// This is the whole of why pinning did not work: CColStore::LoadCollision
+// runs every frame and, for every area whose count is nought and which
+// nothing has asked for this frame, calls RemoveModel outright - the
+// keep-in-memory flag has no say in it. Measured from outside: a building
+// four hundred metres off is there in the pool, and a ray cast at it meets
+// nought collision primitives. A reference is the game's own way of saying
+// "somebody is using this", so that is what is left behind.
+constexpr std::uint32_t kRefCount = 0x26;
 
 // Pinned in memory and left there, at the front of the queue.
 constexpr std::int32_t kKeepInMemory = 0x08;
@@ -56,15 +72,74 @@ using LoadRequestedFn = void(__cdecl*)(bool);
 
 std::set<int> g_pinned;
 std::set<int> g_pinned_nodes;
+std::set<int> g_pinned_map;
 bool g_said_budget = false;
 
 using game::At;
 
-std::uintptr_t Pool() {
+std::uintptr_t PoolAt(std::uint32_t where) {
   std::uint32_t pool = 0;
-  if (!asi::mem::Read<std::uint32_t>(At(kColPoolPtr), &pool) || pool == 0) return 0;
+  if (!asi::mem::Read<std::uint32_t>(At(where), &pool) || pool == 0) return 0;
   if (!asi::mem::IsReadable(pool, 0x14)) return 0;
   return pool;
+}
+
+std::uintptr_t Pool() { return PoolAt(kColPoolPtr); }
+
+// The slots of a pool of rectangles that overlap a square, whatever the
+// pool: the collision areas and the map's own sections are laid out the
+// same way and are asked for the same way.
+bool WalkRectPool(std::uintptr_t pool, std::uint32_t stride, float x0, float y0,
+                  float x1, float y1, std::vector<int>* slots) {
+  std::uint32_t storage = 0, states = 0, capacity = 0;
+  if (!asi::mem::Read<std::uint32_t>(pool + kPoolStorage, &storage) ||
+      !asi::mem::Read<std::uint32_t>(pool + kPoolSlots, &states) ||
+      !asi::mem::Read<std::uint32_t>(pool + kPoolCapacity, &capacity))
+    return false;
+  if (storage == 0 || states == 0 || capacity == 0 || capacity > 4096)
+    return false;
+  if (!asi::mem::IsReadable(storage, capacity * stride) ||
+      !asi::mem::IsReadable(states, capacity))
+    return false;
+  for (std::uint32_t slot = 0; slot < capacity; ++slot) {
+    std::uint8_t state = 0;
+    if (!asi::mem::Read<std::uint8_t>(states + slot, &state)) continue;
+    if ((state & kSlotEmpty) != 0) continue;
+    const std::uintptr_t def = storage + slot * stride;
+    float left = 0, top = 0, right = 0, bottom = 0;
+    if (!asi::mem::Read<float>(def + kAreaLeft, &left) ||
+        !asi::mem::Read<float>(def + kAreaTop, &top) ||
+        !asi::mem::Read<float>(def + kAreaRight, &right) ||
+        !asi::mem::Read<float>(def + kAreaBottom, &bottom))
+      continue;
+    // An area never given a rectangle keeps the game's own empty one - a
+    // million metres the wrong way round - and would match everything.
+    if (right < left || top < bottom) continue;
+    if (x1 < left || x0 > right || y1 < bottom || y0 > top) continue;
+    slots->push_back(static_cast<int>(slot));
+  }
+  return true;
+}
+
+// A reference on an area, written where the game keeps it. Its own AddRef
+// does this and a little book-keeping we do not want; what matters is that
+// the count is not nought when LoadCollision comes round again.
+bool SetReference(std::uintptr_t def, bool hold) {
+  const std::uintptr_t where = def + kRefCount;
+  if (!asi::mem::IsReadable(where, sizeof(std::uint16_t))) return false;
+  __try {
+    volatile std::uint16_t* count = reinterpret_cast<std::uint16_t*>(where);
+    if (hold) {
+      if (*count == 0) *count = 1;
+    } else if (*count == 1) {
+      // Only the one we wrote ourselves is taken back; anything else is the
+      // game's own and belongs to somebody.
+      *count = 0;
+    }
+    return true;
+  } __except (EXCEPTION_EXECUTE_HANDLER) {
+    return false;
+  }
 }
 
 bool AskForModel(int id) {
@@ -137,6 +212,30 @@ std::size_t MemoryUsed() {
   return bytes;
 }
 
+int PinMapOver(float x0, float y0, float x1, float y1) {
+  if (!Ready()) return 0;
+  const std::uintptr_t pool = PoolAt(kIplPoolPtr);
+  if (pool == 0) return 0;
+  if (x1 < x0) { const float swap = x0; x0 = x1; x1 = swap; }
+  if (y1 < y0) { const float swap = y0; y0 = y1; y1 = swap; }
+  std::vector<int> slots;
+  if (!WalkRectPool(pool, kIplDefStride, x0, y0, x1, y1, &slots)) return 0;
+  int asked = 0;
+  for (int slot : slots) {
+    if (!AskForModel(kIplModelBase + slot)) break;
+    if (g_pinned_map.insert(slot).second) ++asked;
+  }
+  if (!slots.empty()) LoadWhatWasAsked();
+  if (asked > 0)
+    LOG_INFO("streaming: asked the game for {} more of the map's own sections "
+             "over ({:.0f},{:.0f})-({:.0f},{:.0f}) and pinned them - {} held "
+             "now, so there are buildings out there to cast a ray at",
+             asked, x0, y0, x1, y1, MapSectionsPinned());
+  return asked;
+}
+
+int MapSectionsPinned() { return static_cast<int>(g_pinned_map.size()); }
+
 int PinPathNodes() {
   if (!Ready()) return 0;
   int asked = 0, wanted = 0;
@@ -158,7 +257,9 @@ int PinPathNodes() {
 }
 
 int PinWholeMap() {
-  // Every area there is: the whole map's rectangle, with room to spare.
+  // The diagnostic tool only. Holding every area of the map's collision at
+  // once crashed the game, which is worth writing down rather than finding
+  // out twice.
   return PinCollisionOver(-4000.0f, -4000.0f, 4000.0f, 4000.0f);
 }
 
@@ -183,6 +284,7 @@ int PinCollisionOver(float x0, float y0, float x1, float y1) {
   if (y1 < y0) { const float swap = y0; y0 = y1; y1 = swap; }
 
   int asked = 0, wanted = 0;
+  std::set<int> wanted_now;
   for (std::uint32_t slot = 1; slot < capacity; ++slot) {
     std::uint8_t state = 0;
     if (!asi::mem::Read<std::uint8_t>(slots + slot, &state)) continue;
@@ -199,12 +301,28 @@ int PinCollisionOver(float x0, float y0, float x1, float y1) {
     // match everything.
     if (right < left || top < bottom) continue;
     if (x1 < left || x0 > right || y1 < bottom || y0 > top) continue;
+    SetReference(def, true);
     if (!AskFor(static_cast<int>(slot))) break;
-    // Newly wanted, or wanted again: the game removes node and collision
-    // areas the player has walked away from on its own schedule, whatever
-    // flag the request carried, so every one is asked for every time.
+    // Wanted again as well as newly wanted: the game strips the collision
+    // off an area the player has walked away from every frame, whatever
+    // flag the request carried.
+    wanted_now.insert(static_cast<int>(slot));
     if (g_pinned.insert(static_cast<int>(slot)).second) ++asked;
     ++wanted;
+  }
+  // And let go of everything held that this box does not cover. Holding the
+  // whole map at once took the game down outright - two hundred and fifty
+  // areas of collision resident is more than this client will carry - and
+  // the planner never needed the whole map, only a good margin round the
+  // ground it is about to think about.
+  {
+    std::vector<int> gone;
+    for (int held : g_pinned) {
+      if (wanted_now.count(held) != 0) continue;
+      SetReference(storage + static_cast<std::uint32_t>(held) * kColDefStride, false);
+      gone.push_back(held);
+    }
+    for (int one : gone) g_pinned.erase(one);
   }
   if (wanted > 0) {
     LoadWhatWasAsked();

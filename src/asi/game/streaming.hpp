@@ -51,6 +51,26 @@ int PinWholeMap();
 // Returns how many were newly asked for. Game thread only.
 int PinPathNodes();
 
+// Asks for - and pins - the map itself over a square: the sections of the
+// world file whose buildings the game creates as the player comes near and
+// destroys as he goes away.
+//
+// This is the one that matters. Collision is only the shape of a building;
+// if the building itself has not been created there is nothing to take the
+// shape of, and a ray cast at it passes through. Two hundred and seventy
+// metres from where he stood the ground could not be read at all - not with
+// every collision area in the map pinned - because at that distance there
+// were no buildings in the game's pool to read. The planner asks for the
+// ground under the target before it will plan anything, so a target further
+// off than that was refused outright and the whole errand was walked on the
+// whiskers. That is the wandering on long journeys.
+//
+// Returns how many sections were newly asked for. Game thread only.
+int PinMapOver(float x0, float y0, float x1, float y1);
+
+// How many sections are pinned, and how many the map has.
+int MapSectionsPinned();
+
 // How much collision is held, in bytes, as the streamer counts it.
 std::size_t MemoryUsed();
 

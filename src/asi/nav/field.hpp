@@ -119,6 +119,13 @@ class Field {
   std::atomic<bool> worker_done_{false};
 };
 
+// Whether a plan that ends badly writes down the grid it was working from,
+// beside the game as bot.fields\*.field. On by default: evidence nobody
+// asked for at the time is the only kind there ever is.
+bool CapturingCases();
+void CaptureCases(bool on);
+int  CasesKept();
+
 // In one go, for a tool that asked and is waiting. Bounded by time.
 FieldResult PlanField(const Vec3& from, const Vec3& to, int deadline_ms);
 

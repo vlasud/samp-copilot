@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "actions/walker.hpp"
+#include "game/streaming.hpp"
 #include "game/paths.hpp"
 #include "log.hpp"
 #include "nav/indoors.hpp"
@@ -43,7 +44,9 @@ constexpr std::size_t kStagingNodes = 600;
 // mark part of the way there. This used to be what the game streamed round
 // the player; it is now what the field is willing to be wide enough for,
 // and the map's collision is held in memory so the two are the same thing.
-constexpr float kStreamedRadius = 520.0f;
+constexpr float kStreamedRadius = 220.0f;
+// How far round him to hold the map's collision in memory.
+constexpr float kHoldGroundWithin = 500.0f;
 // Decisions in a row that end no nearer than they started.
 constexpr int kMaxFailures = 8;
 // However many decisions got nowhere, a journey is not given up before it
@@ -77,6 +80,9 @@ constexpr float kPlanAheadMetres = 6.0f;
 // own now, so the game keeps its frames whatever this is, and a route that
 // is always being drawn afresh is a route drawn on the world as it is.
 constexpr unsigned long long kRescanEveryMs = 200;
+// How long he may walk without ever getting nearer before the journey is
+// called hopeless.
+constexpr unsigned long long kNoGainForMs = 60000;
 // How long a plan may take before he sets off in the meantime. The field
 // answers in a second or so, and the leg walked blind while it did - the
 // best way out of here, straight toward the target - went through whatever
@@ -100,6 +106,7 @@ std::string g_note = "idle";
 float       g_best_straight = 0;
 unsigned long long g_next_plan_ms = 0;
 unsigned long long g_rescan_ms = 0;      // the next look while walking
+unsigned long long g_gained_ms = 0;      // when he was last nearer than ever
 unsigned long long g_plan_started_ms = 0;
 Phase       g_phase = Phase::kIdle;
 Aim         g_aim = Aim::kDestination;
@@ -341,23 +348,55 @@ void Decide(const Vec3& here) {
     g_next_plan_ms = GetTickCount64() + 1000;
     return;
   }
-  // Straight at the place he was sent, always.
-  //
-  // There used to be a staging mark a couple of hundred metres along the
-  // way - the white circle a man could watch him running to instead of to
-  // his errand - and the only reason for it was that the field could be no
-  // more than two hundred and forty metres across, which is about as far as
-  // the game streams collision round the player. The map's collision is
-  // held in memory now and the field is six hundred metres wide, so within
-  // half a kilometre the plan goes end to end.
-  //
-  // Further than that the box reaches as far toward the target as it can
-  // and the route ends at the nearest ground to it, which is the same thing
-  // a staging mark did without anything to chase: he is always walking at
-  // his errand, and the route to it is drawn afresh every few seconds, so
-  // the far half of it is redrawn finely long before he is standing there.
+  // The map's collision round him, before anything is asked of it - the
+  // planner looks up the ground under the target before the field ever
+  // starts, and on the first errand of a session nothing had asked yet.
+  // Round him, not the whole map: holding every area at once crashed the
+  // game.
+  game::streaming::PinCollisionOver(here.x - kHoldGroundWithin,
+                                    here.y - kHoldGroundWithin,
+                                    here.x + kHoldGroundWithin,
+                                    here.y + kHoldGroundWithin);
   if (g_height_unknown) ResolveHeight(here);
-  StartPlan(here, Aim::kDestination, g_destination);
+
+  // Near enough to be seen: straight at it.
+  //
+  // Further off, the errand has to be walked in stages, and not because of
+  // anything in this code. This game creates the buildings round the player
+  // and destroys them behind him: probed with a tool made for the purpose,
+  // the ground reads at a hundred and eighty metres and does not read at
+  // two hundred and seventy, with every collision area and every section of
+  // the world file pinned. There is nothing out there to walk on until he
+  // is nearer. So a stage is not a shortcut - it is the whole of what can
+  // be seen.
+  //
+  // What was wrong with stages was never that they existed. It was that the
+  // mark was a guess: the reachable point nearest the target, chosen with
+  // the far side of the block invisible. Now the whole map's path graph is
+  // in memory and sewn into one piece, so the mark is a real place on a
+  // real way across the city, two hundred metres along it. And the mark
+  // drawn on the screen is the errand itself, whatever the stage is doing.
+  Vec3 along;
+  if (straight <= kStreamedRadius) {
+    StartPlan(here, Aim::kDestination, g_destination);
+  } else if (nav::CorridorPoint(here, g_destination, kCorridorAhead, &along)) {
+    StartPlan(here, Aim::kStaging, along);
+  } else if (StagingPoint(here, g_destination, &along)) {
+    StartPlan(here, Aim::kStaging, along);
+  } else {
+    // Neither pavement nor road within reach: the docks, an airfield, open
+    // country. Point the field along the bearing and let it find the real
+    // ground - which is still worth four times what feeling the way is.
+    const float dx = g_destination.x - here.x, dy = g_destination.y - here.y;
+    const float span = std::sqrt(dx * dx + dy * dy);
+    if (span > kMinStagingStep) {
+      const float reach = std::min(kStreamedRadius * 0.8f, span);
+      along = Vec3{here.x + dx / span * reach, here.y + dy / span * reach, here.z};
+      StartPlan(here, Aim::kStaging, along);
+    } else {
+      WalkGreedy(here, false);
+    }
+  }
 }
 
 // Did the last decision get us anywhere? Measured against the best we have
@@ -377,6 +416,7 @@ bool Progress(float straight) {
   if (g_best_straight == 0 || straight < g_best_straight - 1.5f) {
     g_best_straight = straight;
     g_failures = 0;
+    g_gained_ms = now_ms();
     return true;
   }
   // Walking the length of a canal gets him no nearer the far side of town
@@ -393,14 +433,17 @@ bool Progress(float straight) {
     Stop("shut in");
     return false;
   }
-  // And not in three seconds. Decisions come every four hundred
-  // milliseconds when each one finishes at once - a route that ends where
-  // he stands finishes at once - so eight of them can pass before he has
-  // taken a step. A journey is not hopeless until it has had time to be.
-  if (++g_failures >= kMaxFailures &&
+  // Measured in time, not in decisions. The route is worked out afresh five
+  // times a second now, so eight decisions in a row is under two seconds -
+  // less than it takes to walk round a parked car - and counting them ended
+  // a journey that was going perfectly well, five hundred metres in. What
+  // makes a journey hopeless is a minute of walking that got no nearer.
+  ++g_failures;
+  if (g_gained_ms == 0) g_gained_ms = g_started_ms;
+  if (now_ms() - g_gained_ms > kNoGainForMs &&
       now_ms() - g_started_ms > kLeastBeforeGivingUp) {
-    StopLocked("gave up - " + std::to_string(kMaxFailures) +
-               " decisions in a row got no closer");
+    StopLocked("gave up - " + std::to_string((now_ms() - g_gained_ms) / 1000) +
+               " s of walking got no closer");
     LOG_WARN("travel: {} ({:.0f} m short)", g_note, straight);
     Stop("the journey gave up");
     return false;
@@ -480,7 +523,10 @@ void OnPlanFinished(const Vec3& here) {
   const nav::Plan& plan = g_planner.result();
   if (plan.ok) g_indoors = LooksIndoors(here);
   if (plan.ok && plan.waypoints.size() >= 2) {
-    nav::SetDebugPlan(g_aim_point, plan);
+    // The mark drawn on the screen is the errand, always - not the stage.
+    // A man watching should see where he is being sent, and the stage is
+    // machinery.
+    nav::SetDebugPlan(g_destination, plan);
     // The route itself, so a poor one can be read back off the log: each
     // leg's end, with what it costs beyond walking.
     {
@@ -559,6 +605,7 @@ void TravelTo(const Vec3& destination, bool height_unknown,
   g_best_straight = 0;
   g_next_plan_ms  = 0;
   g_rescan_ms     = 0;
+  g_gained_ms     = now_ms();
   g_greedy_legs   = 0;
   g_bridged = false;
   g_phase = Phase::kIdle;

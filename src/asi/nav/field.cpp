@@ -12,6 +12,8 @@
 #include "samp/checkpoints.hpp"
 #include "samp/objects.hpp"
 #include "log.hpp"
+#include "types.hpp"
+#include "nav/casefile.hpp"
 #include "nav/grid.hpp"
 #include "nav/planner.hpp"
 
@@ -28,7 +30,17 @@ constexpr float kCell = 0.25f;
 // round a whole block is forty metres; anything further is a different
 // route, not a detour.
 constexpr float kMargin = 40.0f;
-constexpr float kRoundStart = 60.0f;
+// A hundred and twenty metres of room round the errand, not sixty.
+//
+// Sixty was enough to walk round a parked car and not enough to walk round
+// a building. Caught in the act with the field written out and run again
+// away from the game: he stood eighty-five metres from the mark with a wall
+// across the whole width of the box - one building - and the way round it
+// was outside the paper. Thirty-three per cent of the ground he could see
+// was ground he could reach, and the search turned down six thousand moves
+// for a wall against five hundred for a step. He was not blocked by a rule;
+// he was blocked by the edge of the page.
+constexpr float kRoundStart = 120.0f;
 // And the least: enough to step round a parked car either side.
 constexpr float kLeastRound = 12.0f;
 // The most field there is: two hundred and forty metres a side at this
@@ -38,14 +50,26 @@ constexpr float kLeastRound = 12.0f;
 // made from a smaller box is wrong more often: six hundred and forty-one
 // metres of straight line once cost fifteen hundred of walking. Fewer,
 // longer stages are fewer chances to choose badly.
-// Six hundred metres across. It was two hundred and forty, because that is
-// about as far as the game streams collision round the player and beyond it
-// every ray cast came back "no floor here" - so a journey had to be walked
-// in stages, aimed at a mark in the middle distance, and the mark is what
-// he was seen running to instead of to where he had been sent. The map's
-// collision is held in memory now, all of it, so the field can be as wide
-// as the errand.
-constexpr int   kMaxSide = 2400;
+// Two hundred and fifty metres across, which is as far as this game has a
+// world at all.
+//
+// It was widened to six hundred once the map's collision was pinned, and
+// that was the wrong lesson from the right fact. Collision is only the
+// shape of a building; the buildings themselves are created and destroyed
+// by the streamer as the player moves, and pinning every collision area and
+// every section of the world file changes nothing about it - measured
+// twice, with a probe made for the purpose: the ground reads at a hundred
+// and eighty metres and does not read at two hundred and seventy. A wider
+// box is not more world, it is the same world with blank paper round it -
+// fifty-four per cent of one such box was never read at all - and it costs
+// the reading its resolution, because a box that big has to be sampled
+// every two metres instead of every one.
+//
+// So the field is the size of what can be seen, and a journey further than
+// that is walked in stages. Which way each stage goes is the corridor's
+// business, and the corridor knows now: the whole map's path graph is in
+// memory and sewn into one piece.
+constexpr int   kMaxSide = 1000;
 // Painted in squares of this half-width, each against its own floor,
 // because the painter takes one floor height and a street is not one height.
 constexpr float kTileRadius = 20.0f;
@@ -81,6 +105,10 @@ constexpr int   kCloseSide = 260;          // sixty-five metres
 // A route shorter than this, that does not reach the target, is the squeeze
 // round his feet rather than a way anywhere.
 constexpr float kPointlessRoute = 2.5f;
+// How far past the box to hold the ground as well, so the next stage starts
+// on collision that is already there. Not the whole map: holding all of it
+// crashed the game.
+constexpr float kCollisionSpare = 250.0f;
 // How much the floor may rise or fall between two readings a metre apart
 // and still be the same floor. A staircase at forty-five degrees is one
 // metre in one; half a metre more allows for a steep one and for the
@@ -185,6 +213,9 @@ struct Field::Work {
   // gentle one without the reading going round for ever.
   bool ground_seeded = false;
   int  stride = kGroundStride;   // cells between ground readings
+  // The grid as the paint left it, kept in case this plan turns out to be
+  // one worth looking at again away from the game.
+  CaseShot shot;
   std::vector<int> queue;
   std::size_t queue_at = 0;
   std::vector<std::uint8_t> tries;
@@ -221,6 +252,76 @@ void Field::Start(const Vec3& from, const Vec3& to) {
   w_->began_ms = GetTickCount64();
   result_ = FieldResult{};
 }
+
+// ---- evidence ------------------------------------------------------------
+//
+// A plan that ends badly writes down what it saw. Not a picture and not a
+// sentence in the log - the grid itself, as the paint left it - so the same
+// trouble can be put to the search again, away from the game, with whatever
+// rules are in the build now. See nav/casefile.hpp for why this exists.
+
+namespace {
+
+std::atomic<bool> g_capturing{true};
+std::atomic<int>  g_kept{0};
+std::atomic<unsigned long long> g_last_kept_ms{0};
+
+// Not more than one every few seconds, and not more than a session's worth:
+// the route is worked out afresh five times a second now, and a directory of
+// ten thousand fields helps nobody.
+constexpr unsigned long long kKeepEveryMs = 6000;
+constexpr int kKeepAtMost = 80;
+
+std::string CaseDirectory() {
+  const std::string dir = ModuleDirectory() + "bot.fields";
+  CreateDirectoryA(dir.c_str(), nullptr);
+  return dir + "\\";
+}
+
+// Which endings are worth the disk. A route that reaches is evidence of
+// nothing; the ones that matter are where he was shut in, where nothing was
+// found at all, and where the way found is a small fraction of the way
+// wanted - which is the ping-pong in the storm drain, seen from inside.
+const char* WorthKeeping(const FieldResult& r, float wanted) {
+  if (!r.ok) return "noroute";
+  if (r.exploring) return "shutin";
+  if (!r.reaches_target && wanted > 40.0f && r.length_m < wanted * 0.25f)
+    return "short";
+  return nullptr;
+}
+
+void KeepCase(const CaseShot& shot, const Vec3& from, const Vec3& to,
+              int stride, const FieldResult& r, const char* tag) {
+  if (shot.empty()) return;
+  if (g_kept.load() >= kKeepAtMost) return;
+  const unsigned long long now = GetTickCount64();
+  if (now - g_last_kept_ms.load() < kKeepEveryMs) return;
+  g_last_kept_ms.store(now);
+
+  FieldCase one;
+  one.from = from;
+  one.to = to;
+  one.ref_z = shot.ref_z;
+  one.stride = stride;
+  one.note = r.note;
+  one.why = tag;
+  one.route = r.points;
+  char name[160];
+  std::snprintf(name, sizeof(name), "%s%s-%04d-%.0f_%.0f-to-%.0f_%.0f.field",
+                CaseDirectory().c_str(), tag, g_kept.load(), from.x, from.y,
+                to.x, to.y);
+  if (!SaveShot(shot, one, name)) return;
+  const int kept = g_kept.fetch_add(1) + 1;
+  LOG_INFO("field: kept what it saw in {} - {} of at most {} this session. "
+           "Run it again without the game: fieldcase {}",
+           name, kept, kKeepAtMost, name);
+}
+
+}  // namespace
+
+bool CapturingCases() { return g_capturing.load(); }
+void CaptureCases(bool on) { g_capturing.store(on); }
+int  CasesKept() { return g_kept.load(); }
 
 bool Field::waiting() const { return away_.load(); }
 
@@ -275,6 +376,8 @@ bool Field::StepOnce() {
     result_.cells = g.W * g.H;
     result_.expanded = w.searcher.expanded();
     w.phase = Phase::kDone;
+    if (const char* tag = WorthKeeping(result_, Away(w.from, w.to)))
+      KeepCase(w.shot, w.from, w.to, w.stride, result_, tag);
     LOG_INFO("field: {} - {}x{} cells, {} tiles, {} ground reads, {} expanded, {} ms: {}",
              result_.ok ? "ok" : "no", g.W, g.H, result_.tiles, result_.ground_reads,
              result_.expanded, result_.took_ms, result_.note);
@@ -359,7 +462,9 @@ bool Field::StepOnce() {
       // asking costs a few tens of milliseconds once they are all in - the
       // game allows itself a gigabyte of models on this client, so there is
       // room and to spare.
-      game::streaming::PinWholeMap();
+      game::streaming::PinCollisionOver(
+          result_.box_x0 - kCollisionSpare, result_.box_y0 - kCollisionSpare,
+          result_.box_x1 + kCollisionSpare, result_.box_y1 + kCollisionSpare);
 
       // Tiles across the box, overlapping a little so no seam is bare.
       const float pitch = kTileRadius * 2.0f - kCell * 2.0f;
@@ -566,6 +671,10 @@ bool Field::StepOnce() {
     }
 
     case Phase::kClearance: {
+      // Before anything is changed: this is the evidence, and it has to be
+      // the world as it was read rather than the world after the rules
+      // under test have had their way with it.
+      if (g_capturing.load()) w.shot.Take(g, w.ref_z);
       // The cells between the readings take the reading beside them.
       SmoothBetweenReadings(&g, w.stride);
       // The lip of every drop is a wall as far as the clearance is concerned.

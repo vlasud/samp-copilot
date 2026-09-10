@@ -60,6 +60,10 @@ constexpr float kDropPenaltyPerMetre = 2.0f;
 // height the character happens to be. Its ground is looked for from well
 // above, so a target down the hill from him is not "in the air".
 constexpr float kGoalProbeUp = 60.0f;
+// Within this, a target whose ground cannot be read is a target that is not
+// there - a hole, the sea, a mistake. Beyond it, it only means the game has
+// not built that part of the world yet.
+constexpr float kFarEnoughToBeUnknown = 250.0f;
 
 // Joining the route to the graph: how far to look for a node, and how many
 // to try before giving up on that end.
@@ -615,21 +619,39 @@ struct Planner::Job {
     // there is none, from well above, in case it is up a hill from him. That
     // order matters under an overpass: probing from sixty metres up first
     // would put the target on the road above.
+    bool guessed_height = false;
     if (!GroundAt(to, &ground) &&
         !GroundAtNoObjects(Vec3{to.x, to.y, to.z + kGoalProbeUp - kMaxGroundAbove},
                   &ground)) {
       const float away = Distance2D(from, to);
-      Fail("target: no ground there" +
-           std::string(away > 250.0f ? " (" + Metres(away) +
-                                           " away - beyond what the game "
-                                           "has streamed in)"
-                                     : ""));
-      return;
+      if (away <= kFarEnoughToBeUnknown) {
+        Fail("target: no ground there");
+        return;
+      }
+      // Further off than the game keeps buildings in memory - about two
+      // hundred and fifty metres - there is nothing out there to cast a ray
+      // at, so the ground under the mark cannot be known and no amount of
+      // asking the streamer for it helps: the game takes its own map back
+      // as fast as it is given.
+      //
+      // That is no reason to refuse the errand, and refusing it was the
+      // whole trouble with long journeys. The field reaches six hundred
+      // metres toward the mark and ends at the nearest ground it can find
+      // to it; where the mark itself sits, to the metre, does not come into
+      // that. So it is taken at his own height and walked toward, and the
+      // height is looked up again on the way in, when he is near enough for
+      // it to be readable and to matter. Refused instead, the journey fell
+      // back on feeling its way with the whiskers - and a mile of that is
+      // exactly the wandering that was plain to watch.
+      ground = from.z - kPedOrigin;
+      guessed_height = true;
     }
     b = Vec3{to.x, to.y, ground + kPedOrigin};
     const Vec3 ends[2] = {a, b};
     SetExempt(ends, 2);
-    if (!Clear(Vec3{b.x, b.y, ground + kHeadroomFrom},
+    // No sense testing the headroom over a height that was assumed.
+    if (!guessed_height &&
+        !Clear(Vec3{b.x, b.y, ground + kHeadroomFrom},
                Vec3{b.x, b.y, ground + kHeadroomTo})) {
       Fail("target: no headroom where the ground is");
       return;
