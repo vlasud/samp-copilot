@@ -42,6 +42,11 @@ constexpr std::size_t kStagingNodes = 600;
 constexpr float kStreamedRadius = 240.0f;
 // Decisions in a row that end no nearer than they started.
 constexpr int kMaxFailures = 8;
+// However many decisions got nowhere, a journey is not given up before it
+// has been going this long.
+constexpr unsigned long long kLeastBeforeGivingUp = 20000;
+unsigned long long now_ms();
+
 // Stages that head away from the target on purpose - along a canal, out of
 // a yard - before the journey calls it hopeless. Each is worth up to a
 // hundred and eighty metres of walking, so this is a long way.
@@ -79,6 +84,7 @@ Vec3        g_destination;
 int         g_replans  = 0;
 int         g_failures = 0;
 int         g_exploring = 0;
+unsigned long long g_started_ms = 0;
 bool        g_reaching = false;
 float       g_arrived = kArrived;
 std::string g_note = "idle";
@@ -112,6 +118,8 @@ constexpr unsigned long long kRoomEveryMs = 2500;
 constexpr float kRoomRadius = 22.0f;
 // How near the end of the trail counts as standing on it.
 constexpr float kTrailEndNear = 2.0f;
+// A route ending nearer than this to where he stands is no route at all.
+constexpr float kWayEndsHere = 1.5f;
 constexpr float kThroughTheWayOut = 3.5f;
 Vec3 g_room_last_out{};
 constexpr unsigned long long kCutEveryMs = 700;
@@ -230,6 +238,8 @@ bool WalkTheRoom(const Vec3& here);
 // thousand metres above the map, where nothing of the city is. And anywhere
 // with no pedestrian node within sixty metres is somewhere the graph cannot
 // help, whether it is a building or the inside of a tunnel.
+unsigned long long now_ms() { return GetTickCount64(); }
+
 bool LooksIndoors(const Vec3& here) {
   if (here.z > 400.0f) return true;
   return game::PedNodesNear(here, kNoNodesWithin, 1).empty();
@@ -349,7 +359,12 @@ bool Progress(float straight) {
     Stop("shut in");
     return false;
   }
-  if (++g_failures >= kMaxFailures) {
+  // And not in three seconds. Decisions come every four hundred
+  // milliseconds when each one finishes at once - a route that ends where
+  // he stands finishes at once - so eight of them can pass before he has
+  // taken a step. A journey is not hopeless until it has had time to be.
+  if (++g_failures >= kMaxFailures &&
+      now_ms() - g_started_ms > kLeastBeforeGivingUp) {
     StopLocked("gave up - " + std::to_string(kMaxFailures) +
                " decisions in a row got no closer");
     LOG_WARN("travel: {} ({:.0f} m short)", g_note, straight);
@@ -374,6 +389,15 @@ bool WalkTheRoom(const Vec3& here) {
   }
   g_indoors = true;
   g_route.assign(room.points.begin() + 1, room.points.end());
+  // A way that ends where he already stands is not a way. The walk takes
+  // it, reports that it has arrived before he has moved, and the journey
+  // counts that as a decision that got nowhere - eight of them in three
+  // seconds, and it gives up five metres from a shop counter.
+  if (!g_route.empty() && Distance2D(here, g_route.back()) < kWayEndsHere &&
+      Distance2D(here, g_destination) > g_arrived) {
+    LOG_INFO("travel: the room's way out ends where he is standing ({})", room.note);
+    return false;
+  }
   // The room stops at the door because the door is shut, and stopping there
   // to feel the room out again gives the same answer for ever. So the walk
   // is sent a few metres past it, towards where it was going: that puts him
@@ -499,6 +523,7 @@ void TravelTo(const Vec3& destination, bool height_unknown,
   g_replans     = 0;
   g_failures    = 0;
   g_exploring   = 0;
+  g_started_ms  = GetTickCount64();
   nav::ForgetExplored();
   g_reaching    = false;
   g_indoors     = false;

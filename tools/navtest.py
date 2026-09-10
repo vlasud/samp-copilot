@@ -32,6 +32,14 @@ def main():
     c.handshake("navtest")
     c.tool("set_movement", {"on": True})
     c.tool("act_stop")
+    # A dialog left open by whatever ran before holds the keyboard, and the
+    # walk waits for it as it should. Measuring navigation against a
+    # character who is not allowed to move is measuring nothing: three
+    # errands in a row read as interior failures that way, for two and a
+    # half minutes each, because a shop's message box was still up.
+    if (c.tool("look", {"radius": 1, "chat": 0}).get("dialog") or {}).get("shown"):
+        c.tool("answer_dialog", {"button": 2})
+        time.sleep(1.0)
 
     start = c.tool("look", {"radius": 1, "chat": 0})["self"]["pos"]
     straight = flat(start, (to_x, to_y))
