@@ -30,10 +30,14 @@ constexpr float kMargin = 40.0f;
 constexpr float kRoundStart = 60.0f;
 // And the least: enough to step round a parked car either side.
 constexpr float kLeastRound = 12.0f;
-// The most field there is: a hundred and eighty metres a side at this
+// The most field there is: two hundred and forty metres a side at this
 // cell. A journey is staged and replanned as the world streams in anyway,
-// so a plan need only reach the next stage.
-constexpr int   kMaxSide = 720;
+// so a plan need only reach the next stage - but each stage is chosen
+// greedily, for the reachable point nearest the target, and a greedy choice
+// made from a smaller box is wrong more often: six hundred and forty-one
+// metres of straight line once cost fifteen hundred of walking. Fewer,
+// longer stages are fewer chances to choose badly.
+constexpr int   kMaxSide = 960;
 // Painted in squares of this half-width, each against its own floor,
 // because the painter takes one floor height and a street is not one height.
 constexpr float kTileRadius = 20.0f;
