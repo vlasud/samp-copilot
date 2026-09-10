@@ -1637,12 +1637,15 @@ constexpr unsigned long long kGraphKeepMs = 30000;
 constexpr float kCorridorJoin = 60.0f;      // how far to look for a pavement to start on
 constexpr float kCorridorReach = 250.0f;    // and for a road, which may be further off
 constexpr int   kCorridorNodes = 6;
-constexpr int   kCorridorExpansions = 20000;
+// The whole state is in hand now, so the search is allowed to be a long
+// one: a way across a city is thousands of nodes.
+constexpr int   kCorridorExpansions = 400000;
 // A corridor point nearer than this is not worth aiming at.
 constexpr float kMinCorridorStep = 25.0f;
 // The map's own areas of path nodes, and how many have to be in hand before
 // the copy is the whole city and worth keeping for good. Some are all sea.
 constexpr int kMapPathAreas = 64;
+constexpr int kPathAreasAll = 72;   // the map's sixty-four and the interiors
 constexpr int kWholeMapAreas = 56;
 int g_corridor_areas = 0;
 
@@ -1678,6 +1681,209 @@ void ForgetExplored() {
   g_exploring_way = Vec3{0, 0, 0};
 }
 
+// ---------------------------------------------------------------------
+// Sewing the city's own graph back into one piece.
+//
+// The map's path nodes are not one network. A flood from a pavement in the
+// middle of Los Santos reaches eight thousand eight hundred of the sixty-
+// eight thousand nodes on the map and then stops: the rest is other
+// islands. Each block's pavement is a loop of its own, the roads are
+// another network again, and the file joins them only here and there. That
+// is why a way from one side of town to the other could not be worked out
+// at all, why the journey fell back on guessing its direction, and why
+// three days of walking looked the way it looked.
+//
+// So they are sewn together. Two nodes a few metres apart at much the same
+// height are walkable between whether or not the file says so - a kerb, a
+// gap in a railing, the end of one pavement and the start of the next. The
+// islands are found with a union-find over the real links, and then pairs
+// that belong to different islands are joined until the city is one piece.
+// Nothing is joined inside an island, so the graph stays as sparse as it
+// was, and the corridor is only a direction: the field still reads the real
+// ground before he walks a step of it.
+// ---------------------------------------------------------------------
+
+// How far apart two nodes of different islands may be to be sewn together,
+// and how much they may differ in height. The first pass is a kerb's width;
+// the second reaches across a road, for the islands the first leaves out.
+constexpr float kSewSquare = 40.0f;
+// How far out to look for the mainland, in squares, before giving an island
+// up as beyond reach: a mile and a quarter.
+constexpr int   kSewRings = 32;
+// A metre of climb counts for this many metres of ground when choosing
+// where to sew, so a stitch prefers the pavement beside it to the flyover
+// above it.
+constexpr float kSewRiseCosts = 4.0f;
+
+// The stitches, by node: looked at beside the graph's own links.
+std::unordered_map<std::uint32_t, std::vector<game::PathLink>> g_sewn;
+
+std::uint32_t SewSquare(float x, float y) {
+  const int sx = static_cast<int>(std::floor(x / kSewSquare)) + 512;
+  const int sy = static_cast<int>(std::floor(y / kSewSquare)) + 512;
+  return (static_cast<std::uint32_t>(sx) << 16) | static_cast<std::uint32_t>(sy);
+}
+
+int IslandOf(std::vector<int>* parent, int a) {
+  while ((*parent)[a] != a) {
+    (*parent)[a] = (*parent)[(*parent)[a]];
+    a = (*parent)[a];
+  }
+  return a;
+}
+
+void JoinIslands(std::vector<int>* parent, int a, int b) {
+  a = IslandOf(parent, a);
+  b = IslandOf(parent, b);
+  if (a != b) (*parent)[b] = a;
+}
+
+void SewTheCityTogether(const game::Graph& graph) {
+  g_sewn.clear();
+  // Every node the map has, numbered.
+  std::unordered_map<std::uint32_t, int> number;
+  std::vector<game::PathNode> node;
+  for (int i = 0; i < kPathAreasAll; ++i) {
+    if (!graph.areas[i].loaded) continue;
+    for (const game::PathNode& one : graph.areas[i].nodes) {
+      const std::uint32_t key = NodeKey(one.area, one.index);
+      if (number.count(key) != 0) continue;
+      number[key] = static_cast<int>(node.size());
+      node.push_back(one);
+    }
+  }
+  if (node.empty()) return;
+  std::vector<int> parent(node.size());
+  for (std::size_t i = 0; i < parent.size(); ++i) parent[i] = static_cast<int>(i);
+
+  // The islands, as the file has them.
+  for (std::size_t i = 0; i < node.size(); ++i) {
+    game::PathLink links[24];
+    const int count = graph.Links(node[i], links, 24);
+    for (int k = 0; k < count; ++k) {
+      const auto it = number.find(NodeKey(links[k].area, links[k].index));
+      if (it != number.end()) JoinIslands(&parent, static_cast<int>(i), it->second);
+    }
+  }
+  // How much of the file's own linking crosses from one area of the map to
+  // the next: if none of it does, each of the sixty-four tiles is an island
+  // by construction and the reader is dropping something.
+  int crossing = 0, all_links = 0, dangling = 0;
+  for (std::size_t i = 0; i < node.size(); ++i) {
+    game::PathLink links[24];
+    const int count = graph.Links(node[i], links, 24);
+    all_links += count;
+    for (int k = 0; k < count; ++k) {
+      if (links[k].area != node[i].area) ++crossing;
+      if (number.find(NodeKey(links[k].area, links[k].index)) == number.end())
+        ++dangling;
+    }
+  }
+  LOG_INFO("nav: the file's own linking - {} links off {} nodes, {} of them "
+           "cross from one area of the map to the next, {} point at nodes "
+           "that are not there", all_links, node.size(), crossing, dangling);
+
+  int islands_before = 0;
+  for (std::size_t i = 0; i < node.size(); ++i)
+    if (IslandOf(&parent, static_cast<int>(i)) == static_cast<int>(i)) ++islands_before;
+
+  // Where everything is, so a neighbour is a look at nine squares.
+  std::unordered_map<std::uint32_t, std::vector<int>> square;
+  for (std::size_t i = 0; i < node.size(); ++i)
+    square[SewSquare(node[i].pos.x, node[i].pos.y)].push_back(static_cast<int>(i));
+
+  // Every island but the biggest is joined to the mainland at its own
+  // closest pair of nodes, biggest island first, and each one becomes part
+  // of the mainland as it is taken in. That ends with one piece however far
+  // apart the pieces were - a pavement loop in the middle of a block, a
+  // stretch of country road, a car park behind a warehouse - and it takes
+  // exactly one stitch per island, so the graph stays as sparse as the file
+  // left it.
+  std::unordered_map<int, std::vector<int>> island;
+  for (std::size_t i = 0; i < node.size(); ++i)
+    island[IslandOf(&parent, static_cast<int>(i))].push_back(static_cast<int>(i));
+  std::vector<std::pair<int, int>> by_size;   // size, root
+  by_size.reserve(island.size());
+  for (const auto& one : island)
+    by_size.push_back({static_cast<int>(one.second.size()), one.first});
+  std::sort(by_size.begin(), by_size.end(),
+            [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+              return a.first > b.first;
+            });
+
+  // The mainland, by square, so the nearest one to a point is a look at a
+  // few squares rather than at every node on the map.
+  std::unordered_map<std::uint32_t, std::vector<int>> mainland;
+  const auto put = [&](int i) {
+    mainland[SewSquare(node[i].pos.x, node[i].pos.y)].push_back(i);
+  };
+  int sewn = 0;
+  float furthest = 0;
+  for (std::size_t k = 0; k < by_size.size(); ++k) {
+    const std::vector<int>& members = island[by_size[k].second];
+    if (k == 0) {                        // the mainland itself
+      for (int i : members) put(i);
+      continue;
+    }
+    // The closest pair between this island and the mainland: rings of
+    // squares outward from each of its nodes, stopping at the first ring
+    // that holds anything, then the best over the whole island.
+    int best_here = -1, best_there = -1;
+    float best = 1e18f;
+    for (int i : members) {
+      for (int ring = 1; ring <= kSewRings; ++ring) {
+        bool anything = false;
+        for (int dy = -ring; dy <= ring; ++dy)
+          for (int dx = -ring; dx <= ring; ++dx) {
+            if (std::max(std::abs(dx), std::abs(dy)) != ring) continue;
+            const auto it = mainland.find(SewSquare(
+                node[i].pos.x + dx * kSewSquare, node[i].pos.y + dy * kSewSquare));
+            if (it == mainland.end()) continue;
+            for (int j : it->second) {
+              anything = true;
+              const float away = Distance2D(node[i].pos, node[j].pos) +
+                                 std::fabs(node[i].pos.z - node[j].pos.z) * kSewRiseCosts;
+              if (away >= best) continue;
+              best = away;
+              best_here = i;
+              best_there = j;
+            }
+          }
+        if (anything) break;      // a nearer ring beats a further one
+      }
+    }
+    if (best_here >= 0) {
+      g_sewn[NodeKey(node[best_here].area, node[best_here].index)].push_back(
+          game::PathLink{node[best_there].area, node[best_there].index});
+      g_sewn[NodeKey(node[best_there].area, node[best_there].index)].push_back(
+          game::PathLink{node[best_here].area, node[best_here].index});
+      JoinIslands(&parent, best_here, best_there);
+      ++sewn;
+      if (best > furthest) furthest = best;
+    }
+    for (int i : members) put(i);
+  }
+  LOG_INFO("nav: the longest stitch is {:.0f} m", furthest);
+  int islands_after = 0;
+  for (std::size_t i = 0; i < node.size(); ++i)
+    if (IslandOf(&parent, static_cast<int>(i)) == static_cast<int>(i)) ++islands_after;
+  LOG_INFO("nav: the city's graph sewn together - {} nodes were {} separate "
+           "islands, {} stitches later they are {}", node.size(),
+           islands_before, sewn, islands_after);
+}
+
+// Why no corridor was built, said once in a while rather than every time:
+// the journey looks again every few seconds and would otherwise fill the log.
+void CorridorGaveUp(const char* why) {
+  static unsigned long long said_ms = 0;
+  static const char* said = nullptr;
+  const unsigned long long now = GetTickCount64();
+  if (said == why && now - said_ms < 15000) return;
+  said = why;
+  said_ms = now;
+  LOG_INFO("nav: no corridor - {}", why);
+}
+
 bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
   if (out == nullptr) return false;
   const unsigned long long now = GetTickCount64();
@@ -1703,6 +1909,7 @@ bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
       ++g_corridor_areas;
       nodes += g_corridor_graph.areas[i].nodes.size();
     }
+    SewTheCityTogether(g_corridor_graph);
     LOG_INFO("nav: the city's own way graph copied - {} of the map's {} areas, "
              "{} nodes{}", g_corridor_areas, kMapPathAreas, nodes,
              g_corridor_areas >= kWholeMapAreas
@@ -1723,12 +1930,20 @@ bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
   std::vector<game::PathNode> goals =
       graph.PedNodesNear(to, kCorridorJoin, kCorridorNodes);
   if (goals.empty()) goals = graph.VehicleNodesNear(to, kCorridorReach, kCorridorNodes);
-  if (starts.empty() || goals.empty()) return false;
+  if (starts.empty() || goals.empty()) {
+    CorridorGaveUp(starts.empty() ? "nothing of the city's own network within "
+                                    "reach of where he stands"
+                                  : "nothing of it within reach of the target");
+    return false;
+  }
   const game::PathNode& start = starts.front();
   const game::PathNode& goal = goals.front();
   const std::uint32_t start_key = NodeKey(start.area, start.index);
   const std::uint32_t goal_key = NodeKey(goal.area, goal.index);
-  if (start_key == goal_key) return false;
+  if (start_key == goal_key) {
+    CorridorGaveUp("he is standing on the same node the target sits on");
+    return false;
+  }
 
   std::unordered_map<std::uint32_t, game::PathNode> known;
   std::unordered_map<std::uint32_t, float> best;
@@ -1747,8 +1962,18 @@ bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
     ++expanded;
     const game::PathNode node = known[current.key];
     const float cost_here = best[current.key];
-    game::PathLink links[16];
-    const int count = graph.Links(node, links, 16);
+    game::PathLink links[48];
+    int count = graph.Links(node, links, 32);
+    // and the stitches, which is what makes one side of town reachable from
+    // the other at all.
+    {
+      const auto extra = g_sewn.find(current.key);
+      if (extra != g_sewn.end())
+        for (const game::PathLink& one : extra->second) {
+          if (count >= 48) break;
+          links[count++] = one;
+        }
+    }
     for (int i = 0; i < count; ++i) {
       const std::uint32_t key = NodeKey(links[i].area, links[i].index);
       if (key == current.key) continue;
@@ -1769,7 +1994,21 @@ bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
       open.push({cost + Distance2D(it->second.pos, goal.pos), key});
     }
   }
-  if (!found) return false;
+  if (!found) {
+    static unsigned long long moaned_ms = 0;
+    const unsigned long long now_ms = GetTickCount64();
+    if (now_ms - moaned_ms > 15000) {
+      moaned_ms = now_ms;
+      std::size_t nodes = 0;
+      for (int i = 0; i < kMapPathAreas; ++i)
+        nodes += graph.areas[i].nodes.size();
+      LOG_INFO("nav: no corridor from ({:.0f},{:.0f}) to ({:.0f},{:.0f}) - {} "
+               "nodes reached of the {} on the map, {} expansions{}",
+               from.x, from.y, to.x, to.y, known.size(), nodes, expanded,
+               expanded >= kCorridorExpansions ? " (ran out of room)" : "");
+    }
+    return false;
+  }
 
   // Back from the goal to the start, then forward along it until `along`
   // metres of it have been covered.
@@ -1781,7 +2020,10 @@ bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
     key = step->second;
   }
   std::reverse(way.begin(), way.end());
-  if (way.size() < 2) return false;
+  if (way.size() < 2) {
+    CorridorGaveUp("the way it found is a single node long");
+    return false;
+  }
   float gone = Distance2D(from, way.front());
   for (std::size_t i = 1; i < way.size(); ++i) {
     gone += Distance2D(way[i - 1], way[i]);
@@ -1791,7 +2033,9 @@ bool CorridorPoint(const Vec3& from, const Vec3& to, float along, Vec3* out) {
     }
   }
   *out = Vec3{way.back().x, way.back().y, way.back().z + kPedOrigin};
-  return Distance2D(*out, from) > kMinCorridorStep;
+  if (Distance2D(*out, from) > kMinCorridorStep) return true;
+  CorridorGaveUp("the whole way is shorter than a stage");
+  return false;
 }
 
 std::vector<Vec3> RememberedObstacles() {

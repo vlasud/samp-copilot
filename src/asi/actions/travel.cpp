@@ -68,6 +68,9 @@ constexpr int kPlanBudgetMs = 4;
 // still being walked, from this far before its end. A character that stops
 // to think every few metres is what "takes a few steps and pauses" is.
 constexpr float kPlanAheadMetres = 6.0f;
+// How often to look again while he is walking, whether or not the leg he is
+// on is running out.
+constexpr unsigned long long kRescanEveryMs = 5000;
 // How long a plan may take before he sets off in the meantime. The field
 // answers in a second or so, and the leg walked blind while it did - the
 // best way out of here, straight toward the target - went through whatever
@@ -90,6 +93,7 @@ float       g_arrived = kArrived;
 std::string g_note = "idle";
 float       g_best_straight = 0;
 unsigned long long g_next_plan_ms = 0;
+unsigned long long g_rescan_ms = 0;      // the next look while walking
 unsigned long long g_plan_started_ms = 0;
 Phase       g_phase = Phase::kIdle;
 Aim         g_aim = Aim::kDestination;
@@ -573,6 +577,7 @@ void TravelTo(const Vec3& destination, bool height_unknown,
   g_been_somewhere = false;
   g_best_straight = 0;
   g_next_plan_ms  = 0;
+  g_rescan_ms     = 0;
   g_greedy_legs   = 0;
   g_bridged = false;
   g_phase = Phase::kIdle;
@@ -695,9 +700,21 @@ void TravelTick() {
     TryCut(here, now, walk);
     // Near the end of a leg that is not the destination, the next one is
     // planned now, so he does not stop to think when he gets there.
-    if (!g_planner.active() && g_aim != Aim::kDestination &&
-        walk.remaining_m < kPlanAheadMetres && now >= g_next_plan_ms) {
+    const bool leg_running_out = g_aim != Aim::kDestination &&
+                                 walk.remaining_m < kPlanAheadMetres;
+    // And every few seconds whatever the leg is doing. A route is a picture
+    // of the world as it was when it was drawn, and by the time he is a
+    // hundred metres along it the traffic has moved, a gate has come down,
+    // somebody has parked across the pavement, and - the thing that matters
+    // most - the ground the plan could only guess at is now underfoot and
+    // read properly. Looking again while he walks costs a second and a half
+    // of thinking beside the frames; walking on a stale picture cost whole
+    // minutes.
+    const bool time_to_look_again = now >= g_rescan_ms;
+    if (!g_planner.active() && (leg_running_out || time_to_look_again) &&
+        now >= g_next_plan_ms) {
       g_next_plan_ms = now + kReplanGapMs;
+      g_rescan_ms = now + kRescanEveryMs;
       if (!Progress(straight)) return;
       Decide(here);
     }
