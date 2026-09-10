@@ -33,6 +33,8 @@
 //
 #include <cstdint>
 #include <string>
+#include <atomic>
+#include <thread>
 #include <vector>
 
 #include "game/world_query.hpp"
@@ -87,8 +89,14 @@ class Field {
 
   // Both ends lifted to the ped origin, a metre over the ground.
   void Start(const Vec3& from, const Vec3& to);
-  // One unit of work. True once there is nothing left to do.
+  // One unit of work, on the game thread. True once there is nothing left
+  // to do. Reading the world is the game thread's business; once the world
+  // has been read, the arithmetic over the grid goes to a thread of its own
+  // and this only asks whether it has finished.
   bool Step();
+  // Whether the grid work is away on its own thread, so a caller with a
+  // time budget can stop spinning and let the frame go.
+  bool waiting() const;
   bool finished() const;
   const FieldResult& result() const;
   // What a point of the finished field is: for looking at a cell the route
@@ -98,8 +106,17 @@ class Field {
 
  private:
   struct Work;
+  // One unit of work whatever the phase - the same machine the game thread
+  // and the worker both turn.
+  bool StepOnce();
+  void HandToTheWorker();
+  void WaitForTheWorker();
+
   Work* w_ = nullptr;
   FieldResult result_;
+  std::thread worker_;
+  std::atomic<bool> away_{false};      // the worker has it
+  std::atomic<bool> worker_done_{false};
 };
 
 // In one go, for a tool that asked and is waiting. Bounded by time.

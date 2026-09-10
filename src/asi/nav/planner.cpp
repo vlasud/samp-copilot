@@ -1470,6 +1470,9 @@ bool Planner::Step(int budget_ms) {
       result_ = job_->plan;
       return true;
     }
+    // The field has handed its grid to a thread of its own: there is
+    // nothing more this frame can usefully do, so let the frame go.
+    if (job_->stage == Job::Stage::kField && job_->field.waiting()) return false;
   } while (GetTickCount64() < until);
   return false;
 }

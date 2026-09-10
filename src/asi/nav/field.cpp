@@ -200,12 +200,20 @@ struct Field::Work {
 };
 
 Field::Field() = default;
-Field::~Field() { delete w_; }
+Field::~Field() {
+  // Never leave with the worker still turning the grid it is about to lose.
+  if (worker_.joinable()) worker_.join();
+  delete w_;
+}
 
-bool Field::finished() const { return w_ == nullptr || w_->phase == Work::Phase::kDone; }
+bool Field::finished() const {
+  if (away_.load()) return false;
+  return w_ == nullptr || w_->phase == Work::Phase::kDone;
+}
 const FieldResult& Field::result() const { return result_; }
 
 void Field::Start(const Vec3& from, const Vec3& to) {
+  WaitForTheWorker();
   delete w_;
   w_ = new Work;
   w_->from = from;
@@ -214,7 +222,48 @@ void Field::Start(const Vec3& from, const Vec3& to) {
   result_ = FieldResult{};
 }
 
+bool Field::waiting() const { return away_.load(); }
+
+void Field::WaitForTheWorker() {
+  if (worker_.joinable()) worker_.join();
+  away_.store(false);
+  worker_done_.store(false);
+}
+
+// Everything from the clearance on is arithmetic over the grid and touches
+// nothing of the game - the header of nav/grid says as much, and it is why
+// any of it can be tried on a made-up room in a test. So it goes to a
+// thread of its own and the game gets its frames back. Reading the world -
+// the ground, the paint - stays where it has to be, on the game thread.
+//
+// A field six hundred metres across is five and three-quarter million
+// cells; smoothing, ledges and the chamfer walk every one of them, and they
+// did it inside a single frame. That is the freeze.
+void Field::HandToTheWorker() {
+  away_.store(true);
+  worker_done_.store(false);
+  worker_ = std::thread([this]() {
+    while (w_ != nullptr && w_->phase != Work::Phase::kDone) StepOnce();
+    worker_done_.store(true);
+  });
+}
+
 bool Field::Step() {
+  if (away_.load()) {
+    if (!worker_done_.load()) return false;
+    WaitForTheWorker();
+    return true;
+  }
+  if (w_ == nullptr || w_->phase == Work::Phase::kDone) return true;
+  const bool done = StepOnce();
+  if (!done && w_ != nullptr && w_->phase == Work::Phase::kClearance) {
+    HandToTheWorker();
+    return false;
+  }
+  return done;
+}
+
+bool Field::StepOnce() {
   if (w_ == nullptr || w_->phase == Work::Phase::kDone) return true;
   Work& w = *w_;
   Grid& g = w.grid;
@@ -783,7 +832,7 @@ bool Field::Step() {
 }
 
 bool Field::At(const Vec3& p, CellInfo* out) const {
-  if (w_ == nullptr || out == nullptr) return false;
+  if (w_ == nullptr || out == nullptr || away_.load()) return false;
   const Grid& g = w_->grid;
   if (g.W == 0) return false;
   int ix, iy;
@@ -802,6 +851,9 @@ FieldResult PlanField(const Vec3& from, const Vec3& to, int deadline_ms) {
   field.Start(from, to);
   const unsigned long long until = GetTickCount64() + deadline_ms;
   while (!field.Step()) {
+    // The grid work is on its own thread; there is nothing for this one to
+    // do but wait for it, and waiting quietly beats spinning.
+    if (field.waiting()) Sleep(1);
     if (GetTickCount64() > until) {
       FieldResult out = field.result();
       out.note = "ran out of time";

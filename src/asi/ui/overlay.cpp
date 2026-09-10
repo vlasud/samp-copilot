@@ -947,12 +947,17 @@ void DrawWorld(bool everything) {
       float ax = 0, ay = 0, bx = 0, by = 0;
       const game::Vec3 a{leg.from.x, leg.from.y, leg.from.z - 0.9f};
       const game::Vec3 b{leg.to.x, leg.to.y, leg.to.z - 0.9f};
-      if (!game::ToScreen(a, &ax, &ay) || !game::ToScreen(b, &bx, &by)) continue;
+      // Cut where it passes the camera rather than dropped: the leg he is
+      // walking has its near end at his own feet, which is behind the
+      // camera as often as not, and the route kept vanishing for it.
+      if (!game::ToScreenLine(a, b, &ax, &ay, &bx, &by)) continue;
       const ImU32 colour = !leg.verified ? kLineUnsure
                            : leg.ok      ? kLineOk
                                          : kLineBlocked;
       draw->AddLine(ImVec2(ax, ay), ImVec2(bx, by), colour, 3.0f);
-      draw->AddCircle(ImVec2(bx, by), 5.0f, colour, 12, 2.0f);
+      float ex = 0, ey = 0;
+      if (game::ToScreen(b, &ex, &ey))
+        draw->AddCircle(ImVec2(ex, ey), 5.0f, colour, 12, 2.0f);
       if (everything && !leg.ok && !leg.why.empty())
         Shadowed(draw, ImVec2(bx + 8, by - 8), kLineBlocked, leg.why.c_str());
     }

@@ -109,7 +109,10 @@ std::atomic<int> g_calls_last_second{0};
 std::atomic<bool> g_reported_ceiling{false};
 std::atomic<int> g_ground_calls{0}, g_los_calls{0}, g_screen_calls{0};
 
-constexpr int kScreenCallsPerSecond = 2000;
+// The camera is read once a millisecond now rather than once a point, so
+// the arithmetic is all that is left and it is nothing. The allowance is
+// still an allowance, and still generous.
+constexpr int kScreenCallsPerSecond = 60000;
 std::atomic<unsigned long long> g_screen_second{0};
 std::atomic<int> g_screen_this_second{0};
 
@@ -422,43 +425,113 @@ bool CameraOrientation(float* radians) {
   return true;
 }
 
-bool ToScreen(const Vec3& world, float* sx, float* sy) {
-  if (!CallsTrusted()) return false;
-  // Cheaper than a world query - arithmetic on the camera - but not free, and
-  // taking it off the leash entirely let the node overlay make seventeen
-  // thousand of these in eleven seconds. Its own allowance, generous enough
-  // for everything drawn at any frame rate and still an allowance.
-  if (!TakeScreenSlot()) return false;
-  g_screen_calls.fetch_add(1, std::memory_order_relaxed);
-  const std::uintptr_t view = At(kTheCamera) + kViewMatrix;
-  if (At(kTheCamera) == 0 || !asi::mem::IsReadable(view, 0x40)) return false;
-  // right, up, at, pos - the basis the point is spread over, exactly as
-  // CMatrix::TransformPoint spreads it.
+// The camera, read once and kept for the frame. Reading it was the whole
+// cost of putting a point on the screen - twelve floats and two integers
+// out of the game's memory, for every point of every line - which is why
+// there was an allowance at all, and why a route with a few legs could find
+// the allowance already spent by the node overlay and simply not be drawn.
+// A route that comes and goes is worse than no route drawn at all: it is
+// the one thing a man watching has to go on.
+struct Lens {
   float m[12];
+  float width = 0, height = 0;
+  bool  good = false;
+  unsigned long long read_ms = 0;
+};
+Lens g_lens;
+
+const Lens& TheLens() {
+  const unsigned long long now = GetTickCount64();
+  if (g_lens.good && now == g_lens.read_ms) return g_lens;
+  g_lens.good = false;
+  g_lens.read_ms = now;
+  const std::uintptr_t camera = At(kTheCamera);
+  const std::uintptr_t view = camera + kViewMatrix;
+  if (camera == 0 || !asi::mem::IsReadable(view, 0x40)) return g_lens;
   const std::uint32_t rows[4] = {kMatrixRight, kMatrixUp, kMatrixAt, kMatrixPos};
   for (int r = 0; r < 4; ++r)
     for (int i = 0; i < 3; ++i)
-      if (!asi::mem::Read<float>(view + rows[r] + i * 4, &m[r * 3 + i])) return false;
+      if (!asi::mem::Read<float>(view + rows[r] + i * 4, &g_lens.m[r * 3 + i]))
+        return g_lens;
   std::int32_t width = 0, height = 0;
   if (!asi::mem::Read<std::int32_t>(At(kWidth), &width) ||
-      !asi::mem::Read<std::int32_t>(At(kHeight), &height) || width <= 0 || height <= 0)
-    return false;
+      !asi::mem::Read<std::int32_t>(At(kHeight), &height) || width <= 0 ||
+      height <= 0)
+    return g_lens;
+  g_lens.width = static_cast<float>(width);
+  g_lens.height = static_cast<float>(height);
+  g_lens.good = true;
+  return g_lens;
+}
 
-  const float vx = m[0] * world.x + m[3] * world.y + m[6] * world.z + m[9];
-  const float vy = m[1] * world.x + m[4] * world.y + m[7] * world.z + m[10];
-  const float depth = m[2] * world.x + m[5] * world.y + m[8] * world.z + m[11];
-  if (!(depth > 0.1f)) return false;             // behind the camera, or not a number
-  const float rd = 1.0f / depth;
-  const float x = static_cast<float>(width) * rd * vx;
-  const float y = static_cast<float>(height) * rd * vy;
+// Where a point falls in the camera's own frame: across, up, and how far in
+// front. All three are linear in the world position, so a point part way
+// along a line can be worked out by mixing the two ends - which is what
+// lets a line that runs off behind the camera be cut rather than dropped.
+struct InView { float across = 0, up = 0, depth = 0; };
+
+bool SeenFrom(const Lens& lens, const Vec3& world, InView* out) {
+  const float* m = lens.m;
+  out->across = m[0] * world.x + m[3] * world.y + m[6] * world.z + m[9];
+  out->up     = m[1] * world.x + m[4] * world.y + m[7] * world.z + m[10];
+  out->depth  = m[2] * world.x + m[5] * world.y + m[8] * world.z + m[11];
+  return out->depth == out->depth;      // not a number means a wrong matrix
+}
+
+constexpr float kNoNearer = 0.1f;      // in front of the camera by this much
+
+bool PutOnScreen(const Lens& lens, const InView& seen, float* sx, float* sy) {
+  if (!(seen.depth > kNoNearer)) return false;
+  const float rd = 1.0f / seen.depth;
+  const float x = lens.width * rd * seen.across;
+  const float y = lens.height * rd * seen.up;
   if (!(x == x) || !(y == y)) return false;
   // Far outside the window is not worth drawing, and is the shape a wrong
   // matrix would take.
-  if (x < -8.0f * width || x > 8.0f * width || y < -8.0f * height || y > 8.0f * height)
+  if (x < -8.0f * lens.width || x > 8.0f * lens.width ||
+      y < -8.0f * lens.height || y > 8.0f * lens.height)
     return false;
   *sx = x;
   *sy = y;
   return true;
+}
+
+bool ToScreen(const Vec3& world, float* sx, float* sy) {
+  if (!CallsTrusted()) return false;
+  if (!TakeScreenSlot()) return false;
+  g_screen_calls.fetch_add(1, std::memory_order_relaxed);
+  const Lens& lens = TheLens();
+  if (!lens.good) return false;
+  InView seen;
+  if (!SeenFrom(lens, world, &seen)) return false;
+  return PutOnScreen(lens, seen, sx, sy);
+}
+
+bool ToScreenLine(const Vec3& from, const Vec3& to, float* ax, float* ay,
+                  float* bx, float* by) {
+  if (!CallsTrusted()) return false;
+  if (!TakeScreenSlot()) return false;
+  g_screen_calls.fetch_add(1, std::memory_order_relaxed);
+  const Lens& lens = TheLens();
+  if (!lens.good) return false;
+  InView a, b;
+  if (!SeenFrom(lens, from, &a) || !SeenFrom(lens, to, &b)) return false;
+  // Both ends behind the camera: there is nothing of this line to draw.
+  // One end behind it: cut the line where it passes the camera and draw the
+  // rest. Dropping the whole leg was why the piece of route under his own
+  // feet - whose near end is always behind the camera - kept vanishing.
+  if (a.depth <= kNoNearer && b.depth <= kNoNearer) return false;
+  if (a.depth <= kNoNearer || b.depth <= kNoNearer) {
+    InView& behind = a.depth <= kNoNearer ? a : b;
+    const InView& front = a.depth <= kNoNearer ? b : a;
+    const float span = front.depth - behind.depth;
+    if (!(std::fabs(span) > 1e-6f)) return false;
+    const float t = (kNoNearer * 1.01f - behind.depth) / span;
+    behind.across += (front.across - behind.across) * t;
+    behind.up     += (front.up - behind.up) * t;
+    behind.depth   = kNoNearer * 1.01f;
+  }
+  return PutOnScreen(lens, a, ax, ay) && PutOnScreen(lens, b, bx, by);
 }
 
 }  // namespace gtabot::game

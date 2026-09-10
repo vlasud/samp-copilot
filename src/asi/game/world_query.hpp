@@ -101,6 +101,12 @@ bool LineClear(const Vec3& a, const Vec3& b, bool include_vehicles = true);
 // the camera.
 bool ToScreen(const Vec3& world, float* sx, float* sy);
 
+// Both ends of a line at once, cut where it passes the camera rather than
+// dropped when one end is behind it. False only when there is nothing of
+// the line in front of the camera at all.
+bool ToScreenLine(const Vec3& from, const Vec3& to, float* ax, float* ay,
+                  float* bx, float* by);
+
 // Whether the game itself has switched the player's controls off. This is
 // the flag SA-MP sets while a dialog is up, and the one the server sets by
 // freezing a player. A character that will not move while this is set is not
