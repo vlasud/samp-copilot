@@ -110,6 +110,8 @@ unsigned long long g_next_cut_ms = 0;
 unsigned long long g_room_next_ms = 0;
 constexpr unsigned long long kRoomEveryMs = 2500;
 constexpr float kRoomRadius = 22.0f;
+// How near the end of the trail counts as standing on it.
+constexpr float kTrailEndNear = 2.0f;
 constexpr float kThroughTheWayOut = 3.5f;
 Vec3 g_room_last_out{};
 constexpr unsigned long long kCutEveryMs = 700;
@@ -247,7 +249,16 @@ void Decide(const Vec3& here) {
     const bool known_reaches =
         known.size() >= 2 &&
         Distance2D(known.back(), g_destination) <= g_arrived + 1.5f;
-    if (known_reaches) {
+    // But not the same one again from its own end. The trail is made of
+    // squares he has stood in, so its last square can be a metre and a half
+    // short of the mark; he walks to it, the walk says it has arrived, the
+    // journey has not, and the very same route is handed out again. He
+    // stood four metres from a shop counter doing that for as long as
+    // anybody watched. Once he is standing on the end of it, the room is
+    // what is left to try.
+    const bool standing_on_its_end =
+        known.size() >= 2 && Distance2D(here, known.back()) < kTrailEndNear;
+    if (known_reaches && !standing_on_its_end) {
       g_indoors = true;
       g_route.assign(known.begin() + 1, known.end());
       WalkTo(g_route);
