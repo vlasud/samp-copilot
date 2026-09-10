@@ -125,6 +125,19 @@ def cmd_wait(args):
             last = note
             say("  %s" % note)
         if state.get("ready_to_travel"):
+            # One alt-tab before anything is measured. The game starts in
+            # exclusive fullscreen and the mod's windowed mode only takes at
+            # the first device reset; until then any focus change can leave
+            # it holding a lost device and rendering nothing, which reads in
+            # every test as a character who will not move. It cost most of a
+            # night before it was noticed.
+            here = os.path.dirname(os.path.abspath(__file__))
+            try:
+                subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File",
+                                os.path.join(here, "towindow.ps1")],
+                               capture_output=True, timeout=30)
+            except Exception:
+                pass
             say("ready at %s" % json.dumps(state.get("position", {})))
             return 0
         # Arming is ours to ask for; everything else is waiting.
