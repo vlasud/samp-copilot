@@ -300,6 +300,31 @@ def cmd_log(args):
     return 0
 
 
+def cmd_revive(args):
+    """Restart the game if it has stopped drawing.
+
+    The game hangs now and then - the window is there, not minimised, the
+    right size, and no frame has been drawn for two minutes. Nothing the mod
+    can do reaches it: the hook is intact, the game simply is not running its
+    loop. A test that meets this reads it as a character who will not move,
+    which cost most of a night before it was named. So the test asks first.
+    """
+    try:
+        client = connect(6)
+        status = client.tool("bot_status")
+        idle = (status.get("frame") or {}).get("idle_ms", 0)
+        if idle < args.idle_ms:
+            say("drawing: %d ms since the last frame" % idle)
+            return 0
+        say("no frame for %d ms - restarting the game" % idle)
+    except Exception as trouble:
+        say("the mod does not answer (%s) - restarting the game" % str(trouble)[:60])
+    cmd_quit(argparse.Namespace())
+    time.sleep(4)
+    cmd_launch(argparse.Namespace(timeout=180, host=HOST, port=PORT, nick=NICK))
+    return cmd_wait(argparse.Namespace(timeout=args.timeout))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -329,6 +354,11 @@ def main():
 
     p = sub.add_parser("stop", help="stop and stand movement down")
     p.set_defaults(run=cmd_stop)
+
+    p = sub.add_parser("revive", help="restart the game if it has stopped drawing")
+    p.add_argument("--idle-ms", type=int, default=20000, dest="idle_ms")
+    p.add_argument("--timeout", type=int, default=200)
+    p.set_defaults(run=cmd_revive)
 
     p = sub.add_parser("quit", help="close the game")
     p.set_defaults(run=cmd_quit)
