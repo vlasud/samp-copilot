@@ -350,6 +350,7 @@ the data:
 | `CNetGame::Pools` | nine consecutive heap pointers near the tail of CNetGame, found by that shape |
 | `CPlayerPool` slots | 1004 `CPlayerInfo*` followed by 1004 flags that are only ever 0 or 1 - a signature nothing else matches |
 | `std::string` | two plausible MSVC layouts; the one that yields a readable local player name is the one this client was built with |
+| `RakClient` | the pointer at CNetGame+0x3C9, four bytes ahead of the pools; accepted only when the code it leads to says what RakClient's code says - see "Reconnecting the client" |
 
 When any of that fails to line up, `get_world` reports `resolved: false` with a
 note saying where it stopped, rather than reporting something wrong.
@@ -391,6 +392,88 @@ string, and the slots at +0x2E.
 
 With players present the shape search still runs first and wins; the anchor is
 the fallback, and it says so in the log when it is what found the pool.
+
+## Reconnecting the client
+
+A gamemode under development is rebuilt and the server restarted a dozen times
+an hour. Everything else in that loop is down to about three seconds; starting
+GTA again is half a minute of it, and the client's own network layer can be
+asked to join again instead. `reconnect` does that, and the character is back
+in the world in half a second.
+
+The tricky part is that a wrong function pointer called through a vtable takes
+the session with it, so none of this is taken on a header's word. What made it
+establishable is that samp.dll's own game code sits in packed sections
+(`.poop0` to `.poop2`, and CNetGame's code cannot be read off the file at all),
+while the RakNet it links - RakClient and RakPeer - is plain code in `.text`.
+Disassembling the shipped samp.dll therefore settles the calls, and the live
+client confirms them:
+
+- **The pointer.** `CNetGame+0x3C9`, the slot four bytes ahead of the pools
+  pointer already established at +0x3CD, with the game state at +0x3BD that
+  the module already read on the other side of it. It is *not* at +0x04 the
+  way the public declaration suggests: that one points at the server info,
+  whose first word is the binary form of the host address.
+- **Two views of one object.** RakClient inherits both RakPeer and
+  RakClientInterface, so the compiler gives the object two vtables, and the
+  pointer CNetGame keeps at +0x3C9 is the object plus 0xDDE. That offset is
+  why the pointer looks unaligned, why a search for "a pointer whose target
+  starts with a samp.dll address" skipped over it, and why a search inside
+  CNetGame for the RakClient turned up nothing at all. The primary view is at
+  `CNetGame+0x00`, and in every session watched the two were exactly 0xDDE
+  apart.
+- **0xDDE comes out of the client's code, not out of that subtraction.** Every
+  interface slot that forwards to a method compiled for the primary view opens
+  with `sub ecx, 0xDDE`, and the tool reads the number out of that instruction
+  each time rather than carrying a constant.
+- **Slot 0 is the destructor.** `~RakClientInterface` is declared first, so the
+  vtable at samp.dll+0xD52E8 - fifty-five slots - opens with the deleting
+  destructor: `test byte ptr [esp+8], 1`, a call to `free`, `ret 4`. Taking
+  "Connect is slot 0" from RakNet's list of methods would have freed the
+  object and then called Connect on it.
+- **Slot 1 is Connect,** by what the function does rather than where it sits:
+  five stack arguments (`ret 0x14`), an opening `RakPeer::Disconnect(100, 0)`
+  on the primary view, `RakPeer::Initialize(1, clientPort, threadSleepTimer,
+  0)`, thirty-two player-list entries filled with `UNASSIGNED_PLAYER_ID`, and
+  `RakPeer::Connect(host, serverPort, password, (passwordBits + 7) / 8)` at the
+  end.
+- **Slot 2 is Disconnect,** and not by declaration order either: it is a
+  forwarder, and the function it forwards to is the same
+  `RakPeer::Disconnect` that Connect calls first. The tool checks that
+  agreement - Connect's first call and Disconnect's jump chain have to land on
+  one address - before it calls anything.
+- **The arguments are read off the live object.** `RakPeer::Initialize` stores
+  the network thread's sleep at RakPeer+0xC06, which is 5 on this client, so
+  the reconnect hands RakNet back what SA-MP handed it. The client port is 0:
+  the bound port in `myPlayerId` at RakPeer+0x231 is an ephemeral one, so the
+  client asked for none. Disconnect's block duration has to be non-zero or
+  RakNet skips sending the notification altogether and the server keeps the
+  old session until it times out.
+- **The open.mp client hooks Connect.** It puts a five-byte detour on the
+  function's entry and forwards all five `__thiscall` arguments - which is a
+  third witness to the signature, and the reason the runtime check starts past
+  those five bytes instead of matching the prologue whole. SA-MP's own connect
+  goes through the same detour, so calling the slot is still the client's
+  ordinary path.
+
+What the game state at +0x3BD does, watched on a live join: 9 waiting to
+connect, 13 connecting, 15 waiting to join, 14 connected. `reconnect` writes 13
+before it calls Connect, because that is the state the client's own connect
+leaves behind and the state its packet handling takes the server's acceptance
+in.
+
+Two things worth knowing before leaning on it:
+
+- **There is a case only a restart fixes.** Pointed at a closed port, the
+  client tries for about thirty-five seconds and then gives the CNetGame
+  object up - after that there is nothing to reconnect through, and the tool
+  says so instead of calling anything.
+- **A rejoin that overlaps a session the same server still holds gets dropped.**
+  Measured twice, at 9.8 seconds both times: the client joins in half a
+  second, plays, and then the server closes the connection while it finishes
+  with the session that was there before. After a server restart there is no
+  such session, and a rejoin into a server that has already let go of the old
+  one stayed up for as long as it was watched.
 
 ## SA-MP versions
 
@@ -579,7 +662,10 @@ Working: the frame hook, the game-thread bridge, the MCP server, the overlay,
 the world reading and the chat log described above - including on a server
 where nobody else is connected - and the standable / walkable / route planning
 that reads the game's path graph and asks its collision. `read_memory` reads a
-run of words by address when a layout has to be settled by hand.
+run of words by address when a layout has to be settled by hand. `reconnect`
+puts the client back in the world without restarting GTA, in half a second
+measured, which is what a gamemode rebuild loop spends the rest of its time
+waiting for.
 
 Not yet: making the character walk the route. That is input synthesis, and it
 sits on top of everything above.

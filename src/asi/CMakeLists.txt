@@ -48,6 +48,7 @@ add_library(bot MODULE
   samp/textdraws.cpp
   samp/login.cpp
   samp/discovery.cpp
+  samp/reconnect.cpp
   samp/bubbles.cpp
   samp/chat.cpp
   samp/checkpoints.cpp

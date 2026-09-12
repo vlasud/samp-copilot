@@ -36,6 +36,7 @@
 #include "samp/keys.hpp"
 #include "samp/labels.hpp"
 #include "samp/objects.hpp"
+#include "samp/reconnect.hpp"
 #include "samp/textdraws.hpp"
 #include "samp/login.hpp"
 #include "samp/world.hpp"
@@ -2255,6 +2256,26 @@ void RegisterTools(Server* server) {
         return Rpc::RunOnGameThread(
             [args] { return asi::ProbeMemory(args); },
             whole_process ? kScanTimeoutMs : kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
+      "reconnect",
+      "Rejoins the server without restarting the game - what a development "
+      "loop needs after the server was restarted with a new gamemode build. "
+      "Asks the client's own network layer to connect again to the address the "
+      "launcher was given; the character is back in the world in half a second "
+      "instead of the half minute GTA takes to load. Answers what it asked "
+      "for, not whether the join finished: poll ready until it says spawned. "
+      "One case it cannot help with: once the client has given up on reaching "
+      "a server it drops the object this goes through, and only starting the "
+      "game again makes another. And a rejoin into a server still holding the "
+      "session from a moment ago tends to be closed again ten seconds later, "
+      "while that server finishes with it.",
+      NoArguments(),
+      [](const json&) {
+        return Rpc::RunOnGameThread([] { return samp::Reconnect(); },
+                                    kFastTimeoutMs);
       },
   });
 
