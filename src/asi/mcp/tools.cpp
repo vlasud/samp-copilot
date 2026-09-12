@@ -2267,14 +2267,33 @@ void RegisterTools(Server* server) {
       "launcher was given; the character is back in the world in half a second "
       "instead of the half minute GTA takes to load. Answers what it asked "
       "for, not whether the join finished: poll ready until it says spawned. "
-      "One case it cannot help with: once the client has given up on reaching "
-      "a server it drops the object this goes through, and only starting the "
-      "game again makes another. And a rejoin into a server still holding the "
-      "session from a moment ago tends to be closed again ten seconds later, "
-      "while that server finishes with it.",
-      NoArguments(),
-      [](const json&) {
-        return Rpc::RunOnGameThread([] { return samp::Reconnect(); },
+      "Unfinished, and it matters: the connect and the join handshake run, but "
+      "the client keeps the character it already had instead of spawning "
+      "again, so the server ends up with a player who joined and never "
+      "spawned - a gamemode that checks for that will kick him about ten "
+      "seconds in. Watch for ready.spawned dipping to false and back: that, "
+      "not spawned being true, is what says the entry was replayed. One case "
+      "it cannot help with at all: once the client has given up on reaching a "
+      "server it drops the object this goes through, and only starting the "
+      "game again makes another.",
+      {{"type", "object"},
+       {"properties",
+        {{"route",
+          {{"type", "string"},
+           {"enum", json::array({"state", "part-then-state", "calls"})},
+           {"description",
+            "How to get back in. \"state\" puts the client back to waiting to "
+            "connect and lets its own code do the rest, which is the way in "
+            "that replays the whole join; \"part-then-state\" asks for the "
+            "disconnect first so the server is told at once; \"calls\" drives "
+            "RakClient::Disconnect and Connect directly, which reconnects but "
+            "does not replay the join. Defaults to part-then-state."}}}}}},
+      [](const json& args) {
+        const std::string route = args.value("route", std::string("part-then-state"));
+        samp::Route which = samp::Route::kPartThenState;
+        if (route == "state") which = samp::Route::kState;
+        else if (route == "calls") which = samp::Route::kCalls;
+        return Rpc::RunOnGameThread([which] { return samp::Reconnect(which); },
                                     kFastTimeoutMs);
       },
   });

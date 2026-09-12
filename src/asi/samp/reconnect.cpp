@@ -36,12 +36,15 @@ constexpr int kDisconnectSlot = 2;
 constexpr std::uint32_t kThreadSleepTimer = 0xC06;
 constexpr int kDefaultSleepTimer = 5;
 
-// The state the client itself holds while a connect is in flight, and the one
-// its packet handling takes the server's acceptance in. Writing it is what
-// tells CNetGame that the session it thought it had is over.
-constexpr std::int32_t kGameStateConnecting = 13;
-constexpr std::int32_t kGameStateConnected  = 14;
-constexpr std::int32_t kGameStateAwaitJoin  = 15;
+// The states CNetGame holds on the way in, watched in this order on a live
+// join: waiting to connect, connecting, waiting to join, connected. The first
+// is the one the client connects out of by itself - about two seconds after it
+// gets there, its own Process calls its own Connect - which is the whole point
+// of writing it rather than calling anything.
+constexpr std::int32_t kGameStateWaitConnect = 9;
+constexpr std::int32_t kGameStateConnecting   = 13;
+constexpr std::int32_t kGameStateConnected    = 14;
+constexpr std::int32_t kGameStateAwaitJoin    = 15;
 
 // Long enough for RakNet to put the disconnect notification on the wire, so
 // the server frees the slot now instead of timing the old session out a minute
@@ -203,9 +206,18 @@ Calls ReadCalls(std::uintptr_t vtable, const asi::mem::Module& samp) {
   return out;
 }
 
+const char* RouteName(Route route) {
+  switch (route) {
+    case Route::kState:         return "state";
+    case Route::kPartThenState: return "part-then-state";
+    case Route::kCalls:         return "calls";
+  }
+  return "?";
+}
+
 }  // namespace
 
-json Reconnect() {
+json Reconnect(Route route) {
   const Client client = Detect();
   if (client.base == 0) return json{{"error", "samp.dll is not loaded"}};
   if (client.version != Version::k037R1)
@@ -223,89 +235,110 @@ json Reconnect() {
                  "stops trying to reach a server, and from there only starting "
                  "the game again can make another one"}};
 
-  std::uint32_t rak = 0;
-  if (!asi::mem::Read<std::uint32_t>(net_game + kRakClientView, &rak) || rak == 0)
-    return json{{"error", "CNetGame is not holding a RakClient"}};
-  std::uint32_t vtable = 0;
-  if (!asi::mem::Read<std::uint32_t>(rak, &vtable) || !samp.contains(vtable))
-    return json{{"error", "the RakClientInterface vtable at " + Hex(vtable) +
-                              " is not inside samp.dll"}};
-
-  const Calls calls = ReadCalls(vtable, samp);
-  if (!calls.error.empty()) return json{{"error", calls.error}};
-
-  // The primary view of the same object, at the offset its own thunks name. It
-  // is a second C++ object as far as the compiler is concerned, so it carries a
-  // vtable of its own, and that is what says the offset landed where it should.
-  const std::uintptr_t peer = rak - calls.interface_at;
-  std::uint32_t peer_vtable = 0;
-  if (!asi::mem::Read<std::uint32_t>(peer, &peer_vtable) || !samp.contains(peer_vtable))
-    return json{{"error", "the object " + Hex(calls.interface_at) +
-                              " back from the interface has no vtable of its "
-                              "own inside samp.dll, so it is not RakClient"}};
-
-  // The launcher's address first; the client's own copy is the fallback, and it
-  // is only there while the netgame object still holds one.
-  std::string host = CommandLineValue("-h ");
-  const std::string port_text = CommandLineValue("-p ");
-  if (host.empty()) host = asi::mem::ReadCString(net_game + 0x20, 64);
-  int port = port_text.empty() ? 0 : std::atoi(port_text.c_str());
-  if (port <= 0 || port > 65535) {
-    std::uint16_t stored = 0;
-    if (asi::mem::Read<std::uint16_t>(net_game + 0x225, &stored)) port = stored;
-  }
-  if (host.empty() || port <= 0 || port > 65535)
-    return json{{"error", "no address to reconnect to: host '" + host + "', port " +
-                              std::to_string(port)}};
-
-  std::int32_t sleep_timer = 0;
-  if (!asi::mem::Read<std::int32_t>(peer + kThreadSleepTimer, &sleep_timer) ||
-      sleep_timer <= 0 || sleep_timer > 1000)
-    sleep_timer = kDefaultSleepTimer;
-
   const std::string was = ConnectionState();
   std::int32_t state = 0;
   asi::mem::Read<std::int32_t>(net_game + kGameState, &state);
-
-  // Disconnect first when there is still something to disconnect. Connect
-  // would do it itself, but without a block duration, and then the server would
-  // hold the old session until it timed out and turn the rejoin away.
+  // Whether there is still a session to end. The client holds these two while
+  // it believes it is in a server, which it goes on believing after the server
+  // has closed the connection on it.
   const bool held = state == kGameStateConnected || state == kGameStateAwaitJoin;
-  if (held) {
-    const auto disconnect = reinterpret_cast<DisconnectFn>(calls.disconnect);
-    disconnect(reinterpret_cast<void*>(rak), kDisconnectBlockMs, 0);
+
+  json out{{"route", RouteName(route)}, {"was", was}, {"had_a_session", held}};
+
+  // Only the routes that call something need the RakClient found and its code
+  // checked. Putting the state back needs neither, which is the whole
+  // attraction of it.
+  Calls calls;
+  std::uint32_t rak = 0;
+  std::string host;
+  int port = 0;
+  std::int32_t sleep_timer = kDefaultSleepTimer;
+  if (route != Route::kState) {
+    if (!asi::mem::Read<std::uint32_t>(net_game + kRakClientView, &rak) || rak == 0)
+      return json{{"error", "CNetGame is not holding a RakClient"}};
+    std::uint32_t vtable = 0;
+    if (!asi::mem::Read<std::uint32_t>(rak, &vtable) || !samp.contains(vtable))
+      return json{{"error", "the RakClientInterface vtable at " + Hex(vtable) +
+                                " is not inside samp.dll"}};
+    calls = ReadCalls(vtable, samp);
+    if (!calls.error.empty()) return json{{"error", calls.error}};
+
+    // The primary view of the same object, at the offset its own thunks name.
+    // It is a second C++ object as far as the compiler is concerned, so it
+    // carries a vtable of its own, and that is what says the offset landed
+    // where it should.
+    const std::uintptr_t peer = rak - calls.interface_at;
+    std::uint32_t peer_vtable = 0;
+    if (!asi::mem::Read<std::uint32_t>(peer, &peer_vtable) || !samp.contains(peer_vtable))
+      return json{{"error", "the object " + Hex(calls.interface_at) +
+                                " back from the interface has no vtable of its "
+                                "own inside samp.dll, so it is not RakClient"}};
+    if (!asi::mem::Read<std::int32_t>(peer + kThreadSleepTimer, &sleep_timer) ||
+        sleep_timer <= 0 || sleep_timer > 1000)
+      sleep_timer = kDefaultSleepTimer;
+    out["rak_client"] = Hex(rak);
+    out["interface_at"] = Hex(calls.interface_at);
+    if (calls.connect_detoured)
+      out["connect_detoured"] = "something is hooking Connect - the open.mp "
+                                "client does, and SA-MP's own connect goes "
+                                "through it as well";
   }
 
-  const bool state_written = WriteInt32(net_game + kGameState, kGameStateConnecting);
+  if (route == Route::kCalls) {
+    // The launcher's address first; the client's own copy is the fallback, and
+    // it is only there while the netgame object still holds one.
+    host = CommandLineValue("-h ");
+    const std::string port_text = CommandLineValue("-p ");
+    if (host.empty()) host = asi::mem::ReadCString(net_game + 0x20, 64);
+    port = port_text.empty() ? 0 : std::atoi(port_text.c_str());
+    if (port <= 0 || port > 65535) {
+      std::uint16_t stored = 0;
+      if (asi::mem::Read<std::uint16_t>(net_game + 0x225, &stored)) port = stored;
+    }
+    if (host.empty() || port <= 0 || port > 65535)
+      return json{{"error", "no address to reconnect to: host '" + host + "', port " +
+                                std::to_string(port)}};
+    out["host"] = host;
+    out["port"] = port;
+    out["thread_sleep_timer"] = sleep_timer;
+  }
 
-  const auto connect = reinterpret_cast<ConnectFn>(calls.connect);
-  const bool asked = connect(reinterpret_cast<void*>(rak), host.c_str(),
-                             static_cast<std::uint16_t>(port), 0, 0, sleep_timer);
+  // Ask for the disconnect where the route says to, so the server is told at
+  // once. The client's own connect does disconnect first, but on its own
+  // terms; asking here blocks long enough for RakNet to put the notification
+  // on the wire.
+  if (held && route != Route::kState) {
+    const auto disconnect = reinterpret_cast<DisconnectFn>(calls.disconnect);
+    disconnect(reinterpret_cast<void*>(rak), kDisconnectBlockMs, 0);
+    out["parted"] = true;
+  }
+
+  const std::int32_t write_state =
+      route == Route::kCalls ? kGameStateConnecting : kGameStateWaitConnect;
+  if (!WriteInt32(net_game + kGameState, write_state))
+    return json{{"error", "the game state at CNetGame+0x3BD could not be written, "
+                          "and nothing else here is worth doing without it"}};
+  out["state_written"] = write_state;
+
+  if (route == Route::kCalls) {
+    const auto connect = reinterpret_cast<ConnectFn>(calls.connect);
+    out["asked"] = connect(reinterpret_cast<void*>(rak), host.c_str(),
+                           static_cast<std::uint16_t>(port), 0, 0, sleep_timer);
+    out["note"] = out["asked"].get<bool>()
+                      ? "the client is joining again - poll ready until it says "
+                        "spawned; the world reads again once the pool refills"
+                      : "the client refused the connect call";
+  } else {
+    out["note"] = "the client is back to waiting to connect and does the rest "
+                  "itself, about two seconds from now - poll ready until it "
+                  "says spawned";
+  }
 
   // Whatever the pools held belonged to the session that just ended.
   ForgetLayout();
 
-  LOG_INFO("reconnect: asked the client to join {}:{} again (was {}, sleep {}) -> {}",
-           host, port, was, sleep_timer, asked);
-
-  json out{{"asked", asked},
-           {"host", host},
-           {"port", port},
-           {"was", was},
-           {"disconnected", held},
-           {"rak_client", Hex(rak)},
-           {"interface_at", Hex(calls.interface_at)},
-           {"thread_sleep_timer", sleep_timer}};
-  if (calls.connect_detoured)
-    out["connect_detoured"] = "something is hooking Connect - the open.mp "
-                              "client does, and SA-MP's own connect goes "
-                              "through it as well";
-  if (!state_written)
-    out["warning"] = "the game state could not be written, so the client may "
-                     "take the acceptance for a session it already has";
-  out["note"] = asked ? "the client is joining again - poll ready until it says "
-                        "spawned; the world reads again once the pool refills"
-                      : "the client refused the connect call";
+  LOG_INFO("reconnect: route {}, was {}, state written {} -> {}", RouteName(route), was,
+           write_state, out.dump());
   return out;
 }
 

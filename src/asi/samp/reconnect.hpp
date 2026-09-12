@@ -16,10 +16,23 @@
 
 namespace gtabot::samp {
 
-// Game thread only. Asks the client to disconnect (if it still holds a
-// connection) and connect again to the address the launcher was given.
-// Reports what it found and what it did; never throws. When any check fails
-// it calls nothing at all and says which check it was.
-json Reconnect();
+// Which way back in to take. Under test: a client that reconnects but does not
+// replay its own way in leaves the server with a player who joined and never
+// spawned, and a gamemode is right to throw that out.
+enum class Route {
+  // Put CNetGame back in "waiting to connect" and let its own Process do the
+  // connecting, the way it does on the way into the game.
+  kState,
+  // The same, with the disconnect asked for first so the server is told at
+  // once rather than on the client's own terms.
+  kPartThenState,
+  // Call RakClient::Disconnect and RakClient::Connect directly.
+  kCalls,
+};
+
+// Game thread only. Asks the client to join the server again, by the route
+// given. Reports what it found and what it did; never throws. When any check
+// fails it calls nothing at all and says which check it was.
+json Reconnect(Route route);
 
 }  // namespace gtabot::samp

@@ -462,18 +462,63 @@ before it calls Connect, because that is the state the client's own connect
 leaves behind and the state its packet handling takes the server's acceptance
 in.
 
-Two things worth knowing before leaning on it:
+### What it does not do yet: replay the way in
 
-- **There is a case only a restart fixes.** Pointed at a closed port, the
-  client tries for about thirty-five seconds and then gives the CNetGame
-  object up - after that there is nothing to reconnect through, and the tool
-  says so instead of calling anything.
-- **A rejoin that overlaps a session the same server still holds gets dropped.**
-  Measured twice, at 9.8 seconds both times: the client joins in half a
-  second, plays, and then the server closes the connection while it finishes
-  with the session that was there before. After a server restart there is no
-  such session, and a rejoin into a server that has already let go of the old
-  one stayed up for as long as it was watched.
+The connect works and the join handshake runs - 9, 13, 15, 14 in half a second
+- but **the client does not replay its own entry**, and a gamemode is right to
+throw the result out. Read from the server side by the gamemode's own log, a
+reconnect looks like this:
+
+```
+[part] Lo_Vlasud has left (0:1)
+[join] Lo_Vlasud
+[AntiCheat] Lo_Vlasud (id 0): DeathEvasion - playing while server-dead
+[AntiCheat] Lo_Vlasud (id 0): DeathEvasion - playing while server-dead
+[AntiCheat] Kicking Lo_Vlasud (id 0): score 1.20/1.00, 2 violations total
+```
+
+The client keeps the character it already had and goes on sending on-foot sync,
+while the server has a player who joined and never spawned - its alive flag is
+set on spawn - so "dead but playing" is exactly what the server sees. The kick
+lands about ten seconds in, measured three times.
+
+Seen from in here the same thing shows up as `ready.spawned` never dipping:
+on a real way in the character does not exist for a moment and then does, and
+after a reconnect he simply never stops existing. So that dip, not
+`ready.spawned` being true, is what says the entry was replayed.
+
+What has been ruled out:
+
+- **It is not the route.** Calling RakClient::Connect and letting CNetGame's
+  own Process do the connecting from "waiting to connect" both reconnect in
+  half a second, and neither replays the spawn. The client's own connect does
+  not reset the local player either.
+- **It is not a flag at the head of the local player.** CLocalPlayer is at the
+  player pool + 0x2F48 (the pool itself is the seventh of the nine, at
+  pools+0x18). Dumped either side of a real spawn, its first 0x300 bytes differ
+  in two two-byte counters and nothing else, and CNetGame's first 0x400 bytes
+  do not differ at all. Whatever the entry hangs on, it is not a "spawned" bit
+  there.
+- **It is not the overlapping session.** That was the first reading of the
+  ten-second kick and it was wrong: the gamemode's log names the anti-cheat,
+  not a duplicate login.
+
+What is still unknown is the useful part: SA-MP carries a
+`Lost connection to the server. Reconnecting..` path of its own, which is a
+different message from the `Server closed the connection.` the client prints
+when a server closes cleanly - and that one demonstrably does not tear
+anything down. The reconnecting path is likely the timeout path, the one a
+server that simply stops answering produces, and it is the path that would
+have to reset the local player for its own retry to work. Two ways in to try:
+`RakClient::SetTimeoutTime` with a tiny value, so RakNet declares the
+connection lost and the client's own path runs; or pushing a disconnection
+notification into RakNet's receive queue with `PushBackPacket`, which needs
+RakNet's Packet layout for this build. Neither slot is identified yet.
+
+And there is one case only a restart fixes: pointed at a closed port, the
+client tries for about thirty-five seconds and then gives the CNetGame object
+up. After that there is nothing to reconnect through, and the tool says so
+instead of calling anything.
 
 ## SA-MP versions
 
@@ -662,10 +707,13 @@ Working: the frame hook, the game-thread bridge, the MCP server, the overlay,
 the world reading and the chat log described above - including on a server
 where nobody else is connected - and the standable / walkable / route planning
 that reads the game's path graph and asks its collision. `read_memory` reads a
-run of words by address when a layout has to be settled by hand. `reconnect`
-puts the client back in the world without restarting GTA, in half a second
-measured, which is what a gamemode rebuild loop spends the rest of its time
-waiting for.
+run of words by address when a layout has to be settled by hand.
+
+Half working: `reconnect` gets the client connected and joined again without
+restarting GTA, in half a second measured - but it does not make the client
+replay its own way in, so the server is left with a player who never spawned.
+See "What it does not do yet" above for what that looks like and what has been
+ruled out.
 
 Not yet: making the character walk the route. That is input synthesis, and it
 sits on top of everything above.
