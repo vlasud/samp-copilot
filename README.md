@@ -548,10 +548,18 @@ being the seventh of the nine, at pools+0x18), and its first 0x300 bytes differ
 either side of a real spawn by two counters and nothing else. There was no bit
 to flip, because the entry is not a flag - it is the whole sequence.
 
-One case remains that only a restart fixes: pointed at a closed port, the
-client tries for about thirty-five seconds and then gives the CNetGame object
-up. After that there is nothing to reconnect through, and the tool says so
-instead of calling anything.
+One case remains with no way back from in here, and it is worth being exact
+about, because the first note written here was wrong. All of this goes through
+CNetGame, and the client makes one only when it first tries to reach a server.
+Pointed at a closed port it does **not** give that object up: it keeps
+retrying, watched cycling between connecting and waiting to connect on about a
+minute, until the process itself exits a couple of cycles later. The earlier
+claim that it dropped the object after thirty-five seconds was a reading of the
+process exiting and the launcher starting another one, not of the client
+letting go. So the window where the mod answers and there is no session to put
+back is really the game's own startup - and there the refusal names the command
+that starts the game again, with the address this client was given filled in,
+since by then the client cannot be asked for it.
 
 ## SA-MP versions
 

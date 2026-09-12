@@ -391,11 +391,29 @@ json Reconnect(Route route) {
   if (!samp.valid()) return json{{"error", "samp.dll has no module entry"}};
 
   std::uint32_t net_game = 0;
-  if (!asi::mem::Read<std::uint32_t>(client.base + 0x21A0F8, &net_game) || net_game == 0)
+  if (!asi::mem::Read<std::uint32_t>(client.base + 0x21A0F8, &net_game) || net_game == 0) {
+    // The one case with no way back from in here: all of this goes through
+    // CNetGame, and the client makes one only when it first tries to reach a
+    // server. So the refusal names the command that starts the game again,
+    // filled in with the address this client was given - whoever reads this
+    // cannot ask the client for it any more.
+    const std::string host = CommandLineValue("-h ");
+    const std::string port = CommandLineValue("-p ");
+    const std::string nick = CommandLineValue("-n ");
+    std::string again = "python tools/testrun.py quit, then python tools/testrun.py launch";
+    if (!host.empty()) again += " --host " + host;
+    if (!port.empty()) again += " --port " + port;
+    if (!nick.empty()) again += " --nick " + nick;
     return json{{"error",
-                 "the client has no CNetGame: it gives the object up once it "
-                 "stops trying to reach a server, and from there only starting "
-                 "the game again can make another one"}};
+                 "the client has no CNetGame, and everything here goes through "
+                 "one: it makes one when it first tries to reach a server, so "
+                 "this client has either not got that far yet or has stopped "
+                 "trying, and nothing in here can make another"},
+                {"next",
+                 "if the game is still starting up, wait and ask again; "
+                 "otherwise it has to be started over, which is the one thing "
+                 "this cannot do for itself: " + again}};
+  }
 
   const std::string was = ConnectionState();
   std::int32_t state = 0;
