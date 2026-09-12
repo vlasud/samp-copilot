@@ -23,6 +23,64 @@ namespace {
 constexpr std::uint32_t kGameState     = 0x3BD;
 constexpr std::uint32_t kRakClientView = 0x3C9;
 
+// CNetGame::ShutdownForRestart, the client's own answer to a server that went
+// away under it. It is what makes the difference between reconnecting and
+// coming back properly: it destroys every remote player, takes the local
+// player down, resets all nine pools, and puts the game state in "restarting"
+// - so the way back in has to be replayed from the start, spawn included,
+// which is the only thing that leaves the server with a player who spawned.
+//
+// The address is where the public 0.3.7-R1 declarations say it is, but that is
+// only where to look: what accepts it is the code in this client. The checks
+// below ask it to write 18 to the game state offset this module established on
+// its own, to reach the pools through the offset it established on its own,
+// and - the part nothing else would satisfy - to hand the chat a string that
+// reads "The server is restarting..", which is the message the client was
+// watched printing when the server really did restart under it.
+constexpr std::uint32_t kShutdownForRestart = 0xA060;
+constexpr unsigned char kShutdownPrologue[] = {
+    0x53, 0x55, 0x56, 0x57,  // push ebx, ebp, esi, edi
+    0x33, 0xDB, 0x33, 0xFF,  // xor ebx, ebx; xor edi, edi
+    0x8B, 0xF1, 0x33, 0xED,  // mov esi, ecx; xor ebp, ebp
+};
+// mov dword ptr [esi + 0x3BD], 18
+constexpr unsigned char kShutdownWritesState[] = {0xC7, 0x86, 0xBD, 0x03, 0x00,
+                                                  0x00, 0x12, 0x00, 0x00, 0x00};
+constexpr char kRestartMessage[] = "The server is restarting..";
+
+using ShutdownForRestartFn = void(__thiscall*)(void* net_game);
+
+// And the handler that calls it: what the client runs when the server it was
+// in goes away. Watched end to end when the server really was restarted under
+// a client standing in the world, it is the whole recovery in one call -
+// disconnect, say so, tear the session down, and go back to waiting to
+// connect, out of which its own Process rejoins and replays the entry, spawn
+// included. Reproducing its steps by hand got everything but the last one, and
+// the last one is the one that spawns the character.
+//
+// Its argument is the packet that brought the news, and it is never read - the
+// body touches the stack once, to clean up after the chat call - so it is
+// called with nothing.
+constexpr std::uint32_t kConnectionLost = 0xA800;
+constexpr unsigned char kLostPrologue[] = {
+    0x57,                                // push edi
+    0x8B, 0xF9,                          // mov edi, ecx
+    0x8B, 0x8F, 0xC9, 0x03, 0x00, 0x00,  // mov ecx, [edi + 0x3C9]  (m_pRakClient)
+    0x85, 0xC9,                          // test ecx, ecx
+    0x74, 0x09,                          // je past the call
+    0x8B, 0x01,                          // mov eax, [ecx]          (its vtable)
+    0x6A, 0x00,                          // push 0
+    0x6A, 0x00,                          // push 0
+    0xFF, 0x50, 0x08,                    // call [eax + 8]          (Disconnect)
+};
+// mov dword ptr [edi + 0x3BD], 9 - the last thing it does, and the step that
+// makes the difference between a client that joins and one that spawns.
+constexpr unsigned char kLostWritesWaitConnect[] = {0xC7, 0x87, 0xBD, 0x03, 0x00,
+                                                     0x00, 0x09, 0x00, 0x00, 0x00};
+constexpr char kLostMessage[] = "Lost connection to the server. Reconnecting..";
+
+using ConnectionLostFn = void(__thiscall*)(void* net_game, void* packet);
+
 // RakClientInterface's vtable, in the order RakNet declares it: the destructor
 // first, which is why calling slot 0 for Connect would free the object instead
 // of joining a server. Both slots are checked against the code they point at
@@ -37,14 +95,15 @@ constexpr std::uint32_t kThreadSleepTimer = 0xC06;
 constexpr int kDefaultSleepTimer = 5;
 
 // The states CNetGame holds on the way in, watched in this order on a live
-// join: waiting to connect, connecting, waiting to join, connected. The first
-// is the one the client connects out of by itself - about two seconds after it
-// gets there, its own Process calls its own Connect - which is the whole point
-// of writing it rather than calling anything.
-constexpr std::int32_t kGameStateWaitConnect = 9;
+// join: 9 waiting to connect, 13 connecting, 15 waiting to join, 14
+// connected. Only the two that mean "there is a session to end" and the one
+// the bare reconnect leaves behind are needed here.
 constexpr std::int32_t kGameStateConnecting   = 13;
 constexpr std::int32_t kGameStateConnected    = 14;
 constexpr std::int32_t kGameStateAwaitJoin    = 15;
+// The one it holds while it puts itself back into a server that went away
+// under it is 18, and nothing here writes it: the client's own restart path
+// does, and that is reported back as state_left.
 
 // Long enough for RakNet to put the disconnect notification on the wire, so
 // the server frees the slot now instead of timing the old session out a minute
@@ -206,11 +265,114 @@ Calls ReadCalls(std::uintptr_t vtable, const asi::mem::Module& samp) {
   return out;
 }
 
+// Finds the client's own restart path and proves it is that, out of the code
+// itself. Returns 0 with a reason when anything fails to line up.
+std::uintptr_t FindShutdownForRestart(const asi::mem::Module& samp, std::string* why) {
+  const std::uintptr_t at = samp.base + kShutdownForRestart;
+  unsigned char code[0x200] = {};
+  if (asi::mem::ReadGuarded(at, code, sizeof(code)) != sizeof(code)) {
+    *why = "the restart path at " + Hex(at) + " cannot be read";
+    return 0;
+  }
+  if (std::memcmp(code, kShutdownPrologue, sizeof(kShutdownPrologue)) != 0) {
+    *why = "the code at " + Hex(at) + " does not begin the way the client's "
+           "restart path does";
+    return 0;
+  }
+  bool writes_state = false;
+  for (std::size_t i = 0; i + sizeof(kShutdownWritesState) <= sizeof(code); ++i) {
+    if (std::memcmp(code + i, kShutdownWritesState, sizeof(kShutdownWritesState)) == 0) {
+      writes_state = true;
+      break;
+    }
+  }
+  if (!writes_state) {
+    *why = "the code at " + Hex(at) + " never puts the game state into "
+           "restarting, so it is not the path that does this";
+    return 0;
+  }
+  // And it has to say so. Every `push imm32` in the body is followed to see
+  // whether it is the message the client prints when a server restarts under
+  // it; nothing else in the client would be pushing that string.
+  for (std::size_t i = 0; i + 5 <= sizeof(code); ++i) {
+    if (code[i] != 0x68) continue;
+    std::uint32_t pushed = 0;
+    std::memcpy(&pushed, code + i + 1, sizeof(pushed));
+    if (!samp.contains(pushed)) continue;
+    if (asi::mem::ReadCString(pushed, sizeof(kRestartMessage) + 4) == kRestartMessage)
+      return at;
+  }
+  *why = "the code at " + Hex(at) + " does not print \"" + kRestartMessage +
+         "\", which is how the client's own restart path ends";
+  return 0;
+}
+
+// Finds the recovery the client runs for itself, and proves it out of the code
+// rather than out of a table: it has to reach RakClient at the offset this
+// module established, call the vtable slot this module identified as
+// Disconnect, print the message the client was watched printing, call the
+// restart path already proved above, and end by putting the game state back to
+// waiting to connect. Nothing else in the client satisfies all five.
+std::uintptr_t FindConnectionLost(const asi::mem::Module& samp, std::uintptr_t restart_at,
+                                  std::string* why) {
+  const std::uintptr_t at = samp.base + kConnectionLost;
+  unsigned char code[0x100] = {};
+  if (asi::mem::ReadGuarded(at, code, sizeof(code)) != sizeof(code)) {
+    *why = "the recovery at " + Hex(at) + " cannot be read";
+    return 0;
+  }
+  if (std::memcmp(code, kLostPrologue, sizeof(kLostPrologue)) != 0) {
+    *why = "the code at " + Hex(at) +
+           " does not open by asking RakClient to disconnect, so it is not the "
+           "client's own recovery";
+    return 0;
+  }
+  bool goes_back_to_waiting = false;
+  bool calls_the_restart = false;
+  bool says_so = false;
+  for (std::size_t i = 0; i + sizeof(kLostWritesWaitConnect) <= sizeof(code); ++i) {
+    if (std::memcmp(code + i, kLostWritesWaitConnect,
+                    sizeof(kLostWritesWaitConnect)) == 0) {
+      goes_back_to_waiting = true;
+      break;
+    }
+  }
+  for (std::size_t i = 0; i + 5 <= sizeof(code); ++i) {
+    if (code[i] == 0xE8) {
+      std::int32_t rel = 0;
+      std::memcpy(&rel, code + i + 1, sizeof(rel));
+      if (at + i + 5 + static_cast<std::uintptr_t>(rel) == restart_at)
+        calls_the_restart = true;
+    } else if (code[i] == 0x68) {
+      std::uint32_t pushed = 0;
+      std::memcpy(&pushed, code + i + 1, sizeof(pushed));
+      if (samp.contains(pushed) &&
+          asi::mem::ReadCString(pushed, sizeof(kLostMessage) + 4) == kLostMessage)
+        says_so = true;
+    }
+  }
+  if (!calls_the_restart) {
+    *why = "the code at " + Hex(at) + " does not call the restart path at " +
+           Hex(restart_at);
+    return 0;
+  }
+  if (!says_so) {
+    *why = "the code at " + Hex(at) + " does not print \"" + kLostMessage + "\"";
+    return 0;
+  }
+  if (!goes_back_to_waiting) {
+    *why = "the code at " + Hex(at) +
+           " does not end by going back to waiting to connect, which is the "
+           "step that gets the character spawned again";
+    return 0;
+  }
+  return at;
+}
+
 const char* RouteName(Route route) {
   switch (route) {
-    case Route::kState:         return "state";
-    case Route::kPartThenState: return "part-then-state";
-    case Route::kCalls:         return "calls";
+    case Route::kRestart: return "restart";
+    case Route::kCalls:   return "calls";
   }
   return "?";
 }
@@ -253,7 +415,7 @@ json Reconnect(Route route) {
   std::string host;
   int port = 0;
   std::int32_t sleep_timer = kDefaultSleepTimer;
-  if (route != Route::kState) {
+  {
     if (!asi::mem::Read<std::uint32_t>(net_game + kRakClientView, &rak) || rak == 0)
       return json{{"error", "CNetGame is not holding a RakClient"}};
     std::uint32_t vtable = 0;
@@ -303,22 +465,42 @@ json Reconnect(Route route) {
     out["thread_sleep_timer"] = sleep_timer;
   }
 
-  // Ask for the disconnect where the route says to, so the server is told at
-  // once. The client's own connect does disconnect first, but on its own
-  // terms; asking here blocks long enough for RakNet to put the notification
+  // The restart path has to be found and proved before anything is called,
+  // since it is the whole route.
+  std::uintptr_t recovery_at = 0;
+  if (route == Route::kRestart) {
+    std::string why;
+    const std::uintptr_t shutdown_at = FindShutdownForRestart(samp, &why);
+    if (shutdown_at == 0) return json{{"error", why}};
+    recovery_at = FindConnectionLost(samp, shutdown_at, &why);
+    if (recovery_at == 0) return json{{"error", why}};
+    out["restart_path"] = Hex(shutdown_at);
+    out["recovery"] = Hex(recovery_at);
+  }
+
+  // Tell the server first, so it frees the slot now rather than timing the old
+  // session out. The client's own connect does disconnect, but without a block
+  // duration; asking here waits long enough for RakNet to put the notification
   // on the wire.
-  if (held && route != Route::kState) {
+  if (held) {
     const auto disconnect = reinterpret_cast<DisconnectFn>(calls.disconnect);
     disconnect(reinterpret_cast<void*>(rak), kDisconnectBlockMs, 0);
     out["parted"] = true;
   }
 
-  const std::int32_t write_state =
-      route == Route::kCalls ? kGameStateConnecting : kGameStateWaitConnect;
-  if (!WriteInt32(net_game + kGameState, write_state))
+  if (route == Route::kRestart) {
+    // One call, and all of it is the client's own doing: the players go, the
+    // local player goes, the pools are reset, and it puts itself back to
+    // waiting to connect. Nothing here writes a state by hand.
+    const auto recover = reinterpret_cast<ConnectionLostFn>(recovery_at);
+    recover(reinterpret_cast<void*>(net_game), nullptr);
+    std::int32_t left = 0;
+    asi::mem::Read<std::int32_t>(net_game + kGameState, &left);
+    out["state_left"] = left;
+  } else if (!WriteInt32(net_game + kGameState, kGameStateConnecting)) {
     return json{{"error", "the game state at CNetGame+0x3BD could not be written, "
                           "and nothing else here is worth doing without it"}};
-  out["state_written"] = write_state;
+  }
 
   if (route == Route::kCalls) {
     const auto connect = reinterpret_cast<ConnectFn>(calls.connect);
@@ -329,16 +511,16 @@ json Reconnect(Route route) {
                         "spawned; the world reads again once the pool refills"
                       : "the client refused the connect call";
   } else {
-    out["note"] = "the client is back to waiting to connect and does the rest "
-                  "itself, about two seconds from now - poll ready until it "
-                  "says spawned";
+    out["note"] = "the client has torn the session down the way it does when a "
+                  "server restarts under it, and joins again by itself from "
+                  "here - poll ready until spawned has been false and is true "
+                  "again, which is what says the character was spawned anew";
   }
 
   // Whatever the pools held belonged to the session that just ended.
   ForgetLayout();
 
-  LOG_INFO("reconnect: route {}, was {}, state written {} -> {}", RouteName(route), was,
-           write_state, out.dump());
+  LOG_INFO("reconnect: route {}, was {} -> {}", RouteName(route), was, out.dump());
   return out;
 }
 

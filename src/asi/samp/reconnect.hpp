@@ -20,13 +20,15 @@ namespace gtabot::samp {
 // replay its own way in leaves the server with a player who joined and never
 // spawned, and a gamemode is right to throw that out.
 enum class Route {
-  // Put CNetGame back in "waiting to connect" and let its own Process do the
-  // connecting, the way it does on the way into the game.
-  kState,
-  // The same, with the disconnect asked for first so the server is told at
-  // once rather than on the client's own terms.
-  kPartThenState,
-  // Call RakClient::Disconnect and RakClient::Connect directly.
+  // Hand the session to the client's own restart path: it takes the players,
+  // the local player and the pools down and leaves itself "restarting", and
+  // connects out of that by itself. The whole way in is replayed, spawn
+  // included, which is the only version of this the server accepts.
+  kRestart,
+  // Reconnect without any of that - RakClient::Disconnect and Connect,
+  // nothing else. Kept because it is the useful contrast: it gets the client
+  // connected just as fast and leaves the server with a player who joined and
+  // never spawned.
   kCalls,
 };
 

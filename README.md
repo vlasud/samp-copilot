@@ -402,12 +402,18 @@ asked to join again instead. `reconnect` does that, and the character is back
 in the world in half a second.
 
 The tricky part is that a wrong function pointer called through a vtable takes
-the session with it, so none of this is taken on a header's word. What made it
-establishable is that samp.dll's own game code sits in packed sections
-(`.poop0` to `.poop2`, and CNetGame's code cannot be read off the file at all),
-while the RakNet it links - RakClient and RakPeer - is plain code in `.text`.
-Disassembling the shipped samp.dll therefore settles the calls, and the live
-client confirms them:
+the session with it, so none of this is taken on a header's word. What makes it
+establishable is that the shipped samp.dll can be disassembled: CNetGame's
+session handling and the RakNet it links are both plain code in `.text`. The
+packer's sections (`.poop0` to `.poop2`) hold some of the client - the
+`Connecting to %s:%d...` message is referenced only from `.poop1` - but not the
+parts this needs. The first pass through here concluded the opposite, that
+CNetGame's code could not be read off the file at all, and that was an
+arithmetic mistake: the image base is 0x10000000, so a string at RVA 0xD3B34 is
+pushed as 0x100D3B34, and a search for 0x10D3B34 finds nothing. Worth writing
+down, because it sent the work off into the live process for a while.
+
+The calls, settled on the file and confirmed against the live client:
 
 - **The pointer.** `CNetGame+0x3C9`, the slot four bytes ahead of the pools
   pointer already established at +0x3CD, with the game state at +0x3BD that
@@ -462,12 +468,13 @@ before it calls Connect, because that is the state the client's own connect
 leaves behind and the state its packet handling takes the server's acceptance
 in.
 
-### What it does not do yet: replay the way in
+### What makes the character spawn again
 
-The connect works and the join handshake runs - 9, 13, 15, 14 in half a second
-- but **the client does not replay its own entry**, and a gamemode is right to
-throw the result out. Read from the server side by the gamemode's own log, a
-reconnect looks like this:
+Reconnecting is not the hard half. The first working version connected and
+joined in half a second and was still wrong: **the client kept the character it
+already had**, so the server was left with a player who joined and never
+spawned. Read from the server side by the gamemode's own log, that looked like
+this:
 
 ```
 [part] Lo_Vlasud has left (0:1)
@@ -477,45 +484,71 @@ reconnect looks like this:
 [AntiCheat] Kicking Lo_Vlasud (id 0): score 1.20/1.00, 2 violations total
 ```
 
-The client keeps the character it already had and goes on sending on-foot sync,
-while the server has a player who joined and never spawned - its alive flag is
-set on spawn - so "dead but playing" is exactly what the server sees. The kick
-lands about ten seconds in, measured three times.
+The server's alive flag is set on a spawn, so "dead but playing" is exactly
+what it sees, and the kick landed about ten seconds in, three times out of
+three. Seen from in here the same thing shows up as **`ready.spawned` never
+dipping**: on a real way in the character stops existing for a moment and then
+exists again. That dip, not `spawned` being true, is the test.
 
-Seen from in here the same thing shows up as `ready.spawned` never dipping:
-on a real way in the character does not exist for a moment and then does, and
-after a reconnect he simply never stops existing. So that dip, not
-`ready.spawned` being true, is what says the entry was replayed.
+What settled it was watching the client do this properly with no help at all.
+The server was restarted under a client standing in the world, and it said:
 
-What has been ruled out:
+```
+Lost connection to the server. Reconnecting..
+The server is restarting..
+Connecting to 127.0.0.1:7777...
+Connected. Joining the game...
+```
 
-- **It is not the route.** Calling RakClient::Connect and letting CNetGame's
-  own Process do the connecting from "waiting to connect" both reconnect in
-  half a second, and neither replays the spawn. The client's own connect does
-  not reset the local player either.
-- **It is not a flag at the head of the local player.** CLocalPlayer is at the
-  player pool + 0x2F48 (the pool itself is the seventh of the nine, at
-  pools+0x18). Dumped either side of a real spawn, its first 0x300 bytes differ
-  in two two-byte counters and nothing else, and CNetGame's first 0x400 bytes
-  do not differ at all. Whatever the entry hangs on, it is not a "spawned" bit
-  there.
-- **It is not the overlapping session.** That was the first reading of the
-  ten-second kick and it was wrong: the gamemode's log names the anti-cheat,
-  not a duplicate login.
+- and it was back in the world, spawned, with nothing from the anti-cheat. So
+the client already owns the whole answer, and the work was to find the code
+that says it and call that instead of imitating it. The imitation had in fact
+got four of the five steps, and the fifth is the one that spawns the character.
 
-What is still unknown is the useful part: SA-MP carries a
-`Lost connection to the server. Reconnecting..` path of its own, which is a
-different message from the `Server closed the connection.` the client prints
-when a server closes cleanly - and that one demonstrably does not tear
-anything down. The reconnecting path is likely the timeout path, the one a
-server that simply stops answering produces, and it is the path that would
-have to reset the local player for its own retry to work. Two ways in to try:
-`RakClient::SetTimeoutTime` with a tiny value, so RakNet declares the
-connection lost and the client's own path runs; or pushing a disconnection
-notification into RakNet's receive queue with `PushBackPacket`, which needs
-RakNet's Packet layout for this build. Neither slot is identified yet.
+The recovery is CNetGame's connection-lost handler, and in this build it does
+exactly five things:
 
-And there is one case only a restart fixes: pointed at a closed port, the
+1. `m_pRakClient->Disconnect(0, 0)` - reached as `call [vtable + 8]`, which is
+   the client confirming from its own code that Disconnect is slot 2.
+2. Prints `Lost connection to the server. Reconnecting..`.
+3. Calls `CNetGame::ShutdownForRestart`, which walks all 1004 player slots and
+   destroys them, takes the local player down, resets the nine pools, prints
+   `The server is restarting..`, and leaves the game state at 18.
+4. Clears a second 1004-entry array in the player pool.
+5. **Puts the game state back to 9, waiting to connect** - and that is the step
+   that matters. From there the client's own Process connects, joins, and
+   spawns the character by the ordinary way in.
+
+Stopping after step 3 - which is all that writing 18 by hand amounts to - gets
+a client that joins and then sits at 18 with no character at all. The state the
+teardown leaves behind is not the state the re-entry needs.
+
+Where to look for the two functions came from the public 0.3.7-R1 declarations
+(`ShutdownForRestart` at 0xA060, its caller at 0xA800 found from the string it
+prints); what accepts them is this client's own code. Before either is called,
+the handler has to reach RakClient at +0x3C9, call vtable slot 2, push a string
+that reads `Lost connection to the server. Reconnecting..`, call the function at
+0xA060, and end by writing 9 to +0x3BD - and that function in turn has to write
+18 to +0x3BD, reach the pools through +0x3CD, and print
+`The server is restarting..`. Every offset in those checks is one this module
+established for itself, so a build whose layout moved fails them and nothing
+gets called. Its argument, the packet that brought the news, is never read: the
+body touches the stack once, to clean up after the chat call.
+
+Measured twice in a row on a live server, from a client standing in the world:
+`spawned` false at 0.1s, the state through 9, 13 and 14, `spawned` true again
+at **0.5s**, the gamemode's saved position restored, and no kick for the rest
+of the watch.
+
+Two readings along the way were wrong and are worth keeping as corrections. The
+ten-second kick was first put down to a duplicate login, which the gamemode's
+log disproved - it names the anti-cheat. And the local player was searched for a
+"spawned" bit to flip: CLocalPlayer sits at the player pool + 0x2F48 (the pool
+being the seventh of the nine, at pools+0x18), and its first 0x300 bytes differ
+either side of a real spawn by two counters and nothing else. There was no bit
+to flip, because the entry is not a flag - it is the whole sequence.
+
+One case remains that only a restart fixes: pointed at a closed port, the
 client tries for about thirty-five seconds and then gives the CNetGame object
 up. After that there is nothing to reconnect through, and the tool says so
 instead of calling anything.
@@ -709,11 +742,11 @@ where nobody else is connected - and the standable / walkable / route planning
 that reads the game's path graph and asks its collision. `read_memory` reads a
 run of words by address when a layout has to be settled by hand.
 
-Half working: `reconnect` gets the client connected and joined again without
-restarting GTA, in half a second measured - but it does not make the client
-replay its own way in, so the server is left with a player who never spawned.
-See "What it does not do yet" above for what that looks like and what has been
-ruled out.
+`reconnect` puts the client back in the world without restarting GTA, in half a
+second measured, with the character spawned anew and the gamemode's session
+loaded - which is what a rebuild loop spends the rest of its time waiting for.
+It gets there by handing the session to the client's own connection-lost
+recovery rather than imitating it; see "What makes the character spawn again".
 
 Not yet: making the character walk the route. That is input synthesis, and it
 sits on top of everything above.
