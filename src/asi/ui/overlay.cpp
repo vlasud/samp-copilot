@@ -122,8 +122,21 @@ bool    g_swallowing  = false;     // the neighbour is returning without passing
 bool    g_probe_seen  = false;
 int     g_probe_misses = 0;
 unsigned long long g_probe_ms = 0;
+// When the neighbour appeared in front of us, and how long it is left alone
+// before being probed.
+//
+// The probe is a synthetic message put straight into another module's window
+// procedure, and the first one used to go in on the very next frame - nine
+// milliseconds after SA-MP had installed that procedure, which is the middle
+// of its own initialisation. A session was caught faulting exactly there:
+// samp.dll reading a null and then calling through it, the shape of an object
+// that does not exist yet. Whatever else was going on, calling into a
+// stranger's handler at a moment it cannot expect is ours to not do.
+unsigned long long g_head_since = 0;
+bool g_probe_announced = false;
 constexpr WPARAM kProbe = 0x6774B07D;
 constexpr unsigned long long kProbeEveryMs = 250;
+constexpr unsigned long long kNeighbourSettleMs = 3000;
 std::atomic<unsigned long long> g_keys_head{0};    // key messages at the head
 std::atomic<unsigned long long> g_keys_witness{0}; // ... that got past the neighbour
 // The messages currently being handled on this thread, so the older copy of
@@ -646,6 +659,8 @@ void TendWndProcChain(unsigned long long now) {
       return;
     }
     g_head_next = wide;
+    g_head_since = now;
+    g_probe_announced = false;
     g_bypass = false;
     g_probe_misses = 0;
     SetWindowLongPtrW(g_window, GWLP_WNDPROC,
@@ -655,8 +670,18 @@ void TendWndProcChain(unsigned long long now) {
              "the chain, watched)", ModuleOf(reinterpret_cast<void*>(narrow)));
   }
   if (g_head_next == nullptr) return;
+  // Let it finish starting up first. Nothing here needs an answer in the first
+  // seconds: the question being asked is whether it swallows messages over
+  // time, and it cannot be swallowing our input before there is any.
+  if (now - g_head_since < kNeighbourSettleMs) return;
   if (now - g_probe_ms < kProbeEveryMs) return;
   g_probe_ms = now;
+  if (!g_probe_announced) {
+    g_probe_announced = true;
+    LOG_INFO("window: the neighbour has been in front for {} ms - probing it "
+             "from here on to see whether it passes messages",
+             now - g_head_since);
+  }
 
   g_probe_seen = false;
   CallWindowProcW(g_head_next, g_window, WM_NULL, kProbe, 0);

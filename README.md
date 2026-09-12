@@ -345,9 +345,29 @@ What was measured and does **not** hold up as a cause:
   the focus elsewhere, left the client in the game. Being thrown out by the
   server does not end the process either.
 
-The open lead is the first line of that log: our own window procedure being
-pushed back in front of SA-MP's, nine milliseconds before SA-MP dereferenced a
-null in its drawing code.
+And the first line of that log turned out to matter after all - though not for
+the reason it looked like. Stepping back in front of SA-MP's window procedure
+happens once, at every startup, and every healthy session does it too, so the
+re-insertion itself is not the problem. What follows it was: the chain keeps an
+eye on the neighbour by putting a synthetic `WM_NULL` **into that neighbour's
+own window procedure**, and with the probe clock starting at zero the first one
+went in on the very next frame - nine milliseconds later, which is exactly the
+gap in the log, and which is the middle of SA-MP's own initialisation. The
+fault was a null read followed by a call through it: an object that does not
+exist yet.
+
+So the neighbour is now left alone for three seconds before it is ever probed -
+measured at 3004 ms against the 9 ms it used to be. Nothing is lost by waiting:
+the question the probe asks is whether the neighbour swallows messages over
+time, and it cannot be swallowing input before there is any. Calling into a
+stranger's message handler at a moment it cannot expect is ours to not do,
+whether or not it was what killed that session.
+
+One thing ruled out rather than fixed: raw `~` reaching the client is not it.
+It did reach clients through the gamemode's emotes for a while, and a message
+with `~r~` in it was sent on purpose while that hole was open - the client took
+it and stayed up. `~` is a GameText token, and SA-MP's chat has no reason to
+interpret it.
 
 ## A frozen frame counter
 
