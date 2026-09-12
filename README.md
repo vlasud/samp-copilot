@@ -296,6 +296,58 @@ reading:
   switched itself off. The rest of the module keeps running.
 - `CRASH ...` names the exception, the faulting module and offset, and the
   address being accessed. It is logged before the game's own handler runs.
+- `the session is ending from inside: ExitProcess(...) asked for by ...` names
+  whoever closed the game, and `TerminateProcess` the same. **A session that
+  ends with neither a crash nor one of those lines was killed from outside the
+  process**, where nothing of ours runs - that absence is the evidence.
+
+## Losing the focus does not crash the client - the dialog does
+
+Sessions kept ending seconds after the focus moved, which read as "taking the
+focus kills it". Watched with everything logging, the order turns out to be the
+other way round:
+
+```
+window: samp.dll+0x5DB40 hooked the window procedure after us ... stepping back in front
+CRASH ACCESS_VIOLATION (0xC0000005) at samp.dll+0x8C3AD    <- reading 0x00000000
+window: WM_KILLFOCUS - keyboard focus goes to none
+window: WM_ACTIVATE INACTIVE (minimised=true) other=none
+window: WM_ENABLE DISABLED
+modules: newly loaded: comctl32.DLL
+input: ... foreground=#32770 ... kbfocus=0x00660786(Button tid=...)
+frames stopped 4203 ms ago; threads: ... at win32u.dll+0x123C
+```
+
+SA-MP faults, handles the fault itself, and puts up its own modal error box.
+The dialog is what disables the game window, minimises it, takes the activation
+and then hands it back to nothing - so the deactivation messages and the
+multi-second freezes in the log are the *consequence* of the fault, not the
+cause of anything. `#32770` is the dialog class, the Button holding the
+keyboard focus is its OK, comctl32 loads for it, and the game thread parked in
+`win32u` is the dialog's own message loop, which is why the frames stop.
+
+It also explains the sessions that ended with nothing in the log at all: the
+fault is caught by SA-MP, so there is no unhandled exception, no `CRASH` line
+and no entry in the Windows event log - and the process then ends cleanly.
+
+What was measured and does **not** hold up as a cause:
+
+- **Frames keep flowing when the window is behind another** - about 95 a second
+  either way, so the background rule is doing its job.
+- **The game's per-frame allocators stay in bounds.** GTA resets five bump
+  counters and an 80KB table once a frame (0xB1E158, 0xB1E958, 0xB1F650,
+  0xB478F8, 0xB4C2D8, cleared together from the main loop); sampled focused and
+  unfocused they cycle identically. An overflow there is what one of the two
+  recorded game-side faults looks like - a virtual call on an entry past the
+  end of the array - but it is not happening while frames flow.
+- **Neither transition on its own does it**: fourteen rounds of taking the
+  focus away and then destroying the window that held it, and four minutes with
+  the focus elsewhere, left the client in the game. Being thrown out by the
+  server does not end the process either.
+
+The open lead is the first line of that log: our own window procedure being
+pushed back in front of SA-MP's, nine milliseconds before SA-MP dereferenced a
+null in its drawing code.
 
 ## A frozen frame counter
 
@@ -326,13 +378,24 @@ the first of three signals: `Present` returning `D3DERR_DEVICELOST`,
 `TestCooperativeLevel` reporting anything but `D3D_OK`, or the Reset hook.
 
 Releasing is only half of it - the release has to happen *before* somebody
-calls Reset, and here that somebody is not the game. The "Device::Reset()
-result 8876086C" box comes from `vc.asi`, a Rust client that wraps the device
-and resets it itself across an alt-tab, without passing through any hook of
-ours. So the trigger cannot be a Reset hook at all: resources are dropped as
-soon as the game window stops being the foreground window, checked in both the
-EndScene and the Present hook. The Reset hook stays as a backstop and logs
-every call it does see.
+calls Reset, and in the setup that taught us this, that somebody was not the
+game: the "Device::Reset() result 8876086C" box came from `vc.asi`, a Rust
+client that wraps the device and resets it itself across an alt-tab without
+passing through any hook of ours. So the release was hung on the focus going
+away, checked in both EndScene and Present.
+
+**But only a fullscreen device is lost when the focus goes away, and this one
+is windowed** - the module asks for windowed at the first reset itself, and
+`vc.asi` is not in this install at all. On a windowed device that release was
+pure churn: ImGui's resources let go and rebuilt on every single alt-tab, from
+inside Present, while the game's own frame was in flight. So the device is now
+asked whether it is windowed (of its swap chain, cached per device, re-asked
+after a reset) and if it is, the focus alone releases nothing. Measured over
+the same workload: three releases during startup while the device was still
+fullscreen, then the windowed answer, then seven focus losses and no release at
+all. The three signals that mean the device really has gone - Present returning
+`D3DERR_DEVICELOST`, `TestCooperativeLevel` disagreeing, and the Reset hook -
+all still release, and they are the ones that were ever load-bearing.
 
 ## Where the SA-MP offsets come from
 

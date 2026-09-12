@@ -364,6 +364,11 @@ DWORD WINAPI Worker(LPVOID) {
   if (!FrameHook::Install(&OnFrame))
     LOG_ERROR("frame hook could not be installed - no game-thread access");
 
+  // After the frame hook, which is what brings MinHook up. Most of the
+  // sessions that have ended on their own left nothing in the log at all,
+  // because nothing faulted - this is what names whoever asked.
+  WatchProcessExit();
+
   static mcp::Server        server("gtabot", GTABOT_VERSION);
   static mcp::HttpTransport transport;
   mcp::RegisterTools(&server);

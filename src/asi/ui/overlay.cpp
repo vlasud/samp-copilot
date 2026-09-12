@@ -88,6 +88,11 @@ IDirect3DDevice9*  g_device      = nullptr;
 HWND               g_window      = nullptr;
 bool               g_toggle_down = false;
 bool               g_resources_live = false;
+// Whether the game's device is windowed, asked of the swap chain once per
+// device and re-asked after a reset - the reset is where it can change, since
+// the module asks for windowed there itself.
+IDirect3DDevice9*  g_windowed_asked_about = nullptr;
+bool               g_windowed = false;
 WNDPROC            g_previous_wndproc = nullptr;
 std::string        g_ini_path;
 
@@ -391,6 +396,26 @@ void LogFocusMessage(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
     case WM_ENABLE:
       LOG_WARN("window: WM_ENABLE {}", wparam ? "enabled" : "DISABLED");
       break;
+    // The ways a session ends by being asked to. Only witnessed, never
+    // answered: whether the game closes is the game's business, and the point
+    // of logging them is that a session which ends without any of these was
+    // not asked at all.
+    case WM_CLOSE:
+      LOG_ERROR("window: WM_CLOSE - somebody is asking the game to close");
+      break;
+    case WM_DESTROY:
+      LOG_ERROR("window: WM_DESTROY - the window is going away");
+      break;
+    case WM_QUIT:
+      LOG_ERROR("window: WM_QUIT (code {})", static_cast<unsigned>(wparam));
+      break;
+    case WM_ENDSESSION:
+      LOG_ERROR("window: WM_ENDSESSION ending={}", wparam != 0);
+      break;
+    case WM_SYSCOMMAND:
+      if ((wparam & 0xFFF0) == SC_CLOSE)
+        LOG_ERROR("window: SC_CLOSE from the system menu or the cross");
+      break;
     default:
       break;
   }
@@ -481,6 +506,8 @@ LRESULT HeadWndProc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
   switch (message) {
     case WM_ACTIVATE: case WM_ACTIVATEAPP: case WM_SETFOCUS: case WM_KILLFOCUS:
     case WM_INPUTLANGCHANGE: case WM_CAPTURECHANGED: case WM_ENABLE:
+    case WM_CLOSE: case WM_DESTROY: case WM_QUIT: case WM_ENDSESSION:
+    case WM_SYSCOMMAND:
       LogFocusMessage(window, message, wparam, lparam);
       break;
     default:
@@ -2098,15 +2125,48 @@ void Overlay::OnLostDevice() {
 }
 
 void Overlay::OnResetDevice() {
+  // A reset is where windowed or not can change - this module asks for
+  // windowed at the first one - so the answer is thrown away and asked again.
+  g_windowed_asked_about = nullptr;
   // Deliberately does not recreate anything here. ImGui_ImplDX9_NewFrame
   // rebuilds the font texture on its own once the device is usable again, and
   // doing it early - while the game may still be mid-reset - is how the
   // recreate ends up on a device that is not ready.
 }
 
+// Whether this device can lose itself at all. Asked of the swap chain rather
+// than assumed, and cached until the device is reset or replaced: it is two
+// COM calls and this runs inside Present.
+bool DeviceIsWindowed(IDirect3DDevice9* device) {
+  if (device == nullptr) return false;
+  if (device == g_windowed_asked_about) return g_windowed;
+  IDirect3DSwapChain9* chain = nullptr;
+  if (FAILED(device->GetSwapChain(0, &chain)) || chain == nullptr) return false;
+  D3DPRESENT_PARAMETERS params = {};
+  const bool got = SUCCEEDED(chain->GetPresentParameters(&params));
+  chain->Release();
+  if (!got) return false;
+  g_windowed_asked_about = device;
+  g_windowed = params.Windowed != FALSE;
+  LOG_INFO("the game's device is {} - losing the focus {}",
+           g_windowed ? "windowed" : "fullscreen",
+           g_windowed ? "cannot take it away, so nothing is released for that alone"
+                      : "can take it away, so resources go early");
+  return g_windowed;
+}
+
 void Overlay::ReleaseIfUnfocused() {
   if (!g_initialised || !g_resources_live || !g_window) return;
   if (GetForegroundWindow() == g_window) return;
+  // Only a fullscreen device is lost by the focus going away, and this one is
+  // usually windowed - the module asks for that itself at the first reset. On
+  // a windowed device the release was pure churn: resources let go and rebuilt
+  // on every alt-tab, dozens of times a session, from inside Present and while
+  // the game's own frame was in flight. The three signals that mean the device
+  // really has gone - Present saying so, TestCooperativeLevel saying so, and
+  // the Reset hook - all still release, and they are the ones that were ever
+  // load-bearing.
+  if (DeviceIsWindowed(g_device)) return;
   OnLostDevice();
 }
 

@@ -67,10 +67,17 @@ BOOL WINAPI HookedSetCursorPos(int x, int y) {
   if (!AnswerInstead()) return g_real_set(x, y);
 
   if (!g_named_caller.exchange(true)) {
-    LOG_INFO("the mouse is being recentred by {} - answering its "
-             "SetCursorPos while the panel is interactive",
+    // Which of the two reasons it is, said plainly. The wording used to name
+    // the panel whatever the cause, and a session that ended soon after this
+    // line was read as a panel problem when the panel was not even open.
+    LOG_INFO("the mouse is being recentred by {} - answering its SetCursorPos "
+             "because {}",
              mem::DescribeAddress(
-                 reinterpret_cast<std::uintptr_t>(_ReturnAddress())));
+                 reinterpret_cast<std::uintptr_t>(_ReturnAddress())),
+             g_freed.load(std::memory_order_acquire)
+                 ? "the panel is interactive and wants the mouse"
+                 : "the game is running behind another window and would drag "
+                   "the pointer out of whatever is in front");
   }
   g_pinned_x.store(x, std::memory_order_release);
   g_pinned_y.store(y, std::memory_order_release);
