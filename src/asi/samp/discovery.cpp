@@ -3,6 +3,7 @@
 #include <windows.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -32,6 +33,9 @@ constexpr std::size_t kMaxReferences = 24;
 constexpr std::size_t kMaxDetailed = 6;
 // How much of a region a sweep copies out at a time before looking at it.
 constexpr std::size_t kSweepWords = 2048;  // 8 KB
+// A hand read is answered in one message, so it is capped like everything
+// else that crosses the bridge.
+constexpr int kMaxWordsPerRead = 256;
 
 bool g_written = false;
 
@@ -39,6 +43,22 @@ std::string Hex(std::uintptr_t value) {
   char buffer[16];
   std::snprintf(buffer, sizeof(buffer), "0x%08X", static_cast<unsigned>(value));
   return buffer;
+}
+
+// Printable ASCII only, stopping at the first byte that is not. Names are the
+// thing worth seeing here, and cp1251 text - which the chat is full of - is
+// not valid UTF-8: putting those bytes in the answer would fail the whole
+// message rather than one row of it.
+std::string PrintableAt(std::uintptr_t address, std::size_t max_length) {
+  std::string out;
+  for (std::size_t i = 0; i < max_length; ++i) {
+    char c = 0;
+    if (!asi::mem::Read<char>(address + i, &c)) break;
+    const unsigned char byte = static_cast<unsigned char>(c);
+    if (byte < 0x20 || byte > 0x7E) break;
+    out.push_back(c);
+  }
+  return out;
 }
 
 // Says what a 4-byte value most plausibly is. This is the whole point of the
@@ -293,6 +313,65 @@ ReportOutcome WriteStructureReport(const std::string& requested_needle) {
   LOG_INFO("wrote {} ({} live occurrences of '{}')", outcome.path,
            outcome.heap_hits, needle);
   return outcome;
+}
+
+json ReadWords(const std::string& address, int words, int stride,
+               bool as_text) {
+  // Hex when it says so, or when it could only be hex; decimal otherwise. A
+  // bare "048B63A0" is not treated as octal - nothing here writes octal, and
+  // silently reading a different address than the one asked for is the one
+  // failure a hand lens must not have.
+  std::uintptr_t base = 0;
+  {
+    std::string text = address;
+    int radix = 10;
+    if (text.rfind("0x", 0) == 0 || text.rfind("0X", 0) == 0) {
+      text = text.substr(2);
+      radix = 16;
+    } else if (text.find_first_of("abcdefABCDEF") != std::string::npos) {
+      radix = 16;
+    }
+    char* stop = nullptr;
+    const unsigned long long parsed =
+        std::strtoull(text.c_str(), &stop, radix);
+    if (stop == text.c_str() || (stop && *stop != '\0'))
+      return json{{"error", "address does not parse: " + address}};
+    base = static_cast<std::uintptr_t>(parsed);
+  }
+  if (base == 0) return json{{"error", "address 0 is not readable"}};
+
+  if (words < 1) words = 1;
+  if (words > kMaxWordsPerRead) words = kMaxWordsPerRead;
+  if (stride < 1) stride = 4;
+
+  const asi::mem::Module samp = asi::mem::FindModule(L"samp.dll");
+  const asi::mem::Module game = asi::mem::FindModule(nullptr);
+
+  json rows = json::array();
+  std::size_t unreadable = 0;
+  for (int i = 0; i < words; ++i) {
+    const std::uintptr_t at =
+        base + static_cast<std::uintptr_t>(i) * static_cast<std::uintptr_t>(stride);
+    std::uint32_t value = 0;
+    if (!asi::mem::Read<std::uint32_t>(at, &value)) {
+      ++unreadable;
+      continue;
+    }
+    json row{{"offset", i * stride},
+             {"at", Hex(at)},
+             {"word", Hex(value)},
+             {"is", Classify(value, samp, game)}};
+    if (as_text) {
+      const std::string text = PrintableAt(at, 24);
+      if (text.size() >= 2) row["text"] = text;
+    }
+    rows.push_back(std::move(row));
+  }
+
+  return json{{"address", Hex(base)},
+              {"stride", stride},
+              {"unreadable", unreadable},
+              {"words", std::move(rows)}};
 }
 
 }  // namespace gtabot::samp

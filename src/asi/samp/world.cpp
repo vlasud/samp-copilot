@@ -39,6 +39,10 @@ constexpr std::uint32_t kPoolsSearchTo   = 0x600;
 // CPlayerPool starts with the largest id and the local player's own details,
 // so the arrays begin somewhere in the first few dozen bytes.
 constexpr std::uint32_t kArraySearchTo = 0x100;
+// The local player's own name sits in that same handful of bytes, after the
+// largest id and the local id. Looked for no further: past this the structure
+// is the slot arrays, and a "name" found inside them is a remote player's.
+constexpr std::uint32_t kLocalNameSearchTo = 0x40;
 // Which slot of the pool block holds the player pool. Searched rather than
 // trusted: the declaration says the seventh, but a null pool ahead of it would
 // shift nothing while a miscount would move everything.
@@ -296,7 +300,8 @@ bool ReadStdString(std::uintptr_t address, int variant, std::string* out) {
 // 1004 flags saying which of them are in use. The signature is the agreement
 // between the two arrays, not the exact value of the flag: assuming a BOOL is
 // literally 1 is the kind of detail that quietly fails.
-bool LooksLikeSlotArrays(std::uintptr_t pool, std::uint32_t offset) {
+bool LooksLikeSlotArrays(std::uintptr_t pool, std::uint32_t offset,
+                         bool allow_empty = false) {
   const std::uintptr_t objects   = pool + offset;
   const std::uintptr_t not_empty = objects + kMaxPlayers * 4;
   if (!asi::mem::IsReadable(objects, kMaxPlayers * 4 * 2)) return false;
@@ -320,7 +325,10 @@ bool LooksLikeSlotArrays(std::uintptr_t pool, std::uint32_t offset) {
       return false;
     ++occupied;
   }
-  if (occupied == 0) return false;  // indistinguishable from a run of zeroes
+  // A field of zeroes is indistinguishable from any other zeroed memory, so
+  // an empty pool only counts when the caller has already anchored the
+  // structure by something checkable - the local player's own name.
+  if (occupied == 0 && !allow_empty) return false;
 
   int checked = 0;
   for (int i = 0; i < kMaxPlayers && checked < 4; ++i) {
@@ -747,6 +755,55 @@ std::string CommandLineHost() {
   return line.substr(begin, end - begin);
 }
 
+// The other fact that did not come from memory. The nickname is what makes an
+// empty pool readable: it is the one string in the structure whose value we
+// know before looking.
+std::string CommandLineNick() {
+  const std::string line = GetCommandLineA();
+  const std::size_t at = line.find("-n ");
+  if (at == std::string::npos) return {};
+  std::size_t begin = at + 3;
+  while (begin < line.size() && line[begin] == ' ') ++begin;
+  std::size_t end = line.find(' ', begin);
+  if (end == std::string::npos) end = line.size();
+  return line.substr(begin, end - begin);
+}
+
+// Finds the local player's name inside a candidate pool by matching it against
+// that nickname, and says which std::string layout read it. An exact match on
+// a whole name is the anchor; "a string of three or more characters" is not,
+// and on a server with players in it that guess lands on somebody else.
+bool LocalNameAnchor(std::uintptr_t pool, const std::string& nick,
+                     std::uint32_t* offset, int* variant) {
+  if (nick.size() < 3) return false;
+  for (int candidate = 0; candidate < 2; ++candidate) {
+    for (std::uint32_t at = 4; at <= kLocalNameSearchTo; at += kSearchStep) {
+      std::string value;
+      if (!ReadStdString(pool + at, candidate, &value)) continue;
+      if (value != nick) continue;
+      *offset  = at;
+      *variant = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
+// How wide this build's std::string is, decided by a fact rather than by which
+// guess looks better: CPlayerPool::m_localInfo continues { name,
+// CLocalPlayer*, ping, score }, so the width that puts a heap pointer straight
+// after the name is the width. Zero when neither does.
+std::uint32_t StringWidthAfterName(std::uintptr_t pool,
+                                   std::uint32_t local_name) {
+  for (std::uint32_t width : {24u, 28u}) {
+    std::uint32_t object = 0;
+    if (!asi::mem::Read<std::uint32_t>(pool + local_name + width, &object))
+      continue;
+    if (IsHeapPointer(object)) return width;
+  }
+  return 0;
+}
+
 }  // namespace
 
 void ForgetLayout() {
@@ -800,6 +857,7 @@ const Layout& ResolveLayout() {
   }
 
   // Pools: a block of mostly-heap pointers at the tail of CNetGame.
+  const std::string nick = CommandLineNick();
   int pool_candidates = 0;
   for (std::uint32_t offset = kPoolsSearchFrom; offset < kPoolsSearchTo;
        offset += kSearchStep) {
@@ -837,6 +895,38 @@ const Layout& ResolveLayout() {
         break;
       }
     }
+
+    // Alone on the server, every slot is null and both arrays are a field of
+    // zeroes: the shape above has nothing left to recognise, and one player on
+    // a test server is the normal case here rather than an edge. The local
+    // player's own name is still in the pool, and the record it belongs to -
+    // { id, padding, name, CLocalPlayer*, ping, score } - says where the
+    // arrays start, so the offsets stay derived from something checkable.
+    for (int slot = 0; slot < kPoolSlotsToTry && !layout.player_pool; ++slot) {
+      const std::uintptr_t player_pool = entries[slot];
+      if (player_pool == 0 || !IsHeapPointer(player_pool)) continue;
+
+      std::uint32_t name_at = 0;
+      int variant = -1;
+      if (!LocalNameAnchor(player_pool, nick, &name_at, &variant)) continue;
+      const std::uint32_t width = StringWidthAfterName(player_pool, name_at);
+      if (width == 0) continue;
+
+      const std::uint32_t derived = name_at + width + 12;
+      if (!LooksLikeSlotArrays(player_pool, derived, /*allow_empty=*/true))
+        continue;
+
+      layout.pools           = candidate;
+      layout.player_pool     = player_pool;
+      layout.object_array    = derived;
+      layout.not_empty_array = derived + kMaxPlayers * 4;
+      layout.local_name      = name_at;
+      layout.string_variant  = variant;
+      layout.string_width    = width;
+      LOG_INFO("player pool anchored on the local name at +0x{:X}: no other "
+               "player is connected, so the slot arrays are empty",
+               name_at);
+    }
     if (layout.player_pool) break;
   }
 
@@ -849,7 +939,8 @@ const Layout& ResolveLayout() {
     layout.note = "found CNetGame (host " + layout.host + ") and " +
                   std::to_string(pool_candidates) +
                   " pool-block candidates, but none of them held an array of "
-                  "1004 player slots";
+                  "1004 player slots, and none carried the nickname '" + nick +
+                  "' where the local player's name belongs";
     g_layout = layout;
     g_resolved = false;
     return g_layout;
@@ -890,7 +981,8 @@ const Layout& ResolveLayout() {
   // The local player's own record sits between the largest id and the slot
   // arrays. Its exact offset depends on the packed width of the id, so it is
   // searched for rather than computed - and it is not worth failing over.
-  for (std::uint32_t offset = 4; offset < layout.object_array; ++offset) {
+  for (std::uint32_t offset = 4;
+       layout.local_name == 0 && offset < layout.object_array; ++offset) {
     std::string name;
     if (ReadStdString(layout.player_pool + offset, layout.string_variant,
                       &name) &&
@@ -904,17 +996,9 @@ const Layout& ResolveLayout() {
   // That pointer is the anchor: only the correct string width puts a heap
   // pointer immediately after the name, so the width is established by fact
   // rather than by which of two guesses looks better.
-  if (layout.local_name != 0) {
-    for (std::uint32_t width : {24u, 28u}) {
-      std::uint32_t object = 0;
-      if (!asi::mem::Read<std::uint32_t>(
-              layout.player_pool + layout.local_name + width, &object))
-        continue;
-      if (!IsHeapPointer(object)) continue;
-      layout.string_width = width;
-      break;
-    }
-  }
+  if (layout.local_name != 0 && layout.string_width == 0)
+    layout.string_width = StringWidthAfterName(layout.player_pool,
+                                               layout.local_name);
 
   // The shape search can land a few slots early and still pass: shifting both
   // arrays by the same amount keeps them correlated, and the fields it slides

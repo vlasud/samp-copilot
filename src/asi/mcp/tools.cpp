@@ -2259,6 +2259,49 @@ void RegisterTools(Server* server) {
   });
 
   server->AddTool({
+      "read_memory",
+      "Reads a run of the client's memory by address and says what each word "
+      "plausibly is - a pointer into samp.dll or gta_sa.exe, a heap pointer "
+      "with the first word of what it points at, a small integer, a float. "
+      "For settling a structure's layout when the shape search stopped short; "
+      "nothing in the module reads the world through it.",
+      {{"type", "object"},
+       {"properties",
+        {{"address",
+          {{"type", "string"},
+           {"description", "Where to start: hex (\"0x048B63A0\") or decimal."}}},
+         {"words",
+          {{"type", "integer"},
+           {"minimum", 1},
+           {"maximum", 256},
+           {"description", "How many four-byte words. Defaults to 32."}}},
+         {"stride",
+          {{"type", "integer"},
+           {"minimum", 1},
+           {"maximum", 65536},
+           {"description",
+            "Bytes between the words read, for stepping along an array of "
+            "records instead of reading it whole. Defaults to 4."}}},
+         {"text",
+          {{"type", "boolean"},
+           {"description",
+            "Also read each word's own bytes as text - how an array of names "
+            "gives itself away. Off by default."}}}}},
+       {"required", json::array({"address"})}},
+      [](const json& args) {
+        const std::string address = args.value("address", std::string{});
+        const int words = args.value("words", 32);
+        const int stride = args.value("stride", 4);
+        const bool as_text = args.value("text", false);
+        return Rpc::RunOnGameThread(
+            [address, words, stride, as_text] {
+              return samp::ReadWords(address, words, stride, as_text);
+            },
+            kFastTimeoutMs);
+      },
+  });
+
+  server->AddTool({
       "dump_samp_structures",
       "Writes bot.samp-report.txt next to the module: every live copy of the "
       "player nickname in memory, annotated with what points at it and what "

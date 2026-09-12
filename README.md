@@ -371,6 +371,27 @@ pointer into the heap, a small integer, a float, or text.
 That report is what the offsets get written from. Until it exists, the world
 snapshot stays a set of empty placeholders rather than a guess.
 
+## When nobody else is connected
+
+The signature above needs one occupied slot to recognise: 1004 pointers and
+1004 flags that agree with each other are unmistakable, and 2008 zeroes are
+not. On a test server with one player on it every slot is null - the local
+player is not one of them - so there is nothing left to recognise, and that is
+the normal case here rather than an edge.
+
+The way in is the nickname again. The local player's own record sits in the
+pool ahead of the arrays as `{ id, padding, name, CLocalPlayer*, ping, score }`,
+and the name is a `std::string` whose value the launcher told us. Matching it
+exactly fixes the whole record: the width of the string is the one that puts a
+heap pointer straight after the name, and the arrays begin twelve bytes past
+its end. Nothing there is a guess - the offsets are read off a string we knew
+the contents of before looking - and the empty arrays are only accepted once
+that anchor has held. On 0.3.7-R1 it comes out as the name at +0x0A, a 24-byte
+string, and the slots at +0x2E.
+
+With players present the shape search still runs first and wins; the anchor is
+the fallback, and it says so in the log when it is what found the pool.
+
 ## SA-MP versions
 
 Every client structure offset is version-specific, so the mod refuses to read
@@ -555,9 +576,10 @@ Three findings cost a day between them and are worth not rediscovering:
 
 
 Working: the frame hook, the game-thread bridge, the MCP server, the overlay,
-the world reading and the chat log described above, and the standable /
-walkable / route planning that reads the game's path graph and asks its
-collision.
+the world reading and the chat log described above - including on a server
+where nobody else is connected - and the standable / walkable / route planning
+that reads the game's path graph and asks its collision. `read_memory` reads a
+run of words by address when a layout has to be settled by hand.
 
 Not yet: making the character walk the route. That is input synthesis, and it
 sits on top of everything above.

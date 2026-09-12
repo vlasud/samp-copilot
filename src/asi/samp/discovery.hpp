@@ -44,4 +44,15 @@ ReportOutcome WriteStructureReport(const std::string& needle = {});
 // True once a report has been written, so the automatic attempt stops.
 bool report_written();
 
+// Game thread only. Reads a run of words by address and says what each one
+// plausibly is, with the same classification the report uses. The hand lens
+// for a layout the shape search could not settle by itself: cheap, explicit,
+// and nothing in the module reads the world through it.
+//
+// `address` is hex ("0x048B63A0") or decimal; `stride` is the bytes between
+// the words read, so an array of records can be stepped along instead of read
+// whole; `as_text` also reads each word's own bytes as text, which is how an
+// array of names gives itself away.
+json ReadWords(const std::string& address, int words, int stride, bool as_text);
+
 }  // namespace gtabot::samp
